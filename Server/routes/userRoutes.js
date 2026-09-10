@@ -2,6 +2,9 @@ import express from "express";
 import {
   registerUser,
   loginUser,
+  loginWithPhoneOtp,
+  sendOtp,
+  verifyOtp,
   getUserProfile,
   updateUserProfile,
   addAddress,
@@ -16,6 +19,9 @@ const router = express.Router();
 // Public auth routes
 router.post("/register", registerUser);
 router.post("/login", loginUser);
+router.post("/login-with-otp", loginWithPhoneOtp);
+router.post("/send-otp", sendOtp);
+router.post("/verify-otp", verifyOtp);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
 

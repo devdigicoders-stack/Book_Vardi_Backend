@@ -14,12 +14,30 @@ const addressSchema = new mongoose.Schema({
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: [true, "Name is required"], trim: true },
-    email: { type: String, required: [true, "Email is required"], unique: true, lowercase: true, trim: true },
+    email: {
+      type: String,
+      default: "",
+      lowercase: true,
+      trim: true,
+      unique: true,
+      sparse: true
+    },
     password: { type: String, required: [true, "Password is required"], minlength: 6 },
-    phone: { type: String, default: "", trim: true },
+    phone: {
+      type: String,
+      required: [true, "Phone is required"],
+      unique: true,
+      trim: true,
+      sparse: true
+    },
     avatar: { type: String, default: "" },
     role: { type: String, enum: ["user", "admin"], default: "user" },
     status: { type: String, enum: ["active", "inactive", "blocked"], default: "active" },
+    institution: { type: String, default: "" },
+    studentId: { type: String, default: "" },
+    phoneVerified: { type: Boolean, default: false },
+    otpCode: { type: String, default: "" },
+    otpExpiresAt: { type: Date, default: null },
     resetPasswordToken: { type: String, default: "" },
     resetPasswordExpires: { type: Date, default: null },
     addresses: [addressSchema]
