@@ -158,13 +158,8 @@ export const clearCart = async (req, res) => {
     cart.items = [];
     await cart.save();
 
-    console.log("==========================================");
-    console.log(`✅ [DELETE /api/cart/clear] Cart cleared in MongoDB DB for user: ${userPhone || userId || "Guest"}`);
-    console.log("==========================================");
-
     return res.json({ message: "Cart cleared", cart });
   } catch (error) {
-    console.error("❌ [DELETE /api/cart/clear] Error:", error.message);
     return res.status(500).json({ message: "Failed to clear cart", error: error.message });
   }
 };

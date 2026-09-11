@@ -323,18 +323,11 @@ export const getUserProfile = async (req, res) => {
   try {
     const user = await findUserByIdentifier(req);
     if (!user) {
-      console.log("❌ [GET /api/users/profile] User not found in DB");
       return res.status(404).json({ message: "User not found" });
     }
 
-    console.log("==========================================");
-    console.log(`✅ [GET /api/users/profile] Profile fetched for user: ${user.name || "Student"} (${user.phone || user.email})`);
-    console.log("RETRIEVED USER ADDRESSES FROM DB:", JSON.stringify(user.addresses || [], null, 2));
-    console.log("==========================================");
-
     res.json(user);
   } catch (error) {
-    console.error("❌ [GET /api/users/profile] Error:", error.message);
     res.status(500).json({ message: "Failed to fetch profile", error: error.message });
   }
 };
@@ -344,7 +337,6 @@ export const updateUserProfile = async (req, res) => {
   try {
     const user = await findUserByIdentifier(req);
     if (!user) {
-      console.log("❌ [PUT /api/users/profile] User not found in DB");
       return res.status(404).json({ message: "User not found" });
     }
 
@@ -362,11 +354,6 @@ export const updateUserProfile = async (req, res) => {
 
     await user.save();
 
-    console.log("==========================================");
-    console.log(`✅ [PUT /api/users/profile] Updated profile for user: ${user.name} (${user.phone})`);
-    console.log("SAVED USER ADDRESSES IN DB:", JSON.stringify(user.addresses || [], null, 2));
-    console.log("==========================================");
-
     return res.json({
       message: "Profile updated successfully in DB",
       user: {
@@ -383,7 +370,6 @@ export const updateUserProfile = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("❌ [PUT /api/users/profile] Error:", error.message);
     return res.status(500).json({ message: "Failed to update profile", error: error.message });
   }
 };
@@ -393,14 +379,10 @@ export const addAddress = async (req, res) => {
   try {
     const user = await findUserByIdentifier(req);
     if (!user) {
-      console.log("❌ [POST /api/users/addresses] User not found in DB");
       return res.status(404).json({ message: "User not found" });
     }
 
     const addrData = req.body;
-    console.log("==========================================");
-    console.log(`📥 [POST /api/users/addresses] Request received for user: ${user.name || "Student"} (${user.phone || user.email})`);
-    console.log("RAW ADDRESS PAYLOAD SENT FROM FRONTEND:", JSON.stringify(addrData, null, 2));
 
     const newAddr = {
       id: addrData.id || Date.now(),
@@ -424,13 +406,8 @@ export const addAddress = async (req, res) => {
     user.addresses.push(newAddr);
     await user.save();
 
-    console.log("✅ SAVED ADDRESS IN MONGODB SCHEMA:", JSON.stringify(newAddr, null, 2));
-    console.log("TOTAL USER ADDRESSES IN DB NOW:", JSON.stringify(user.addresses, null, 2));
-    console.log("==========================================");
-
     return res.status(201).json({ message: "Address saved in DB", addresses: user.addresses, user });
   } catch (error) {
-    console.error("❌ [POST /api/users/addresses] Error:", error.message);
     return res.status(500).json({ message: "Failed to add address", error: error.message });
   }
 };
@@ -440,20 +417,14 @@ export const updateAddress = async (req, res) => {
   try {
     const user = await findUserByIdentifier(req);
     if (!user) {
-      console.log("❌ [PUT /api/users/addresses] User not found in DB");
       return res.status(404).json({ message: "User not found" });
     }
 
     const { addressId } = req.params;
     const addrData = req.body;
 
-    console.log("==========================================");
-    console.log(`📥 [PUT /api/users/addresses/${addressId}] Request received for user: ${user.name || "Student"}`);
-    console.log("RAW EDIT ADDRESS PAYLOAD SENT FROM FRONTEND:", JSON.stringify(addrData, null, 2));
-
     const targetIdx = user.addresses.findIndex((a) => String(a.id || a._id) === String(addressId));
     if (targetIdx === -1) {
-      console.log(`❌ Address ID ${addressId} not found in user's saved addresses`);
       return res.status(404).json({ message: "Address not found" });
     }
 
@@ -481,13 +452,8 @@ export const updateAddress = async (req, res) => {
     user.addresses[targetIdx] = updatedAddr;
     await user.save();
 
-    console.log("✅ UPDATED ADDRESS IN MONGODB SCHEMA:", JSON.stringify(updatedAddr, null, 2));
-    console.log("TOTAL USER ADDRESSES IN DB NOW:", JSON.stringify(user.addresses, null, 2));
-    console.log("==========================================");
-
     return res.json({ message: "Address updated in DB", addresses: user.addresses, user });
   } catch (error) {
-    console.error("❌ [PUT /api/users/addresses] Error:", error.message);
     return res.status(500).json({ message: "Failed to update address", error: error.message });
   }
 };
@@ -497,20 +463,15 @@ export const deleteAddress = async (req, res) => {
   try {
     const user = await findUserByIdentifier(req);
     if (!user) {
-      console.log("❌ [DELETE /api/users/addresses] User not found in DB");
       return res.status(404).json({ message: "User not found" });
     }
 
     const { addressId } = req.params;
-    console.log(`📥 [DELETE /api/users/addresses/${addressId}] Request received for user: ${user.name}`);
     user.addresses = user.addresses.filter((a) => String(a.id || a._id) !== String(addressId));
     await user.save();
 
-    console.log("✅ REMAINING ADDRESSES IN DB:", JSON.stringify(user.addresses, null, 2));
-
     return res.json({ message: "Address deleted from DB", addresses: user.addresses });
   } catch (error) {
-    console.error("❌ [DELETE /api/users/addresses] Error:", error.message);
     return res.status(500).json({ message: "Failed to delete address", error: error.message });
   }
 };

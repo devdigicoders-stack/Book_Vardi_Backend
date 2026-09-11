@@ -75,8 +75,6 @@ export const getMyOrders = async (req, res) => {
       orders = await Order.find({ $or: query }).sort({ createdAt: -1 });
     }
 
-    console.log(`✅ [GET /api/orders/my-orders] Found ${orders.length} orders in DB for user identifier: ${userPhone || userEmail || user?._id || "unknown"}`);
-
     const formattedOrders = orders.map((ord) => ({
       id: ord.id || ord.orderId || ord._id,
       date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
@@ -209,14 +207,8 @@ export const createOrder = async (req, res) => {
 
     await newOrder.save();
 
-    console.log("==========================================");
-    console.log(`📥 [POST /api/orders] Order placed for user: ${resolvedName} (${resolvedPhone || resolvedEmail || "Guest"})`);
-    console.log("SAVED ORDER IN MONGODB SCHEMA:", JSON.stringify(newOrder, null, 2));
-    console.log("==========================================");
-
     return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
-    console.error("❌ [POST /api/orders] Error:", error.message);
     return res.status(400).json({ message: "Failed to create order", error: error.message });
   }
 };
