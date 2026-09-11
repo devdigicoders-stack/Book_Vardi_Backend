@@ -2,22 +2,30 @@ import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
 const addressSchema = new mongoose.Schema({
-  street: { type: String, required: true },
-  city: { type: String, required: true },
-  state: { type: String, required: true },
-  pincode: { type: String, required: true },
+  id: { type: mongoose.Schema.Types.Mixed },
+  name: { type: String, default: "" },
+  phone: { type: String, default: "" },
+  addressLine: { type: String, default: "" },
+  street: { type: String, default: "" },
+  city: { type: String, default: "" },
+  state: { type: String, default: "" },
+  pincode: { type: String, default: "" },
   landmark: { type: String, default: "" },
-  addressType: { type: String, enum: ["Home", "Work", "Other"], default: "Home" },
+  type: { type: String, default: "Home" },
+  addressType: { type: String, default: "Home" },
   isDefault: { type: Boolean, default: false }
 });
 
 const userSchema = new mongoose.Schema(
   {
-    name: { type: String, required: [true, "Name is required"], trim: true },
-    email: { type: String, required: [true, "Email is required"], unique: true, lowercase: true, trim: true },
-    password: { type: String, required: [true, "Password is required"], minlength: 6 },
+    name: { type: String, default: "", trim: true },
+    email: { type: String, default: "", lowercase: true, trim: true },
+    password: { type: String, default: "BookVardi@123" },
     phone: { type: String, default: "", trim: true },
     avatar: { type: String, default: "" },
+    institution: { type: String, default: "", trim: true },
+    studentId: { type: String, default: "", trim: true },
+    standard: { type: String, default: "", trim: true },
     role: { type: String, enum: ["user", "admin"], default: "user" },
     status: { type: String, enum: ["active", "inactive", "blocked"], default: "active" },
     resetPasswordToken: { type: String, default: "" },

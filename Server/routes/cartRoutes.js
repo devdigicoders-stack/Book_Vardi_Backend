@@ -6,11 +6,11 @@ import {
   removeFromCart,
   clearCart
 } from "../controllers/cartController.js";
-import { protectUser } from "../middlewares/auth.js";
+import { optionalUserAuth } from "../middlewares/auth.js";
 
 const router = express.Router();
 
-router.use(protectUser); // All cart actions require customer auth
+router.use(optionalUserAuth);
 
 router.get("/", getCart);
 router.post("/add", addToCart);
