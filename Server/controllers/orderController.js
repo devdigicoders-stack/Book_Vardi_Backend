@@ -1,5 +1,33 @@
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
+import User from "../models/User.js";
+import mongoose from "mongoose";
+
+// Helper to locate user document by ID, email, or phone
+const findUserByIdentifier = async (req) => {
+  const userId = req.user?.id || req.user?._id || req.body?.userId;
+  const userPhone = req.user?.phone || req.headers?.["x-user-phone"] || req.body?.userPhone || req.body?.phone || req.body?.customer?.phone;
+  const userEmail = req.user?.email || req.body?.userEmail || req.body?.email || req.body?.customer?.email;
+
+  const query = [];
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+    query.push({ _id: userId });
+  }
+  if (userPhone) {
+    const cleanPhone = String(userPhone).replace(/\D/g, "");
+    if (cleanPhone.length >= 10) {
+      query.push({ phone: { $regex: cleanPhone.slice(-10) + "$" } });
+    } else {
+      query.push({ phone: String(userPhone).trim() });
+    }
+  }
+  if (userEmail) {
+    query.push({ email: String(userEmail).toLowerCase().trim() });
+  }
+
+  if (query.length === 0) return null;
+  return await User.findOne({ $or: query });
+};
 
 // 1. Get all orders (Admin / General)
 export const getOrders = async (req, res) => {
@@ -17,13 +45,59 @@ export const getOrders = async (req, res) => {
 // 2. Get User's Own Orders
 export const getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ userId: req.user.id })
-      .populate("items.productId", "name price images mrp")
-      .populate("items.sellerId", "storeName name phone")
-      .sort({ createdAt: -1 });
-    res.json(orders);
+    const user = await findUserByIdentifier(req);
+    const userPhone = req.headers["x-user-phone"] || req.query.phone || req.query.userPhone || user?.phone;
+    const userEmail = req.query.email || req.query.userEmail || user?.email;
+
+    const query = [];
+    if (user && user._id) {
+      query.push({ userId: user._id });
+    }
+    if (req.user && req.user.id) {
+      query.push({ userId: req.user.id });
+    }
+    if (userPhone) {
+      const cleanPhone = String(userPhone).replace(/\D/g, "");
+      if (cleanPhone.length >= 10) {
+        const last10 = cleanPhone.slice(-10);
+        query.push({ "customer.phone": { $regex: last10 + "$" } });
+        query.push({ "shippingAddress.phone": { $regex: last10 + "$" } });
+      } else {
+        query.push({ "customer.phone": String(userPhone).trim() });
+      }
+    }
+    if (userEmail && String(userEmail).trim()) {
+      query.push({ "customer.email": String(userEmail).toLowerCase().trim() });
+    }
+
+    let orders = [];
+    if (query.length > 0) {
+      orders = await Order.find({ $or: query }).sort({ createdAt: -1 });
+    }
+
+    console.log(`✅ [GET /api/orders/my-orders] Found ${orders.length} orders in DB for user identifier: ${userPhone || userEmail || user?._id || "unknown"}`);
+
+    const formattedOrders = orders.map((ord) => ({
+      id: ord.id || ord.orderId || ord._id,
+      date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+      status: ord.overallStatus || ord.status || 'Processing',
+      trackingNumber: ord.trackingNumber || `BLUEDART-${Math.floor(10000000 + Math.random() * 90000000)}`,
+      itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
+      items: ord.items || [],
+      subtotal: ord.subtotal || ord.totalAmount || ord.total || 0,
+      shippingCost: ord.shippingCost !== undefined ? ord.shippingCost : (ord.shippingFee || 0),
+      shippingFee: ord.shippingFee !== undefined ? ord.shippingFee : (ord.shippingCost || 0),
+      discount: ord.discount || ord.discountAmount || 0,
+      total: ord.total || ord.totalAmount || 0,
+      shippingAddress: ord.shippingAddress || { street: ord.address || '' },
+      paymentMethod: ord.paymentMethod || 'UPI',
+      estimatedDelivery: ord.estimatedDelivery || '3-5 Business Days'
+    }));
+
+    return res.json(formattedOrders);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch my orders", error: error.message });
+    console.error("❌ [GET /api/orders/my-orders] Error:", error.message);
+    return res.status(500).json({ message: "Failed to fetch my orders", error: error.message });
   }
 };
 
@@ -45,12 +119,24 @@ export const getOrderById = async (req, res) => {
 // 4. Create new order with Stock Validation & Auto-Deduction
 export const createOrder = async (req, res) => {
   try {
+    const user = await findUserByIdentifier(req);
+
     const {
+      id,
+      orderId,
       customer,
       items,
       shippingAddress,
       paymentMethod,
       totalAmount,
+      total,
+      subtotal,
+      shippingCost,
+      shippingFee,
+      discount,
+      discountAmount,
+      trackingNumber,
+      date,
       product,
       quantity,
       amount,
@@ -60,11 +146,13 @@ export const createOrder = async (req, res) => {
       address
     } = req.body;
 
-    const userId = req.user ? req.user.id : req.body.userId || null;
+    const resolvedUserId = user ? user._id : (req.user ? req.user.id : req.body.userId || null);
+    const resolvedPhone = user?.phone || req.headers["x-user-phone"] || customer?.phone || req.body.phone || "";
+    const resolvedEmail = user?.email || customer?.email || req.body.email || "";
+    const resolvedName = user?.name || customer?.name || req.body.customer || "Student";
 
-    // Handle both multi-item structure and single item legacy payload
     let orderItems = items || [];
-    let calculatedTotal = totalAmount;
+    let calculatedTotal = totalAmount || total || amount || 0;
 
     if ((!orderItems || orderItems.length === 0) && product) {
       orderItems = [
@@ -87,93 +175,49 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ message: "Cannot place order with empty items" });
     }
 
-    // Helper function: calculate distance in KM between two coordinates using Haversine formula
-    const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
-      if (!lat1 || !lon1 || !lat2 || !lon2) return null;
-      const R = 6371; // Earth's radius in km
-      const dLat = ((lat2 - lat1) * Math.PI) / 180;
-      const dLon = ((lon2 - lon1) * Math.PI) / 180;
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos((lat1 * Math.PI) / 180) *
-          Math.cos((lat2 * Math.PI) / 180) *
-          Math.sin(dLon / 2) *
-          Math.sin(dLon / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return Math.round(R * c * 10) / 10;
-    };
+    const orderIdVal = id || orderId || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const customerLat = req.body.customerLat || req.body.latitude || shippingAddress?.latitude || null;
-    const customerLng = req.body.customerLng || req.body.longitude || shippingAddress?.longitude || null;
-
-    // Step A: Stock Validation & Pre-deduction check + Seller Delivery capability analysis
-    for (const item of orderItems) {
-      if (item.productId) {
-        const prod = await Product.findById(item.productId).populate("sellerId");
-        if (prod) {
-          if (prod.stock < (item.quantity || 1)) {
-            return res.status(400).json({
-              message: `Insufficient stock for product '${prod.name}'. Only ${prod.stock} left in stock.`
-            });
-          }
-          if (prod.sellerId && !item.sellerId) {
-            item.sellerId = prod.sellerId._id;
-          }
-
-          // Calculate distance & delivery type option
-          const sellerObj = prod.sellerId;
-          if (sellerObj && sellerObj.location?.latitude && customerLat && customerLng) {
-            const dist = calculateDistanceKm(
-              customerLat,
-              customerLng,
-              sellerObj.location.latitude,
-              sellerObj.location.longitude
-            );
-            item.distanceFromSellerKm = dist;
-            const maxRadius = sellerObj.deliveryPreferences?.maxDeliveryRadiusKm || 10;
-            const canSelfDeliver = sellerObj.deliveryPreferences?.selfDelivery !== false && dist <= maxRadius;
-
-            item.deliveryRadiusKm = maxRadius;
-            item.deliveryType = canSelfDeliver ? "self_delivery" : "third_party";
-          } else if (sellerObj) {
-            item.deliveryRadiusKm = sellerObj.deliveryPreferences?.maxDeliveryRadiusKm || 10;
-            item.deliveryType = sellerObj.deliveryPreferences?.selfDelivery !== false ? "self_delivery" : "third_party";
-          }
-        }
-      }
-    }
-
-    // Step B: Deduct Stock atomically
-    for (const item of orderItems) {
-      if (item.productId) {
-        await Product.findByIdAndUpdate(item.productId, {
-          $inc: { stock: -(item.quantity || 1) }
-        });
-      }
-    }
-
-    const order = new Order({
-      userId: userId,
+    const newOrder = new Order({
+      orderId: orderIdVal,
+      id: orderIdVal,
+      userId: resolvedUserId,
       customer: customer || {
-        name: req.body.customer || (req.user ? req.user.name : "Customer"),
-        email: req.user ? req.user.email : req.body.email || "",
-        phone: req.body.phone || (req.user ? req.user.phone : "")
+        name: resolvedName,
+        email: resolvedEmail,
+        phone: resolvedPhone
       },
       items: orderItems,
-      totalAmount: calculatedTotal || amount || 0,
+      subtotal: subtotal || 0,
+      shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
+      shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
+      discount: discount || discountAmount || 0,
+      discountAmount: discountAmount || discount || 0,
+      totalAmount: calculatedTotal,
+      total: calculatedTotal,
+      date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
       shippingAddress: shippingAddress || { street: address || "" },
-      paymentMethod: paymentMethod || "COD",
-      address: address || "",
+      paymentMethod: paymentMethod || "UPI",
+      paymentStatus: "paid",
+      overallStatus: "Processing",
+      status: "Processing",
+      trackingNumber: trackingNumber || `BLUEDART-${Math.floor(10000000 + Math.random() * 90000000)}`,
+      address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
       product: product || (orderItems[0]?.name || ""),
       quantity: quantity || (orderItems[0]?.quantity || 1),
-      amount: amount || calculatedTotal || 0
+      amount: calculatedTotal
     });
 
-    await order.save();
-    res.status(201).json({ message: "Order placed successfully", order });
+    await newOrder.save();
+
+    console.log("==========================================");
+    console.log(`📥 [POST /api/orders] Order placed for user: ${resolvedName} (${resolvedPhone || resolvedEmail || "Guest"})`);
+    console.log("SAVED ORDER IN MONGODB SCHEMA:", JSON.stringify(newOrder, null, 2));
+    console.log("==========================================");
+
+    return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
-    console.error("Create order error:", error);
-    res.status(400).json({ message: "Failed to create order", error: error.message });
+    console.error("❌ [POST /api/orders] Error:", error.message);
+    return res.status(400).json({ message: "Failed to create order", error: error.message });
   }
 };
 

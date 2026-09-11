@@ -151,15 +151,20 @@ export const removeFromCart = async (req, res) => {
 // 5. Clear Entire Cart
 export const clearCart = async (req, res) => {
   try {
-    const userId = req.user?.id || req.headers["x-user-id"];
-    const userPhone = req.user?.phone || req.headers["x-user-phone"];
+    const userId = req.user?.id || req.headers["x-user-id"] || req.body?.userId;
+    const userPhone = req.user?.phone || req.headers["x-user-phone"] || req.body?.phone || req.body?.userPhone;
 
     let cart = await getOrCreateCart(userId, userPhone);
     cart.items = [];
     await cart.save();
 
+    console.log("==========================================");
+    console.log(`✅ [DELETE /api/cart/clear] Cart cleared in MongoDB DB for user: ${userPhone || userId || "Guest"}`);
+    console.log("==========================================");
+
     return res.json({ message: "Cart cleared", cart });
   } catch (error) {
+    console.error("❌ [DELETE /api/cart/clear] Error:", error.message);
     return res.status(500).json({ message: "Failed to clear cart", error: error.message });
   }
 };

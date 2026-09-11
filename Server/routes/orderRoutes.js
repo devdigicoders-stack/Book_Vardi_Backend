@@ -13,7 +13,7 @@ import { authenticateToken, protectUser, optionalUserAuth } from "../middlewares
 
 const router = express.Router();
 
-router.get("/my-orders", protectUser, getMyOrders);
+router.get("/my-orders", optionalUserAuth, getMyOrders);
 router.get("/track/:orderId", trackOrder); // Public & User order tracking by Order ID
 router.get("/:id/invoice", optionalUserAuth, downloadInvoice);
 router.get("/", authenticateToken, getOrders);

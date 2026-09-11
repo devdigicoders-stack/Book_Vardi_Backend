@@ -1,28 +1,27 @@
 import mongoose from "mongoose";
 
 const orderItemSchema = new mongoose.Schema({
+  id: { type: mongoose.Schema.Types.Mixed },
   productId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Product"
+    type: mongoose.Schema.Types.Mixed
   },
   sellerId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Seller"
+    type: mongoose.Schema.Types.Mixed
   },
   name: { type: String, required: true },
   price: { type: Number, required: true },
-  size: { type: String, default: "" }, // Selected product size (e.g. "28", "30", "M", "L")
-  age: { type: String, default: "" }, // Selected product age / age-group (e.g. "6-8 Years")
+  image: { type: String, default: "" },
+  category: { type: String, default: "Stationery" },
+  size: { type: String, default: "" },
+  age: { type: String, default: "" },
   color: { type: String, default: "" },
   discountPercentage: { type: Number, default: 0 },
   offerDiscount: { type: Number, default: 0 },
   finalPrice: { type: Number, default: function () { return this.price; } },
-  quantity: { type: Number, required: true, min: 1 },
-  total: { type: Number, required: true },
-  // Delivery Fulfillment Options for Seller
+  quantity: { type: Number, required: true, min: 1, default: 1 },
+  total: { type: Number, default: function () { return (this.price || 0) * (this.quantity || 1); } },
   deliveryType: {
     type: String,
-    enum: ["self_delivery", "third_party", "pending_choice"],
     default: "pending_choice"
   },
   deliveryRadiusKm: {
@@ -34,7 +33,7 @@ const orderItemSchema = new mongoose.Schema({
     default: null
   },
   thirdPartyDetails: {
-    courierName: { type: String, default: "" }, // e.g. Delhivery, Bluedart, Shiprocket
+    courierName: { type: String, default: "" },
     trackingNumber: { type: String, default: "" },
     trackingUrl: { type: String, default: "" },
     estimatedDeliveryDate: { type: Date, default: null }
@@ -47,7 +46,6 @@ const orderItemSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["pending", "processing", "packed", "shipped", "delivered", "cancelled"],
     default: "pending"
   }
 });
@@ -74,7 +72,7 @@ const timelineEventSchema = new mongoose.Schema({
     default: Date.now
   },
   updatedBy: {
-    type: String, // 'User', 'Seller', 'Admin', 'DeliveryBoy', 'System'
+    type: String,
     default: "System"
   }
 });
@@ -83,11 +81,11 @@ const orderSchema = new mongoose.Schema(
   {
     orderId: {
       type: String,
-      unique: true,
-      default: () => "SK-" + Date.now().toString(36).toUpperCase()
+      default: () => "SC-" + Math.floor(1000 + Math.random() * 9000)
     },
+    id: { type: String },
     userId: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: mongoose.Schema.Types.Mixed,
       ref: "User"
     },
     customer: {
@@ -96,26 +94,29 @@ const orderSchema = new mongoose.Schema(
       phone: { type: String, default: "" }
     },
     items: [orderItemSchema],
+    subtotal: { type: Number, default: 0 },
+    shippingCost: { type: Number, default: 0 },
+    shippingFee: { type: Number, default: 0 },
+    discount: { type: Number, default: 0 },
+    discountAmount: { type: Number, default: 0 },
     totalAmount: {
       type: Number,
       required: true,
       min: 0
     },
+    total: { type: Number, default: 0 },
+    date: { type: String, default: "" },
     shippingAddress: {
-      street: { type: String, default: "" },
-      city: { type: String, default: "" },
-      state: { type: String, default: "" },
-      pincode: { type: String, default: "" }
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
     },
     paymentMethod: {
       type: String,
-      enum: ["COD", "Online", "Card", "UPI", "Razorpay"],
-      default: "COD"
+      default: "UPI"
     },
     paymentStatus: {
       type: String,
-      enum: ["pending", "paid", "failed", "refunded"],
-      default: "pending"
+      default: "paid"
     },
     razorpayOrderId: {
       type: String,
@@ -125,43 +126,31 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: ""
     },
-    // Standard 6-Step Enterprise Status Lifecycle:
-    // 1. placed -> 2. confirmed -> 3. packed -> 4. shipped -> 5. out_for_delivery -> 6. delivered (or cancelled / returned)
     overallStatus: {
       type: String,
-      enum: [
-        "placed",
-        "confirmed",
-        "processing",
-        "packed",
-        "shipped",
-        "out_for_delivery",
-        "delivered",
-        "cancelled",
-        "returned"
-      ],
-      default: "placed"
+      default: "Processing"
     },
+    trackingNumber: { type: String, default: "" },
     estimatedDeliveryDate: {
       type: Date,
-      default: () => new Date(Date.now() + 3 * 24 * 60 * 60 * 1000) // Default 3 days
+      default: () => new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
     },
+    estimatedDelivery: { type: String, default: "3-5 Business Days" },
     cancellationReason: {
       type: String,
       default: ""
     },
-    // Chronological tracking timeline
     timeline: [timelineEventSchema],
-    // Backwards compatibility simple fields
     address: { type: String },
     product: { type: String },
     quantity: { type: Number },
     amount: { type: Number },
-    status: { type: String, default: "placed" },
+    status: { type: String, default: "Processing" },
     deliveryBoy: { type: String }
   },
   {
-    timestamps: true
+    timestamps: true,
+    strict: false
   }
 );
 
