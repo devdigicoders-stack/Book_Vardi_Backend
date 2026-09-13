@@ -15,3 +15,8 @@ build/
 coverage/
 .nyc_output/
 scripts/
+
+# User uploaded files
+uploads/**
+!uploads/**/
+!uploads/**/.gitkeep
