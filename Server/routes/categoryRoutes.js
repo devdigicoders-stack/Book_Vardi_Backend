@@ -4,15 +4,26 @@ import authenticateToken from '../middlewares/auth.js';
 
 const router = express.Router();
 
-// Get all categories
-router.get('/', authenticateToken, async (req, res) => {
+// Get all categories (Public for header and store browsing)
+router.get('/', async (req, res) => {
   try {
-    const categories = await Category.find();
+    const categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
     res.json(categories);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+
+// Get category tree with subcategories (Public)
+router.get('/tree', async (req, res) => {
+  try {
+    const categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
+    res.json(categories);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 
 // Create category
 router.post('/', authenticateToken, async (req, res) => {

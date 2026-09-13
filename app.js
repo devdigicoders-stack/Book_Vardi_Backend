@@ -1,8 +1,18 @@
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import connectDB from "./config/db.js";
+
+// Ensure all upload directories exist on server startup
+["uploads", "uploads/avatars", "uploads/documents", "uploads/products"].forEach((dir) => {
+  const fullPath = path.join(process.cwd(), dir);
+  if (!fs.existsSync(fullPath)) {
+    fs.mkdirSync(fullPath, { recursive: true });
+  }
+});
+
 
 // Models & initial setup
 import Admin from "./Server/models/Admin.js";
@@ -27,12 +37,17 @@ import reviewRoutes from "./Server/routes/reviewRoutes.js";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 
+import { seedDatabaseIfEmpty } from "./Server/config/autoSeed.js";
+
 dotenv.config();
 
 const app = express();
 
 // 1. Connect to MongoDB
-connectDB();
+connectDB().then(() => {
+  seedDatabaseIfEmpty();
+}).catch(() => {});
+
 
 // 2. Create Default Admin if doesn't exist
 const initDefaultAdmin = async () => {

@@ -12,9 +12,11 @@ import {
   updateAddress,
   deleteAddress,
   forgotPassword,
-  resetPassword
+  resetPassword,
+  uploadUserAvatar
 } from "../controllers/userAuthController.js";
 import { protectUser, optionalUserAuth } from "../middlewares/auth.js";
+import { uploadAvatar } from "../middlewares/upload.js";
 
 const router = express.Router();
 
@@ -31,9 +33,11 @@ router.post("/reset-password", resetPassword);
 // Profile and Address routes (Supports both JWT and x-user-phone headers)
 router.get("/profile", optionalUserAuth, getUserProfile);
 router.put("/profile", optionalUserAuth, updateUserProfile);
+router.post("/upload-avatar", optionalUserAuth, uploadAvatar, uploadUserAvatar);
 router.post("/addresses", optionalUserAuth, addAddress);
 router.put("/addresses/:addressId", optionalUserAuth, updateAddress);
 router.delete("/addresses/:addressId", optionalUserAuth, deleteAddress);
+
 
 export default router;
 

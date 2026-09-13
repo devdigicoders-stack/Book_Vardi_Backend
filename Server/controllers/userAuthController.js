@@ -541,3 +541,37 @@ export const resetPassword = async (req, res) => {
   }
 };
 
+// 10. Upload Profile Picture / Avatar
+export const uploadUserAvatar = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No avatar image file provided" });
+    }
+
+    const avatarPath = `/uploads/avatars/${req.file.filename}`;
+    const user = await findUserByIdentifier(req);
+
+    if (user) {
+      user.avatar = avatarPath;
+      await user.save();
+    }
+
+    return res.json({
+      message: "Profile photo uploaded and compressed to WebP successfully",
+      avatarUrl: avatarPath,
+      user: user
+        ? {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            phone: user.phone,
+            avatar: user.avatar
+          }
+        : null
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to upload avatar photo", error: error.message });
+  }
+};
+
+
