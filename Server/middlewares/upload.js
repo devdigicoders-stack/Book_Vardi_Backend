@@ -64,6 +64,21 @@ const imageFileFilter = (req, file, cb) => {
   }
 };
 
+// Storage for User Avatar Photos
+const avatarStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(process.cwd(), "uploads", "avatars");
+    createDirIfNotExists(uploadDir);
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname).toLowerCase();
+    const finalExt = ext === ".webp" ? ".webp" : ext || ".webp";
+    cb(null, `avatar-${uniqueSuffix}${finalExt}`);
+  }
+});
+
 // Multer upload instances
 export const uploadSellerDocs = multer({
   storage: documentStorage,
@@ -81,3 +96,10 @@ export const uploadProductImages = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit per image
   fileFilter: imageFileFilter
 }).array("images", 5); // Up to 5 product images
+
+export const uploadAvatar = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: imageFileFilter
+}).single("avatar");
+

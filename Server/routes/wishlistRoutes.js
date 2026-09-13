@@ -4,11 +4,11 @@ import {
   toggleWishlist,
   removeFromWishlist
 } from "../controllers/wishlistController.js";
-import { protectUser } from "../middlewares/auth.js";
+import { optionalUserAuth } from "../middlewares/auth.js";
 
 const router = express.Router();
 
-router.use(protectUser); // Wishlist requires logged-in user
+router.use(optionalUserAuth);
 
 router.get("/", getWishlist);
 router.post("/toggle", toggleWishlist);
