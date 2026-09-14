@@ -157,12 +157,30 @@ const productSchema = new mongoose.Schema(
       type: String,
       enum: ["available", "out-of-stock", "discontinued"],
       default: "available"
+    },
+    // Admin Approval Lifecycle
+    approvalStatus: {
+      type: String,
+      enum: ["Approved", "Pending", "Rejected"],
+      default: "Pending"
+    },
+    approvalComment: {
+      type: String,
+      default: ""
+    },
+    rejectionReason: {
+      type: String,
+      default: ""
     }
   },
   {
     timestamps: true
   }
 );
+
+// Indexes
+productSchema.index({ sellerId: 1 });
+productSchema.index({ category: 1, approvalStatus: 1 });
 
 // Pre-save hook to calculate discountPercentage, offerPrice automatically & set MRP fallback
 productSchema.pre("save", function (next) {

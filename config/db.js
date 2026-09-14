@@ -1,16 +1,31 @@
 import mongoose from "mongoose";
 
 export const connectDB = async () => {
-  const uri =
-    process.env.MONGODB_URI ||
-    process.env.MONGO_URI ||
-    "mongodb://127.0.0.1:27017/schoolkart_db";
+  const primaryUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  const localUri = "mongodb://127.0.0.1:27017/bookvardi_db";
+
+  if (primaryUri) {
+    try {
+      await mongoose.connect(primaryUri, {
+        serverSelectionTimeoutMS: 5000,
+        connectTimeoutMS: 5000
+      });
+      console.log("✅ MongoDB Connected successfully to Atlas:", primaryUri.split("@").pop().split("?")[0]);
+      return;
+    } catch (error) {
+      console.warn("⚠️ MongoDB Atlas Connection Failed (" + error.message + "). Attempting local fallback...");
+    }
+  }
 
   try {
-    await mongoose.connect(uri);
-    console.log("MongoDB Connected successfully to:", uri.split("@").pop().split("?")[0]);
+    await mongoose.connect(localUri, {
+      serverSelectionTimeoutMS: 3000,
+      connectTimeoutMS: 3000
+    });
+    console.log("✅ MongoDB Connected successfully to Local DB:", localUri);
   } catch (error) {
-    console.error("MongoDB Connection Error:", error.message);
+    console.error("⚠️ MongoDB Connection Error:", error.message);
+    console.warn("ℹ️ Server operating in offline mock mode.");
   }
 };
 

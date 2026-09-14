@@ -66,6 +66,8 @@ export const registerSeller = async (req, res) => {
     const panDoc = files.panDoc?.[0] ? `/uploads/documents/${files.panDoc[0].filename}` : "";
     const passbookDoc = files.passbookDoc?.[0] ? `/uploads/documents/${files.passbookDoc[0].filename}` : "";
     const shopDoc = files.shopDoc?.[0] ? `/uploads/documents/${files.shopDoc[0].filename}` : "";
+    const addressProofDoc = files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : "";
+    const profilePhoto = files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : (files.avatar?.[0] ? `/uploads/documents/${files.avatar[0].filename}` : "");
 
     // Parse coordinates if provided
     const lat = latitude ? parseFloat(latitude) : null;
@@ -113,7 +115,9 @@ export const registerSeller = async (req, res) => {
         panNumber: panNumber || "",
         panDoc,
         passbookDoc,
-        shopDoc
+        shopDoc,
+        addressProofDoc,
+        profilePhoto
       },
       status: "pending" // Default state: waiting for Admin review
     });
@@ -280,6 +284,58 @@ export const updateSellerProfile = async (req, res) => {
   }
 };
 
+// Get Seller Store Operations Settings
+export const getSellerSettings = async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.user.id).select(
+      "storeName email phone address city state pincode gstNumber deliveryPreferences bankDetails storeDetails"
+    );
+    if (!seller) return res.status(404).json({ message: "Seller not found" });
+
+    res.json({
+      storeName: seller.storeName,
+      legalName: seller.name,
+      email: seller.email,
+      phone: seller.phone,
+      gstin: seller.gstNumber,
+      address: seller.address,
+      city: seller.city,
+      pincode: seller.pincode,
+      deliveryPreferences: seller.deliveryPreferences,
+      bankDetails: seller.bankDetails,
+      storeDetails: seller.storeDetails || {}
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch seller settings", error: error.message });
+  }
+};
+
+// Update Seller Store Operations Settings
+export const updateSellerSettings = async (req, res) => {
+  try {
+    const { storeName, email, phone, gstin, address, city, pincode, deliveryPreferences, storeDetails } = req.body;
+    const updates = {};
+
+    if (storeName) updates.storeName = storeName;
+    if (phone) updates.phone = phone;
+    if (gstin) updates.gstNumber = gstin;
+    if (address) updates.address = address;
+    if (city) updates.city = city;
+    if (pincode) updates.pincode = pincode;
+    if (deliveryPreferences) updates.deliveryPreferences = deliveryPreferences;
+    if (storeDetails) updates.storeDetails = storeDetails;
+
+    const updatedSeller = await Seller.findByIdAndUpdate(req.user.id, updates, { new: true }).select("-password");
+    res.json({
+      success: true,
+      message: "Store settings updated successfully",
+      seller: updatedSeller
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update seller settings", error: error.message });
+  }
+};
+
 // Find Nearby Approved Sellers (Geo Proximity Search)
 export const getNearbySellers = async (req, res) => {
   try {
@@ -319,3 +375,236 @@ export const getNearbySellers = async (req, res) => {
     res.status(500).json({ message: "Failed to search nearby sellers", error: error.message });
   }
 };
+
+// Send Phone OTP for Seller Login & Onboarding
+export const sendSellerPhoneOtp = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ message: "Phone number is required." });
+    }
+    // Return testing OTP 123456
+    res.json({
+      success: true,
+      message: `OTP code 123456 dispatched to +91 ${phone.replace(/\D/g, "")}`,
+      otp: "123456"
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to send OTP", error: error.message });
+  }
+};
+
+// Verify Phone OTP & Authenticate Seller
+export const verifySellerPhoneOtp = async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    const cleanPhone = (phone || "").replace(/\D/g, "");
+
+    if (!cleanPhone || cleanPhone.length < 8) {
+      return res.status(400).json({ message: "Please enter a valid mobile number." });
+    }
+
+    if (!otp || otp.trim() !== "123456") {
+      return res.status(400).json({ message: "Invalid OTP code. Please use testing code 123456." });
+    }
+
+    let seller = await Seller.findOne({ phone: { $regex: cleanPhone } });
+
+    if (!seller) {
+      // Auto-create pending seller shell for new phone registration
+      seller = new Seller({
+        name: "Merchant " + cleanPhone.slice(-4),
+        storeName: "Book Vardi Partner Store",
+        email: `seller_${cleanPhone}@bookvardi.in`,
+        phone: `+91 ${cleanPhone}`,
+        password: await bcrypt.hash("123456", 10),
+        address: "Registered Merchant Address",
+        city: "Delhi",
+        state: "Delhi",
+        pincode: "110001",
+        status: "pending"
+      });
+      await seller.save();
+    }
+
+    const token = jwt.sign(
+      { id: seller._id, email: seller.email, storeName: seller.storeName, role: "seller" },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    res.json({
+      success: true,
+      message: "Phone OTP verified successfully",
+      token,
+      sellerStatus: seller.status,
+      seller: {
+        id: seller._id,
+        name: seller.name,
+        storeName: seller.storeName,
+        email: seller.email,
+        phone: seller.phone,
+        status: seller.status
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "OTP verification failed", error: error.message });
+  }
+};
+
+// Get Application Status for Logged-in Seller
+export const getSellerApplicationStatus = async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.user.id).select("status storeName name phone rejectionReason");
+    if (!seller) return res.status(404).json({ message: "Seller not found" });
+
+    res.json({
+      sellerStatus: seller.status,
+      storeName: seller.storeName,
+      name: seller.name,
+      phone: seller.phone,
+      rejectionReason: seller.rejectionReason
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch status", error: error.message });
+  }
+};
+
+// Instant Admin Approval Testing Shortcut
+export const adminApproveSellerTest = async (req, res) => {
+  try {
+    const sellerId = req.user ? req.user.id : req.body.sellerId;
+    const seller = await Seller.findByIdAndUpdate(
+      sellerId,
+      { status: "approved", approvedAt: new Date() },
+      { new: true }
+    );
+    if (!seller) return res.status(404).json({ message: "Seller not found" });
+
+    res.json({
+      success: true,
+      message: "Seller status updated to approved!",
+      sellerStatus: seller.status
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Approval failed", error: error.message });
+  }
+};
+
+// Update Pending/Unapproved Seller 12-Step Application Details
+export const updateSellerApplication = async (req, res) => {
+  try {
+    const sellerId = req.user.id;
+    const {
+      sellerName,
+      legalBusinessName,
+      tradeName,
+      sellerPhone,
+      sellerEmail,
+      ownerFullName,
+      ownerDesignation,
+      ownerPan,
+      businessPan,
+      gstin,
+      addressLine1,
+      city,
+      state,
+      pincode,
+      bankAccountHolder,
+      bankAccountNumber,
+      bankIfscCode,
+      bankName
+    } = req.body;
+
+    const files = req.files || {};
+    const updates = {
+      name: sellerName || ownerFullName,
+      storeName: tradeName || legalBusinessName,
+      email: sellerEmail ? sellerEmail.toLowerCase() : undefined,
+      phone: sellerPhone,
+      address: addressLine1,
+      city,
+      state,
+      pincode,
+      gstNumber: gstin,
+      status: "pending" // Resubmit resets status to pending for review
+    };
+
+    // Clean undefined fields
+    Object.keys(updates).forEach(key => updates[key] === undefined && delete updates[key]);
+
+    if (bankAccountHolder || bankAccountNumber || bankIfscCode) {
+      updates.bankDetails = {
+        accountHolderName: bankAccountHolder || "",
+        accountNumber: bankAccountNumber || "",
+        ifscCode: bankIfscCode || "",
+        bankName: bankName || ""
+      };
+    }
+
+    if (files.profilePhoto?.[0] || files.addressProofDoc?.[0]) {
+      updates.documents = {
+        profilePhoto: files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : undefined,
+        addressProofDoc: files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : undefined,
+        panNumber: ownerPan || businessPan
+      };
+    }
+
+    const updatedSeller = await Seller.findByIdAndUpdate(sellerId, updates, { new: true });
+    res.json({
+      success: true,
+      message: "Seller application updated successfully! Pending review.",
+      sellerStatus: updatedSeller.status,
+      seller: updatedSeller
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update application", error: error.message });
+  }
+};
+
+// Upload Base64 File directly to Physical Server Disk (uploads/avatars or uploads/documents)
+export const uploadBase64Document = async (req, res) => {
+  try {
+    const { dataUrl, folder = "documents", fieldName = "doc" } = req.body;
+    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+      return res.status(400).json({ message: "Invalid base64 data URL provided" });
+    }
+
+    const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
+    if (!matches) {
+      return res.status(400).json({ message: "Invalid base64 format" });
+    }
+
+    const mime = matches[1];
+    const base64Data = matches[2];
+    const buffer = Buffer.from(base64Data, "base64");
+
+    let ext = ".png";
+    if (mime.includes("pdf")) ext = ".pdf";
+    else if (mime.includes("jpeg") || mime.includes("jpg")) ext = ".jpg";
+    else if (mime.includes("webp")) ext = ".webp";
+
+    const targetSubfolder = folder === "avatars" ? "avatars" : "documents";
+    const uploadDir = path.join(process.cwd(), "uploads", targetSubfolder);
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    const filename = `${fieldName}-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+    fs.writeFileSync(filePath, buffer);
+
+    const relativeUrl = `/uploads/${targetSubfolder}/${filename}`;
+    console.log(`Saved file to disk: ${filePath} => ${relativeUrl}`);
+
+    res.json({
+      success: true,
+      url: relativeUrl,
+      fileName: filename
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to save file to disk", error: error.message });
+  }
+};
+
+

@@ -22,6 +22,27 @@ const parseArray = (input) => {
   return [];
 };
 
+// Get Distinct Product Categories & Catalog Items for the Logged-in Seller
+export const getSellerProductCategories = async (req, res) => {
+  try {
+    const categories = await Product.distinct("category", { sellerId: req.user.id });
+    const items = await Product.find({ sellerId: req.user.id }, "name price category status stock images").sort({ name: 1 });
+    res.json({
+      categories: categories.filter(Boolean),
+      items: items.map(p => ({
+        id: p._id,
+        name: p.name,
+        price: p.price,
+        category: p.category,
+        status: p.status,
+        stock: p.stock
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch seller categories", error: error.message });
+  }
+};
+
 // Get All Products for the Logged-in Seller (with optional filters)
 export const getSellerProducts = async (req, res) => {
   try {
@@ -180,6 +201,13 @@ export const updateProduct = async (req, res) => {
       updates.images = [...(product.images || []), ...newImages];
     }
 
+    // If product was previously rejected, editing it resubmits into Pending approval queue
+    if (product.approvalStatus === "Rejected") {
+      product.approvalStatus = "Pending";
+      product.approvalComment = "Resubmitted with modifications for admin review";
+      product.rejectionReason = "";
+    }
+
     // Apply updates
     Object.assign(product, updates);
     await product.save();
@@ -190,6 +218,39 @@ export const updateProduct = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to update product", error: error.message });
+  }
+};
+
+// Quick Update Product Stock Quantity & Status (Inventory Tab)
+export const updateInventoryStock = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { stockQuantity, inStock, stock } = req.body;
+
+    const product = await Product.findOne({ _id: id, sellerId: req.user.id });
+    if (!product) {
+      return res.status(404).json({ message: "Product not found or unauthorized" });
+    }
+
+    const nextStock = stockQuantity !== undefined ? Number(stockQuantity) : (stock !== undefined ? Number(stock) : product.stock);
+    product.stock = Math.max(0, nextStock);
+
+    if (inStock !== undefined) {
+      product.status = inStock ? "available" : "out-of-stock";
+    } else {
+      product.status = product.stock > 0 ? "available" : "out-of-stock";
+    }
+
+    await product.save();
+
+    res.json({
+      message: "Inventory stock updated successfully!",
+      stock: product.stock,
+      status: product.status,
+      product
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update inventory stock", error: error.message });
   }
 };
 

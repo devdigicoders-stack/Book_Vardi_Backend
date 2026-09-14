@@ -88,7 +88,11 @@ export const uploadSellerDocs = multer({
   { name: "aadhaarDoc", maxCount: 1 },
   { name: "panDoc", maxCount: 1 },
   { name: "passbookDoc", maxCount: 1 },
-  { name: "shopDoc", maxCount: 1 }
+  { name: "shopDoc", maxCount: 1 },
+  { name: "addressProofDoc", maxCount: 1 },
+  { name: "profilePhoto", maxCount: 1 },
+  { name: "avatar", maxCount: 1 },
+  { name: "storeLogo", maxCount: 1 }
 ]);
 
 export const uploadProductImages = multer({

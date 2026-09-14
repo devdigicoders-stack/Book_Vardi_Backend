@@ -3,24 +3,30 @@ import mongoose from "mongoose";
 const reviewSchema = new mongoose.Schema(
   {
     productId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Product",
+      type: mongoose.Schema.Types.Mixed,
       required: true
     },
     userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+      type: mongoose.Schema.Types.Mixed,
       required: true
     },
     userName: {
       type: String,
-      required: true
+      default: "Verified Customer"
+    },
+    institution: {
+      type: String,
+      default: ""
     },
     rating: {
       type: Number,
       required: [true, "Rating is required (1-5)"],
       min: 1,
       max: 5
+    },
+    title: {
+      type: String,
+      default: ""
     },
     comment: {
       type: String,
@@ -34,14 +40,16 @@ const reviewSchema = new mongoose.Schema(
     verifiedPurchase: {
       type: Boolean,
       default: false
+    },
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "pending"
     }
   },
   {
     timestamps: true
   }
 );
-
-// One review per user per product
-reviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
 
 export default mongoose.model("Review", reviewSchema);

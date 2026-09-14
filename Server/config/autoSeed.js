@@ -1,5 +1,7 @@
 import Category from "../models/Category.js";
 import Product from "../models/Product.js";
+import Kit from "../models/Kit.js";
+import School from "../models/School.js";
 
 const DEFAULT_CATEGORIES = [
   {
@@ -253,6 +255,179 @@ const DEFAULT_PRODUCTS = [
   }
 ];
 
+const DEFAULT_KITS = [
+  {
+    title: "DPS Class 5 Complete Academic Kit",
+    schoolName: "Delhi Public School",
+    schoolCode: "DPS",
+    gender: "Unisex",
+    classGrade: "Class 5",
+    badgeTag: "Best Seller",
+    items: [
+      { name: "DPS Summer Uniform Shirt", quantity: 2, unitPrice: 350, totalPrice: 700 },
+      { name: "NCERT Class 5 All Subjects Set", quantity: 1, unitPrice: 650, totalPrice: 650 },
+      { name: "Class 5 Notebook Bundle (10 Pcs)", quantity: 1, unitPrice: 400, totalPrice: 400 },
+      { name: "Camlin Geometry & Stationery Set", quantity: 1, unitPrice: 250, totalPrice: 250 }
+    ],
+    totalMrp: 2000,
+    bundlePrice: 1699,
+    savingsAmount: 301,
+    discountPercentage: 15,
+    stock: 40,
+    images: ["https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=500&auto=format&fit=crop&q=80"],
+    description: "Everything your child needs for Class 5 at DPS: Uniforms, NCERT Books, Notebooks & Premium Stationery.",
+    rating: 4.9,
+    ratingCount: 184,
+    status: "available"
+  },
+  {
+    title: "Kendriya Vidyalaya Class 8 All-in-One Kit",
+    schoolName: "Kendriya Vidyalaya",
+    schoolCode: "KV",
+    gender: "Unisex",
+    classGrade: "Class 8",
+    badgeTag: "Verified KV",
+    items: [
+      { name: "KV Official Uniform Sweater & Shirt", quantity: 1, unitPrice: 850, totalPrice: 850 },
+      { name: "NCERT Class 8 Textbook Set (6 Books)", quantity: 1, unitPrice: 580, totalPrice: 580 },
+      { name: "Class 8 Long Notebooks (8 Pcs)", quantity: 1, unitPrice: 360, totalPrice: 360 },
+      { name: "Exam Essentials Pen & Geometry Kit", quantity: 1, unitPrice: 210, totalPrice: 210 }
+    ],
+    totalMrp: 2000,
+    bundlePrice: 1599,
+    savingsAmount: 401,
+    discountPercentage: 20,
+    stock: 35,
+    images: ["https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=500&auto=format&fit=crop&q=80"],
+    description: "Full academic kit curated for Kendriya Vidyalaya Class 8 students with books, notebooks & uniform.",
+    rating: 4.8,
+    ratingCount: 142,
+    status: "available"
+  },
+  {
+    title: "Primary School Creative Art & Stationery Starter Kit",
+    schoolName: "Any School",
+    schoolCode: "GEN",
+    gender: "Unisex",
+    classGrade: "Class 1-5",
+    badgeTag: "Special Offer",
+    items: [
+      { name: "Magic Water Coloring Book", quantity: 1, unitPrice: 299, totalPrice: 299 },
+      { name: "Pastel Highlighters (6 Colors)", quantity: 1, unitPrice: 199, totalPrice: 199 },
+      { name: "Smooth Gel Pen Pack (10 Pcs)", quantity: 1, unitPrice: 249, totalPrice: 249 },
+      { name: "A4 Spiral Sketchbook 100 GSM", quantity: 1, unitPrice: 180, totalPrice: 180 }
+    ],
+    totalMrp: 927,
+    bundlePrice: 699,
+    savingsAmount: 228,
+    discountPercentage: 25,
+    stock: 50,
+    images: ["https://images.unsplash.com/photo-1513364776144-60967b0f800f?w=500&auto=format&fit=crop&q=80"],
+    description: "Vibrant art activity & writing essentials bundle for creative primary students.",
+    rating: 5.0,
+    ratingCount: 96,
+    status: "available"
+  }
+];
+
+const DEFAULT_SCHOOLS = [
+  {
+    schoolId: "SCH-001",
+    name: "Delhi Public School, R.K. Puram",
+    shortName: "Delhi Public School",
+    code: "DPS",
+    board: "CBSE",
+    city: "New Delhi",
+    address: "Sector 12, R.K. Puram, New Delhi",
+    pincode: "110022",
+    lat: 28.5684,
+    lng: 77.1834,
+    classes: "Nursery to 12th",
+    studentCount: 4200,
+    contactPerson: "Mrs. Sunita Chawla",
+    email: "admin@dpsrkp.net",
+    phone: "+91 11 2617 1267",
+    status: "Partner Active",
+    exclusiveKit: true
+  },
+  {
+    schoolId: "SCH-002",
+    name: "The Mother’s International School",
+    shortName: "The Mother’s International School",
+    code: "MIS",
+    board: "CBSE",
+    city: "New Delhi",
+    address: "Sri Aurobindo Marg, Vijay Mandal Enclave, New Delhi",
+    pincode: "110016",
+    lat: 28.5398,
+    lng: 77.1994,
+    classes: "Class 1 to 12th",
+    studentCount: 2600,
+    contactPerson: "Dr. Arvind Menon",
+    email: "principal@mis.org.in",
+    phone: "+91 11 2652 4810",
+    status: "Partner Active",
+    exclusiveKit: true
+  },
+  {
+    schoolId: "SCH-003",
+    name: "St. Xavier Senior Secondary School",
+    shortName: "St. Xavier Senior Secondary",
+    code: "STX",
+    board: "ICSE",
+    city: "Gurugram, Haryana",
+    address: "Sector 49, Rosewood City, Gurugram, Haryana",
+    pincode: "122018",
+    lat: 28.4195,
+    lng: 77.0566,
+    classes: "KG to 12th",
+    studentCount: 3100,
+    contactPerson: "Fr. Matthew D’Souza",
+    email: "contact@stxaviersgurugram.in",
+    phone: "+91 124 405 9182",
+    status: "Partner Active",
+    exclusiveKit: false
+  },
+  {
+    schoolId: "SCH-004",
+    name: "Kendriya Vidyalaya No. 1",
+    shortName: "Kendriya Vidyalaya",
+    code: "KV",
+    board: "CBSE",
+    city: "Pune, Maharashtra",
+    address: "Ganeshkhind Road, Armament Colony, Pune, Maharashtra",
+    pincode: "411007",
+    lat: 18.5402,
+    lng: 73.8340,
+    classes: "Class 1 to 12th",
+    studentCount: 1850,
+    contactPerson: "Mr. Satish Waghmare",
+    email: "kv1pune@kvsedu.gov.in",
+    phone: "+91 20 2634 1190",
+    status: "Partner Active",
+    exclusiveKit: true
+  },
+  {
+    schoolId: "SCH-005",
+    name: "Modern School, Barakhamba Road",
+    shortName: "Modern School, Barakhamba",
+    code: "MSB",
+    board: "CBSE",
+    city: "New Delhi",
+    address: "Barakhamba Road, Connaught Place, New Delhi",
+    pincode: "110001",
+    lat: 28.6304,
+    lng: 77.2285,
+    classes: "Class 6 to 12th",
+    studentCount: 2900,
+    contactPerson: "Col. Rajesh Verma",
+    email: "admin@modernschool.net",
+    phone: "+91 11 2331 1618",
+    status: "Partner Active",
+    exclusiveKit: true
+  }
+];
+
 export const seedDatabaseIfEmpty = async () => {
   try {
     const categoryCount = await Category.countDocuments();
@@ -265,6 +440,18 @@ export const seedDatabaseIfEmpty = async () => {
     if (productCount === 0) {
       await Product.insertMany(DEFAULT_PRODUCTS);
       console.log("🌱 [AUTO-SEED] Initial products seeded successfully.");
+    }
+
+    const kitCount = await Kit.countDocuments();
+    if (kitCount === 0) {
+      await Kit.insertMany(DEFAULT_KITS);
+      console.log("🌱 [AUTO-SEED] Initial kits seeded successfully.");
+    }
+
+    const schoolCount = await School.countDocuments();
+    if (schoolCount === 0) {
+      await School.insertMany(DEFAULT_SCHOOLS);
+      console.log("🌱 [AUTO-SEED] Initial schools seeded successfully.");
     }
   } catch (error) {
     console.error("⚠️ [AUTO-SEED ERROR]:", error.message);

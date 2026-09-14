@@ -42,7 +42,7 @@ const kitSchema = new mongoose.Schema(
     sellerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Seller",
-      required: [true, "Seller ID is required"]
+      required: false
     },
     title: {
       type: String,
@@ -130,12 +130,20 @@ const kitSchema = new mongoose.Schema(
       type: String,
       enum: ["available", "out-of-stock", "inactive"],
       default: "available"
+    },
+    approvalStatus: {
+      type: String,
+      enum: ["Approved", "Pending", "Rejected"],
+      default: "Pending"
     }
   },
   {
     timestamps: true
   }
 );
+
+// Indexes
+kitSchema.index({ sellerId: 1 });
 
 // Calculate totalMrp, savingsAmount, and discountPercentage automatically before saving
 kitSchema.pre("save", function (next) {

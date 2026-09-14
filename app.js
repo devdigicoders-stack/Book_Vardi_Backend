@@ -33,6 +33,7 @@ import cartRoutes from "./Server/routes/cartRoutes.js";
 import wishlistRoutes from "./Server/routes/wishlistRoutes.js";
 import couponRoutes from "./Server/routes/couponRoutes.js";
 import reviewRoutes from "./Server/routes/reviewRoutes.js";
+import schoolRoutes from "./Server/routes/schoolRoutes.js";
 
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -100,7 +101,15 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // 4. Serve Static Uploads (Documents & Product Images)
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads"), {
+  setHeaders: (res, filePath) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    if (filePath.toLowerCase().endsWith(".pdf")) {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", "inline");
+    }
+  }
+}));
 
 // 5. API Routes
 app.use("/api/admin", adminRoutes);
@@ -117,6 +126,7 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/stores", storeRoutes);
+app.use("/api/schools", schoolRoutes);
 
 // 6. Health & Status Check
 app.get("/api/health", (req, res) => {

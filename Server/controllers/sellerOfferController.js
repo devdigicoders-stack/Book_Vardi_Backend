@@ -139,3 +139,25 @@ export const deleteSellerOffer = async (req, res) => {
     res.status(500).json({ message: "Failed to delete offer", error: error.message });
   }
 };
+
+// Toggle Offer Active / Expired Status
+export const toggleSellerOfferStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const offer = await SellerOffer.findOne({ _id: id, sellerId: req.user.id });
+    if (!offer) {
+      return res.status(404).json({ message: "Offer not found or unauthorized" });
+    }
+
+    offer.status = offer.status === "active" ? "expired" : "active";
+    await offer.save();
+
+    res.json({
+      message: `Offer status toggled to ${offer.status}`,
+      status: offer.status,
+      offer
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to toggle offer status", error: error.message });
+  }
+};

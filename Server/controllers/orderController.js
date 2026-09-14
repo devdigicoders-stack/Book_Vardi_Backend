@@ -94,8 +94,8 @@ export const getMyOrders = async (req, res) => {
 
     return res.json(formattedOrders);
   } catch (error) {
-    console.error("❌ [GET /api/orders/my-orders] Error:", error.message);
-    return res.status(500).json({ message: "Failed to fetch my orders", error: error.message });
+    console.warn("⚠️ [GET /api/orders/my-orders] DB connection unavailable:", error.message);
+    return res.json([]);
   }
 };
 

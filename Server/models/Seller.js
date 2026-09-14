@@ -86,7 +86,9 @@ const sellerSchema = new mongoose.Schema(
       panNumber: { type: String, default: "" },
       panDoc: { type: String, default: "" }, // local file path / URL
       passbookDoc: { type: String, default: "" }, // passbook / cancelled cheque
-      shopDoc: { type: String, default: "" } // Trade License / Shop Act / Registration
+      shopDoc: { type: String, default: "" }, // Trade License / Shop Act / Registration
+      addressProofDoc: { type: String, default: "" }, // Electricity bill / rent agreement
+      profilePhoto: { type: String, default: "" } // Seller avatar / profile picture
     },
 
     // Delivery Capabilities & Preferences
