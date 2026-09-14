@@ -28,6 +28,11 @@ const userSchema = new mongoose.Schema(
     standard: { type: String, default: "", trim: true },
     role: { type: String, enum: ["user", "admin"], default: "user" },
     status: { type: String, enum: ["active", "inactive", "blocked"], default: "active" },
+    institution: { type: String, default: "" },
+    studentId: { type: String, default: "" },
+    phoneVerified: { type: Boolean, default: false },
+    otpCode: { type: String, default: "" },
+    otpExpiresAt: { type: Date, default: null },
     resetPasswordToken: { type: String, default: "" },
     resetPasswordExpires: { type: Date, default: null },
     addresses: [addressSchema]
