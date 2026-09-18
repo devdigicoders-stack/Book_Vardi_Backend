@@ -162,10 +162,12 @@ export const loginWithOtp = async (req, res) => {
 // 1. Register User
 export const registerUser = async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body;
+    const { name, email, password, phone, institution, studentId } = req.body;
+    const normalizedPhone = normalizePhone(phone);
+    const normalizedEmail = email ? email.toLowerCase().trim() : "";
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: "Name, email, and password are required" });
+    if (!name || !password) {
+      return res.status(400).json({ message: "Name and password are required" });
     }
 
     const userExists = await User.findOne({
@@ -179,14 +181,40 @@ export const registerUser = async (req, res) => {
       return res.status(400).json({ message: "User already registered. Login please" });
     }
 
-    const user = await User.create({
+    const user = userExists || (await User.create({
       name,
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail || `student${normalizedPhone.slice(-4)}@bookvardi.local`,
       password,
-      phone: phone || ""
-    });
+      phone: normalizedPhone,
+      institution: institution || "",
+      studentId: studentId || "",
+      phoneVerified: true
+    }));
+
+    user.name = name;
+    user.email = normalizedEmail || user.email || `student${normalizedPhone.slice(-4)}@bookvardi.local`;
+    user.password = password;
+    user.phone = normalizedPhone;
+    user.institution = institution || user.institution || "";
+    user.studentId = studentId || user.studentId || "";
+    user.phoneVerified = true;
+    user.otpCode = "";
+    user.otpExpiresAt = null;
+    await user.save();
 
     const token = generateToken(user);
+
+    console.log("[AUTH] User registered successfully:", {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      institution: user.institution,
+      studentId: user.studentId,
+      phoneVerified: user.phoneVerified,
+      timestamp: new Date().toISOString()
+    });
 
     res.status(201).json({
       message: "Registration successful. Login please",
@@ -211,15 +239,22 @@ export const registerUser = async (req, res) => {
 // 2. Login User
 export const loginUser = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, phone } = req.body;
+    const normalizedPhone = normalizePhone(phone);
+    const normalizedEmail = email ? email.toLowerCase().trim() : "";
 
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+    if (!password) {
+      return res.status(400).json({ message: "Password is required" });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const user = normalizedEmail
+      ? await User.findOne({ email: normalizedEmail })
+      : normalizedPhone
+        ? await User.findOne({ phone: normalizedPhone })
+        : null;
+
     if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid phone or email and password combination" });
     }
 
     if (user.status === "blocked") {
@@ -228,10 +263,19 @@ export const loginUser = async (req, res) => {
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid phone or email and password combination" });
     }
 
     const token = generateToken(user);
+
+    console.log("[AUTH] User login successful:", {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      timestamp: new Date().toISOString()
+    });
 
     res.json({
       message: "Login successful",
