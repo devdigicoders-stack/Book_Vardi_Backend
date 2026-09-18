@@ -1,4 +1,6 @@
+import mongoose from "mongoose";
 import User from "../models/User.js";
+import Seller from "../models/Seller.js";
 import jwt from "jsonwebtoken";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
@@ -136,6 +138,15 @@ export const loginWithOtp = async (req, res) => {
       });
     }
 
+    const seller = await Seller.findOne({
+      $or: [
+        ...(user.phone ? [{ phone: user.phone }] : []),
+        ...(user.email ? [{ email: user.email }] : [])
+      ]
+    });
+    const isSeller = Boolean(user.isSeller || (seller && seller.status === "approved"));
+    const sellerStatus = seller ? seller.status : (user.sellerStatus || "none");
+
     const token = generateToken(user);
 
     return res.json({
@@ -148,6 +159,8 @@ export const loginWithOtp = async (req, res) => {
         phone: user.phone,
         role: user.role,
         avatar: user.avatar,
+        isSeller,
+        sellerStatus,
         institution: user.institution || "",
         studentId: user.studentId || "",
         standard: user.standard || "",
@@ -231,6 +244,15 @@ export const loginUser = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
+    const seller = await Seller.findOne({
+      $or: [
+        ...(user.phone ? [{ phone: user.phone }] : []),
+        ...(user.email ? [{ email: user.email }] : [])
+      ]
+    });
+    const isSeller = Boolean(user.isSeller || (seller && seller.status === "approved"));
+    const sellerStatus = seller ? seller.status : (user.sellerStatus || "none");
+
     const token = generateToken(user);
 
     res.json({
@@ -243,6 +265,8 @@ export const loginUser = async (req, res) => {
         phone: user.phone,
         role: user.role,
         avatar: user.avatar,
+        isSeller,
+        sellerStatus,
         institution: user.institution || "",
         studentId: user.studentId || "",
         standard: user.standard || "",
@@ -275,6 +299,15 @@ export const getUserByPhone = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    const seller = await Seller.findOne({
+      $or: [
+        ...(user.phone ? [{ phone: user.phone }] : []),
+        ...(user.email ? [{ email: user.email }] : [])
+      ]
+    });
+    const isSeller = Boolean(user.isSeller || (seller && seller.status === "approved"));
+    const sellerStatus = seller ? seller.status : (user.sellerStatus || "none");
+
     return res.json({
       id: user._id,
       name: user.name || "",
@@ -282,6 +315,8 @@ export const getUserByPhone = async (req, res) => {
       phone: user.phone || phone,
       role: user.role || "user",
       avatar: user.avatar || "",
+      isSeller,
+      sellerStatus,
       institution: user.institution || "",
       studentId: user.studentId || "",
       standard: user.standard || "",
@@ -326,7 +361,20 @@ export const getUserProfile = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    res.json(user);
+    const seller = await Seller.findOne({
+      $or: [
+        ...(user.phone ? [{ phone: user.phone }] : []),
+        ...(user.email ? [{ email: user.email }] : [])
+      ]
+    });
+    const isSeller = Boolean(user.isSeller || (seller && seller.status === "approved"));
+    const sellerStatus = seller ? seller.status : (user.sellerStatus || "none");
+
+    const userObj = typeof user.toObject === "function" ? user.toObject() : { ...user };
+    userObj.isSeller = isSeller;
+    userObj.sellerStatus = sellerStatus;
+
+    res.json(userObj);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch profile", error: error.message });
   }

@@ -18,6 +18,19 @@ const couponSchema = new mongoose.Schema({
   storeId: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'Store' 
+  },
+  sellerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Seller'
+  },
+  createdRole: {
+    type: String,
+    enum: ['admin', 'seller'],
+    default: 'admin'
+  },
+  applicableProducts: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true

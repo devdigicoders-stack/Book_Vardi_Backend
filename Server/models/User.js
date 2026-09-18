@@ -26,8 +26,10 @@ const userSchema = new mongoose.Schema(
     institution: { type: String, default: "", trim: true },
     studentId: { type: String, default: "", trim: true },
     standard: { type: String, default: "", trim: true },
-    role: { type: String, enum: ["user", "admin"], default: "user" },
+    role: { type: String, default: "user" },
     status: { type: String, enum: ["active", "inactive", "blocked"], default: "active" },
+    isSeller: { type: Boolean, default: false },
+    sellerStatus: { type: String, default: "none" },
     resetPasswordToken: { type: String, default: "" },
     resetPasswordExpires: { type: Date, default: null },
     addresses: [addressSchema]

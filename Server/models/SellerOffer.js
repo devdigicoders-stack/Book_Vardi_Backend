@@ -54,6 +54,15 @@ const sellerOfferSchema = new mongoose.Schema(
       type: String,
       enum: ["active", "inactive", "expired"],
       default: "active"
+    },
+    createdRole: {
+      type: String,
+      enum: ["admin", "seller"],
+      default: "seller"
+    },
+    applicableProducts: {
+      type: [String],
+      default: []
     }
   },
   {

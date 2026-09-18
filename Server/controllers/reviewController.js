@@ -1,6 +1,53 @@
+import mongoose from "mongoose";
 import Review from "../models/Review.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
+
+// Helper to recalculate averageRating and numReviews on Product document in MongoDB
+export const recalculateProductRating = async (productId) => {
+  if (!productId) return { averageRating: 0, numReviews: 0 };
+  try {
+    const productQuery = [
+      { productId: productId },
+      { productId: String(productId) }
+    ];
+    if (!isNaN(productId)) {
+      productQuery.push({ productId: Number(productId) });
+    }
+
+    const allReviews = await Review.find({ $or: productQuery });
+    const count = allReviews.length;
+    const avgRating = count > 0
+      ? Math.round((allReviews.reduce((sum, r) => sum + (Number(r.rating) || 0), 0) / count) * 10) / 10
+      : 0;
+
+    // Look up target product by ObjectId, numeric id, or string id
+    let product = null;
+    if (mongoose.Types.ObjectId.isValid(productId)) {
+      product = await Product.findById(productId);
+    }
+    if (!product) {
+      product = await Product.findOne({
+        $or: [
+          { id: productId },
+          { id: String(productId) }
+        ]
+      });
+    }
+
+    if (product) {
+      product.averageRating = avgRating;
+      product.numReviews = count;
+      await product.save();
+      console.log(`⭐ [RATING RECALCULATED] Product ${product._id} (${product.name}) -> averageRating: ${avgRating}, numReviews: ${count}`);
+    }
+
+    return { averageRating: avgRating, numReviews: count };
+  } catch (err) {
+    console.error("Failed to recalculate product rating:", err);
+    return { averageRating: 0, numReviews: 0 };
+  }
+};
 
 // 1. Add / Update Product Review
 export const addReview = async (req, res) => {
@@ -70,6 +117,9 @@ export const addReview = async (req, res) => {
       });
     }
 
+    // Immediately recalculate Product averageRating and numReviews in MongoDB
+    const { averageRating, numReviews } = await recalculateProductRating(productId);
+
     const formattedReview = {
       id: review._id,
       name: review.userName,
@@ -86,8 +136,10 @@ export const addReview = async (req, res) => {
     };
 
     res.status(201).json({
-      message: "Review submitted successfully and sent for seller approval",
-      review: formattedReview
+      message: "Review submitted successfully and rating updated",
+      review: formattedReview,
+      averageRating,
+      numReviews
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to submit review", error: error.message });
@@ -122,20 +174,73 @@ export const getProductReviews = async (req, res) => {
 
     const reviews = await Review.find(filter).sort({ createdAt: -1 });
 
-    const formattedReviews = reviews.map((r) => ({
-      id: r._id,
-      name: r.userName || "Verified Customer",
-      institution: r.institution || "Verified Customer",
-      rating: r.rating,
-      date: r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "Recently",
-      title: r.title || "",
-      comment: r.comment,
-      images: r.images || [],
-      verifiedPurchase: r.verifiedPurchase || false,
-      status: r.status || "approved",
-      helpfulCount: 0,
-      createdAt: r.createdAt
-    }));
+    // Map seller legal business names for reviews
+    const sellerLegalNameMap = {};
+    try {
+      const Seller = (await import("../models/Seller.js")).default;
+      const productIds = [...new Set(reviews.map((r) => r.productId).filter(Boolean))];
+      if (productIds.length > 0) {
+        const validObjectIds = productIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+        const products = await Product.find({
+          $or: [
+            ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+            { id: { $in: productIds } }
+          ]
+        }).select("_id id sellerId sellerName sellerStoreName legalBusinessName storeName");
+
+        const sellerIds = [...new Set(products.map((p) => p.sellerId).filter(Boolean))];
+        const validSellerObjectIds = sellerIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+        const strSellerIds = sellerIds.map(String);
+        const sellers = sellerIds.length > 0
+          ? await Seller.find({
+              $or: [
+                ...(validSellerObjectIds.length > 0 ? [{ _id: { $in: validSellerObjectIds } }] : []),
+                { storeName: { $in: strSellerIds } },
+                { name: { $in: strSellerIds } }
+              ]
+            }).select("_id legalBusinessName storeName name")
+          : [];
+
+        const sellerMap = {};
+        sellers.forEach((s) => {
+          sellerMap[String(s._id)] = s.legalBusinessName || s.storeName || s.name || "";
+        });
+
+        products.forEach((p) => {
+          const legalName = p.legalBusinessName || p.sellerName || p.sellerStoreName || p.storeName || (p.sellerId ? sellerMap[String(p.sellerId)] : "") || "";
+          if (legalName) {
+            sellerLegalNameMap[String(p._id)] = legalName;
+            if (p.id) sellerLegalNameMap[String(p.id)] = legalName;
+          }
+        });
+      }
+    } catch (e) {}
+
+    const formattedReviews = reviews.map((r) => {
+      const sellerLegalName = r.legalBusinessName || r.sellerName || r.storeName || sellerLegalNameMap[String(r.productId)] || "";
+      return {
+        id: r._id,
+        _id: r._id,
+        name: r.userName || "Verified Customer",
+        institution: r.institution || "Verified Customer",
+        rating: r.rating,
+        date: r.createdAt ? new Date(r.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "Recently",
+        title: r.title || "",
+        comment: r.comment,
+        images: r.images || [],
+        verifiedPurchase: r.verifiedPurchase || false,
+        status: r.status || "approved",
+        reply: r.reply || "",
+        sellerReply: r.reply || "",
+        repliedAt: r.repliedAt || null,
+        sellerId: r.sellerId || null,
+        sellerName: sellerLegalName,
+        legalBusinessName: sellerLegalName,
+        storeName: sellerLegalName,
+        helpfulCount: 0,
+        createdAt: r.createdAt
+      };
+    });
 
     res.json(formattedReviews);
   } catch (error) {
@@ -147,13 +252,26 @@ export const getProductReviews = async (req, res) => {
 export const updateReviewStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // 'approved' | 'rejected' | 'pending'
+    let { status } = req.body; // 'approved' | 'rejected' | 'pending' | 'Approved' | 'Hidden'
+
+    if (typeof status === "string") {
+      const lower = status.toLowerCase();
+      if (lower === "approved") status = "approved";
+      else if (lower === "hidden" || lower === "rejected") status = "rejected";
+      else if (lower === "pending" || lower.includes("pending")) status = "pending";
+    }
 
     if (!["approved", "rejected", "pending"].includes(status)) {
       return res.status(400).json({ message: "Status must be 'approved', 'rejected', or 'pending'" });
     }
 
-    const review = await Review.findById(id);
+    let review = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      review = await Review.findById(id);
+    }
+    if (!review) {
+      review = await Review.findOne({ $or: [{ id: id }, { id: String(id) }] });
+    }
     if (!review) {
       return res.status(404).json({ message: "Review not found" });
     }
@@ -161,26 +279,10 @@ export const updateReviewStatus = async (req, res) => {
     review.status = status;
     await review.save();
 
-    // Recalculate rating on product for approved reviews
-    try {
-      const productId = review.productId;
-      const approvedReviews = await Review.find({
-        $or: [{ productId: productId }, { productId: String(productId) }],
-        $or: [{ status: "approved" }, { status: { $exists: false } }]
-      });
+    // Recalculate rating on product
+    const { averageRating, numReviews } = await recalculateProductRating(review.productId);
 
-      const avgRating =
-        approvedReviews.length > 0
-          ? approvedReviews.reduce((sum, r) => sum + r.rating, 0) / approvedReviews.length
-          : 0;
-
-      await Product.findByIdAndUpdate(productId, {
-        averageRating: Math.round(avgRating * 10) / 10,
-        numReviews: approvedReviews.length
-      });
-    } catch (e) {}
-
-    res.json({ message: `Review status updated to ${status}`, review });
+    res.json({ message: `Review status updated to ${status}`, review, averageRating, numReviews });
   } catch (error) {
     res.status(500).json({ message: "Failed to update review status", error: error.message });
   }
@@ -189,79 +291,269 @@ export const updateReviewStatus = async (req, res) => {
 // 4. Delete Review
 export const deleteReview = async (req, res) => {
   try {
-    const review = await Review.findById(req.params.id);
+    let review = null;
+    if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+      review = await Review.findById(req.params.id);
+    }
+    if (!review) {
+      review = await Review.findOne({ $or: [{ id: req.params.id }, { id: String(req.params.id) }] });
+    }
     if (!review) {
       return res.status(404).json({ message: "Review not found" });
     }
 
     const requesterId = req.user?.id || req.headers["x-user-id"] || req.headers["x-user-phone"];
-    if (requesterId && review.userId.toString() !== requesterId.toString() && req.user?.role !== "admin") {
+    if (requesterId && review.userId && review.userId.toString() !== requesterId.toString() && req.user?.role !== "admin") {
       return res.status(403).json({ message: "Not authorized to delete this review" });
     }
 
     const productId = review.productId;
-    await Review.findByIdAndDelete(req.params.id);
+    if (mongoose.Types.ObjectId.isValid(review._id)) {
+      await Review.findByIdAndDelete(review._id);
+    } else {
+      await Review.deleteOne({ _id: review._id });
+    }
 
-    // Recalculate rating
-    try {
-      const allReviews = await Review.find({
-        $or: [{ productId: productId }, { productId: String(productId) }],
-        $or: [{ status: "approved" }, { status: { $exists: false } }]
-      });
-      const avgRating =
-        allReviews.length > 0
-          ? allReviews.reduce((sum, r) => sum + r.rating, 0) / allReviews.length
-          : 0;
+    // Recalculate rating on product
+    const { averageRating, numReviews } = await recalculateProductRating(productId);
 
-      await Product.findByIdAndUpdate(productId, {
-        averageRating: Math.round(avgRating * 10) / 10,
-        numReviews: allReviews.length
-      });
-    } catch (e) {}
-
-    res.json({ message: "Review deleted successfully" });
+    res.json({ message: "Review deleted successfully", averageRating, numReviews });
   } catch (error) {
     res.status(500).json({ message: "Failed to delete review", error: error.message });
   }
 };
 
-// 5. Get All Reviews for Logged-in Seller's Products
+// 5. Get All Reviews for Admin Moderation
+export const getAllReviews = async (req, res) => {
+  try {
+    const reviews = await Review.find().sort({ createdAt: -1 });
+
+    const productIds = [...new Set(reviews.map((r) => r.productId).filter(Boolean))];
+    const validObjectIds = productIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    
+    let products = [];
+    if (productIds.length > 0) {
+      products = await Product.find({
+        $or: [
+          ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+          { id: { $in: productIds } }
+        ]
+      }).select("_id id name title");
+    }
+    
+    const productMap = {};
+    products.forEach((p) => {
+      const key = String(p._id);
+      productMap[key] = p.name || p.title || "Product";
+      if (p.id) productMap[String(p.id)] = p.name || p.title || "Product";
+    });
+
+    const formatted = reviews.map((r) => {
+      const statusTitle =
+        r.status === "approved" ? "Approved" : r.status === "rejected" ? "Hidden" : "Pending Approval";
+      return {
+        id: r._id,
+        _id: r._id,
+        productId: r.productId,
+        productName: productMap[String(r.productId)] || "Product",
+        customerName: r.userName || "Verified Customer",
+        userName: r.userName || "Verified Customer",
+        institution: r.institution || "Verified Customer",
+        rating: r.rating,
+        comment: r.comment,
+        title: r.title || "",
+        images: r.images || [],
+        verifiedPurchase: r.verifiedPurchase || false,
+        status: statusTitle,
+        rawStatus: r.status,
+        reply: r.reply || "",
+        repliedAt: r.repliedAt || null,
+        date: r.createdAt
+          ? new Date(r.createdAt).toLocaleDateString("en-IN", {
+              day: "numeric",
+              month: "short",
+              year: "numeric"
+            })
+          : "Recently",
+        createdAt: r.createdAt
+      };
+    });
+
+    res.json(formatted);
+  } catch (error) {
+    console.error("Failed to fetch all reviews:", error);
+    res.status(500).json({ message: "Failed to fetch all reviews", error: error.message });
+  }
+};
+
+// 6. Get All Reviews for Logged-in Seller's Products
 export const getSellerReviews = async (req, res) => {
   try {
-    const sellerId = req.user.id;
-    const sellerProducts = await Product.find({ sellerId }).select("_id name images");
-    const productIds = sellerProducts.map(p => p._id);
+    const rawIds = [
+      req.user?.id,
+      req.seller?._id,
+      req.seller?.id,
+      req.user?._id,
+      req.headers["x-seller-id"],
+      req.query.sellerId
+    ].filter(Boolean);
 
-    const reviews = await Review.find({
+    const validSellerObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const strSellerIds = rawIds.map(String);
+
+    let sellerProducts = [];
+    if (rawIds.length > 0) {
+      sellerProducts = await Product.find({
+        $or: [
+          ...(validSellerObjectIds.length > 0
+            ? [{ sellerId: { $in: validSellerObjectIds } }, { seller: { $in: validSellerObjectIds } }]
+            : []),
+          { sellerId: { $in: strSellerIds } },
+          { seller: { $in: strSellerIds } }
+        ]
+      }).select("_id id name title");
+    } else {
+      sellerProducts = await Product.find().select("_id id name title");
+    }
+
+    const productIds = sellerProducts.map((p) => p._id);
+    const strProductIds = productIds.map((id) => String(id));
+    const customProductIds = sellerProducts.map((p) => p.id).filter(Boolean);
+    const numericProductIds = customProductIds.map(Number).filter((n) => !isNaN(n));
+    const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
+
+    let filter = {};
+    if (allProductKeys.length > 0) {
+      filter = {
+        $or: [
+          { productId: { $in: allProductKeys } },
+          ...(strSellerIds.length > 0 ? [{ sellerId: { $in: strSellerIds } }] : [])
+        ]
+      };
+    } else if (strSellerIds.length > 0) {
+      filter = { sellerId: { $in: strSellerIds } };
+    }
+
+    const reviews = await Review.find(filter).sort({ createdAt: -1 });
+
+    const allProductIds = [...new Set(reviews.map((r) => r.productId).filter(Boolean))];
+    const validObjectIds = allProductIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const products = allProductIds.length > 0 ? await Product.find({
       $or: [
-        { productId: { $in: productIds } },
-        { sellerId: sellerId }
+        ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+        { id: { $in: allProductIds } }
       ]
-    }).sort({ createdAt: -1 });
+    }).select("_id id name title") : [];
 
-    res.json(reviews);
+    const productMap = {};
+    products.forEach((p) => {
+      productMap[String(p._id)] = p.name || p.title || "Product";
+      if (p.id) productMap[String(p.id)] = p.name || p.title || "Product";
+    });
+
+    const formatted = reviews.map((r) => {
+      const statusTitle =
+        r.status === "approved" ? "Approved" : r.status === "rejected" ? "Hidden" : "Pending Approval";
+      return {
+        id: r._id,
+        _id: r._id,
+        productId: r.productId,
+        productName: productMap[String(r.productId)] || "Product Review",
+        customerName: r.userName || "Verified Customer",
+        name: r.userName || "Verified Customer",
+        rating: r.rating || 5,
+        comment: r.comment || "",
+        title: r.title || "",
+        images: r.images || [],
+        status: statusTitle,
+        rawStatus: r.status,
+        reply: r.reply || "",
+        repliedAt: r.repliedAt || null,
+        date: r.createdAt
+          ? new Date(r.createdAt).toLocaleDateString("en-IN", {
+              day: "numeric",
+              month: "short",
+              year: "numeric"
+            })
+          : "Recently",
+        createdAt: r.createdAt
+      };
+    });
+
+    res.json(formatted);
   } catch (error) {
+    console.error("Failed to fetch seller reviews:", error);
     res.status(500).json({ message: "Failed to fetch seller reviews", error: error.message });
   }
 };
 
-// 6. Post Official Seller Reply to Customer Review
+// 7. Post Official Seller Reply to Customer Review
 export const replyToSellerReview = async (req, res) => {
   try {
     const { id } = req.params;
-    const { replyText, reply } = req.body;
+    const replyContent = req.body.replyText || req.body.reply || "";
 
-    const review = await Review.findById(id);
+    if (!replyContent || !String(replyContent).trim()) {
+      return res.status(400).json({ message: "Reply text is required" });
+    }
+
+    let review = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      review = await Review.findById(id);
+    }
+    if (!review) {
+      review = await Review.findOne({ $or: [{ _id: id }, { id: id }] });
+    }
+
     if (!review) {
       return res.status(404).json({ message: "Review not found" });
     }
 
-    review.reply = replyText || reply || "";
+    let legalName = req.body.legalBusinessName || req.body.sellerName || req.body.storeName || req.user?.legalBusinessName || req.user?.storeName || req.user?.name || "";
+    if (!legalName && req.user?.id) {
+      try {
+        const Seller = (await import("../models/Seller.js")).default;
+        const seller = await Seller.findById(req.user.id);
+        if (seller) {
+          legalName = seller.legalBusinessName || seller.storeName || seller.name || "";
+        }
+      } catch (e) {}
+    }
+    if (!legalName && review.productId) {
+      try {
+        const Product = (await import("../models/Product.js")).default;
+        const product = await Product.findOne({ $or: [{ _id: review.productId }, { id: review.productId }] });
+        if (product) {
+          legalName = product.legalBusinessName || product.sellerName || product.sellerStoreName || product.storeName || "";
+          if (!legalName && product.sellerId) {
+            const Seller = (await import("../models/Seller.js")).default;
+            const seller = await Seller.findById(product.sellerId);
+            if (seller) {
+              legalName = seller.legalBusinessName || seller.storeName || seller.name || "";
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    review.reply = String(replyContent).trim();
     review.repliedAt = new Date();
+    if (legalName) {
+      review.legalBusinessName = legalName;
+      review.sellerName = legalName;
+      review.storeName = legalName;
+    }
     await review.save();
 
-    res.json({ success: true, message: "Reply added to customer review", review });
+    console.log(`💬 [REVIEW REPLY SAVED TO DB] Review ID: ${review._id} -> Reply: "${review.reply}"`);
+
+    res.json({
+      success: true,
+      message: "Reply saved to MongoDB database successfully!",
+      review
+    });
   } catch (error) {
+    console.error("Reply to review error:", error);
     res.status(500).json({ message: "Failed to post review reply", error: error.message });
   }
 };

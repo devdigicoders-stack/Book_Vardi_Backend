@@ -10,14 +10,30 @@ import {
   changePassword,
   getRecentActivities,
   getChartData,
-  globalSearch
+  globalSearch,
+  getAdminProducts,
+  getAdminProductById,
+  updateProductApproval,
+  deleteAdminProduct,
+  createAdminProduct,
+  updateAdminProduct,
+  getAdminInventory,
+  updateAdminInventoryStock,
+  quickRestockAdminInventory,
+  getPlatformSettings,
+  updatePlatformSettings,
+  getAllSubadmins,
+  createSubadmin,
+  updateSubadmin,
+  deleteSubadmin
 } from "../controllers/adminController.js";
 import {
   getAllSellers,
   getSellerById,
   approveSeller,
   rejectSeller,
-  toggleSellerStatus
+  toggleSellerStatus,
+  updateSellerCommission
 } from "../controllers/adminSellerController.js";
 import {
   getAllPayoutsAdmin,
@@ -29,7 +45,7 @@ import {
   exportUsersAdmin,
   exportSellersAdmin
 } from "../controllers/exportController.js";
-import { authenticateAdmin } from "../middlewares/auth.js";
+import { authenticateAdmin, requireSuperAdmin } from "../middlewares/auth.js";
 
 const router = express.Router();
 
@@ -39,6 +55,14 @@ const router = express.Router();
 router.post("/login", loginAdmin);
 router.post("/register", createAdmin);
 router.post("/create-default", createAdmin);
+
+// ==========================================
+// Sub-Admin RBAC Team Management (Super-Admin only)
+// ==========================================
+router.get("/subadmins", authenticateAdmin, getAllSubadmins);
+router.post("/subadmins", requireSuperAdmin, createSubadmin);
+router.put("/subadmins/:id", requireSuperAdmin, updateSubadmin);
+router.delete("/subadmins/:id", requireSuperAdmin, deleteSubadmin);
 
 // ==========================================
 // Admin Dashboard & User Management
@@ -54,6 +78,25 @@ router.put("/change-password", authenticateAdmin, changePassword);
 router.get("/search", authenticateAdmin, globalSearch);
 
 // ==========================================
+// Admin Product Approval & Catalog Management (RESTful)
+// ==========================================
+router.get("/products", authenticateAdmin, getAdminProducts);
+router.get("/products/:id", authenticateAdmin, getAdminProductById);
+router.post("/products", authenticateAdmin, createAdminProduct);
+router.put("/products/:id", authenticateAdmin, updateAdminProduct);
+router.put("/products/:id/approval", authenticateAdmin, updateProductApproval);
+router.patch("/products/:id/approval", authenticateAdmin, updateProductApproval);
+router.delete("/products/:id", authenticateAdmin, deleteAdminProduct);
+
+// ==========================================
+// Admin Inventory & Warehouse Management (RESTful)
+// ==========================================
+router.get("/inventory", authenticateAdmin, getAdminInventory);
+router.patch("/inventory/:id/stock", authenticateAdmin, updateAdminInventoryStock);
+router.put("/inventory/:id/stock", authenticateAdmin, updateAdminInventoryStock);
+router.post("/inventory/quick-restock", authenticateAdmin, quickRestockAdminInventory);
+
+// ==========================================
 // Admin Seller Verification & Management
 // ==========================================
 router.get("/sellers", authenticateAdmin, getAllSellers);
@@ -61,12 +104,19 @@ router.get("/sellers/:id", authenticateAdmin, getSellerById);
 router.put("/sellers/:id/approve", authenticateAdmin, approveSeller);
 router.put("/sellers/:id/reject", authenticateAdmin, rejectSeller);
 router.put("/sellers/:id/status", authenticateAdmin, toggleSellerStatus);
+router.put("/sellers/:id/commission", authenticateAdmin, updateSellerCommission);
 
 // ==========================================
 // Admin Payout Ledger & Approvals
 // ==========================================
 router.get("/payouts", authenticateAdmin, getAllPayoutsAdmin);
 router.put("/payouts/:id/process", authenticateAdmin, processPayoutAdmin);
+
+// ==========================================
+// Admin Platform Settings
+// ==========================================
+router.get("/settings", authenticateAdmin, getPlatformSettings);
+router.put("/settings", authenticateAdmin, updatePlatformSettings);
 
 // ==========================================
 // Admin Data Export (Excel / CSV Reports)

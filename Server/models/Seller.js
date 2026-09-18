@@ -51,6 +51,53 @@ const sellerSchema = new mongoose.Schema(
       trim: true,
       default: ""
     },
+    msmeRegistrationNumber: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    cinNumber: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    yearStarted: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    businessType: {
+      type: String,
+      trim: true,
+      default: "Proprietorship"
+    },
+    annualTurnoverEstimate: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+
+    // Owner / Authorized Signatory Details
+    ownerDetails: {
+      ownerFullName: { type: String, default: "" },
+      ownerDesignation: { type: String, default: "" },
+      ownerPan: { type: String, default: "" },
+      ownerAadhaarLast4: { type: String, default: "" }
+    },
+
+    // Detailed Address Info
+    addressDetails: {
+      addressLine1: { type: String, default: "" },
+      addressLine2: { type: String, default: "" },
+      landmark: { type: String, default: "" },
+      country: { type: String, default: "India" }
+    },
+
+    // Address Proof Details
+    addressProofDetails: {
+      addressProofType: { type: String, default: "" },
+      addressProofDocNumber: { type: String, default: "" }
+    },
 
     // Geo-Location (Google Maps Lat/Long & Proximity Search)
     location: {
@@ -76,7 +123,31 @@ const sellerSchema = new mongoose.Schema(
       accountNumber: { type: String, default: "" },
       ifscCode: { type: String, default: "" },
       bankName: { type: String, default: "" },
-      branchName: { type: String, default: "" }
+      branchName: { type: String, default: "" },
+      accountType: { type: String, default: "Savings Account" }
+    },
+
+    // Store Branding & Profile
+    storeDetails: {
+      storeTagline: { type: String, default: "" },
+      storeDescription: { type: String, default: "" },
+      storeLogo: { type: String, default: "" }
+    },
+
+    // Catalog & Product Capabilities
+    catalogInfo: {
+      selectedCategories: [{ type: String }],
+      primaryBrands: [{ type: String }],
+      estimatedSkuCount: { type: String, default: "" },
+      sampleProductTitle: { type: String, default: "" }
+    },
+
+    // Terms & Legal Compliance Agreements
+    agreements: {
+      acceptedTerms: { type: Boolean, default: false },
+      acceptedCommissionRate: { type: Boolean, default: false },
+      acceptedReturnPolicy: { type: Boolean, default: false },
+      authorizedSignatoryConfirmation: { type: Boolean, default: false }
     },
 
     // KYC & Business Documents
@@ -85,6 +156,8 @@ const sellerSchema = new mongoose.Schema(
       aadhaarDoc: { type: String, default: "" }, // local file path / URL
       panNumber: { type: String, default: "" },
       panDoc: { type: String, default: "" }, // local file path / URL
+      msmeRegistrationNumber: { type: String, default: "" },
+      cinNumber: { type: String, default: "" },
       passbookDoc: { type: String, default: "" }, // passbook / cancelled cheque
       shopDoc: { type: String, default: "" }, // Trade License / Shop Act / Registration
       addressProofDoc: { type: String, default: "" }, // Electricity bill / rent agreement
@@ -110,6 +183,12 @@ const sellerSchema = new mongoose.Schema(
 
     // Financials, Wallet & Commission
     commissionPercentage: {
+      type: Number,
+      default: 5, // Default platform fee: 5%
+      min: 0,
+      max: 100
+    },
+    commissionRate: {
       type: Number,
       default: 5, // Default platform fee: 5%
       min: 0,

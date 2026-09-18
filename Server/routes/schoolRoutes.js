@@ -4,11 +4,78 @@ import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 
 const router = express.Router();
 
-// GET all partner schools
+const DEFAULT_CLASSES_ARRAY = [
+  "Nursery", "LKG", "UKG", "Class 1", "Class 2", "Class 3",
+  "Class 4", "Class 5", "Class 6", "Class 7", "Class 8",
+  "Class 9", "Class 10", "Class 11", "Class 12"
+];
+
+function normalizeClasses(cls) {
+  if (Array.isArray(cls) && cls.length > 0) return cls;
+  if (typeof cls === "string" && cls.includes(",")) {
+    return cls.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  return DEFAULT_CLASSES_ARRAY;
+}
+
+// GET all partner schools with optional district/subdistrict filtering and pagination
 router.get("/", async (req, res) => {
   try {
-    const schools = await School.find();
-    res.json({ success: true, schools });
+    const { district, subdistrict, city, page, limit } = req.query;
+    
+    const query = {};
+    if (district || subdistrict || city) {
+      const conditions = [];
+      if (district) {
+        conditions.push({ district: new RegExp(district, "i") });
+        conditions.push({ city: new RegExp(district, "i") });
+        conditions.push({ address: new RegExp(district, "i") });
+      }
+      if (subdistrict) {
+        conditions.push({ subdistrict: new RegExp(subdistrict, "i") });
+        conditions.push({ address: new RegExp(subdistrict, "i") });
+      }
+      if (city) {
+        conditions.push({ city: new RegExp(city, "i") });
+      }
+      if (conditions.length > 0) {
+        query.$or = conditions;
+      }
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 0; // 0 means return all if limit not explicitly specified
+
+    const totalCount = await School.countDocuments(query);
+    
+    let schoolsQuery = School.find(query).sort({ createdAt: -1 });
+    if (limitNum > 0) {
+      schoolsQuery = schoolsQuery.skip((pageNum - 1) * limitNum).limit(limitNum);
+    }
+    
+    const rawSchools = await schoolsQuery;
+
+    // Ensure MongoDB school records store classes as an array
+    const schools = await Promise.all(
+      rawSchools.map(async (sch) => {
+        if (!Array.isArray(sch.classes)) {
+          sch.classes = normalizeClasses(sch.classes);
+          try {
+            await sch.save();
+          } catch (e) {}
+        }
+        return sch;
+      })
+    );
+
+    res.json({
+      success: true,
+      schools,
+      total: totalCount,
+      page: pageNum,
+      limit: limitNum > 0 ? limitNum : totalCount,
+      hasMore: limitNum > 0 ? (pageNum * limitNum < totalCount) : false
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -22,6 +89,50 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "School not found" });
     }
     res.json({ success: true, school });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST create a new school (Admin onboarding)
+router.post("/", async (req, res) => {
+  try {
+    const schoolData = req.body;
+    if (!schoolData.name) {
+      return res.status(400).json({ success: false, message: "School name is required." });
+    }
+    const school = new School({
+      ...schoolData,
+      status: schoolData.status || "Partner Active"
+    });
+    await school.save();
+    res.status(201).json({ success: true, message: "School created successfully", school });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PUT update a school
+router.put("/:id", async (req, res) => {
+  try {
+    const school = await School.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!school) {
+      return res.status(404).json({ success: false, message: "School not found" });
+    }
+    res.json({ success: true, message: "School updated successfully", school });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE a school
+router.delete("/:id", async (req, res) => {
+  try {
+    const school = await School.findByIdAndDelete(req.params.id);
+    if (!school) {
+      return res.status(404).json({ success: false, message: "School not found" });
+    }
+    res.json({ success: true, message: "School deleted successfully" });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -51,14 +162,27 @@ router.post("/bulk-order", async (req, res) => {
       additionalNotes
     } = req.body;
 
-    if (!institutionName || !contactName || !contactEmail || !contactPhone || !city || !state || !pincode) {
+    if (!institutionName || !contactName || !contactPhone) {
       return res.status(400).json({
         success: false,
-        message: "Please fill all required institution, contact administrator, and location fields."
+        message: "Please fill required fields: Institution Name, Contact Person, and Contact Phone Number."
       });
     }
 
-    const refCode = referenceId || `BULK-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+    const uniqueTag = `${Date.now().toString().slice(-6)}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const refCode = referenceId || `BULK-${uniqueTag}`;
+
+    const sanitizedRequirements = Array.isArray(requirements)
+      ? requirements.map((reqItem) => ({
+          category: reqItem.category || "General Bulk Procurement",
+          itemName: reqItem.itemName || "Bulk Item Demand",
+          quantity: Number(reqItem.quantity) || 100,
+          sampleImage: reqItem.sampleImage || "",
+          notes: reqItem.notes || ""
+        }))
+      : [];
+
+    const totalQty = Number(totalQuantity) || sanitizedRequirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
 
     const bulkOrder = new SchoolBulkOrder({
       referenceId: refCode,
@@ -66,15 +190,15 @@ router.post("/bulk-order", async (req, res) => {
       schoolId: schoolId || "",
       institutionType: institutionType || "K-12 School",
       contactName,
-      contactEmail,
+      contactEmail: contactEmail || "",
       contactPhone,
       designation: designation || "Administrator",
       address: address || "",
-      city,
-      state,
-      pincode,
-      requirements: Array.isArray(requirements) ? requirements : [],
-      totalQuantity: Number(totalQuantity) || 0,
+      city: city || "",
+      state: state || "",
+      pincode: pincode || "",
+      requirements: sanitizedRequirements,
+      totalQuantity: totalQty,
       targetDeliveryDate: targetDeliveryDate || "",
       logoEmbroideryRequired: Boolean(logoEmbroideryRequired),
       targetBudgetPerKit: targetBudgetPerKit || "",
@@ -84,7 +208,7 @@ router.post("/bulk-order", async (req, res) => {
 
     await bulkOrder.save();
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: "School Bulk Order inquiry submitted successfully!",
       referenceId: bulkOrder.referenceId,
@@ -92,7 +216,7 @@ router.post("/bulk-order", async (req, res) => {
     });
   } catch (error) {
     console.error("School Bulk Order submission error:", error);
-    res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 

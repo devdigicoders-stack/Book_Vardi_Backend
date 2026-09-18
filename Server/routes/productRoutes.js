@@ -1,6 +1,10 @@
 import express from "express";
 import {
   getProducts,
+  getRecentlyViewedProducts,
+  getFeaturedProducts,
+  getSpecialOffers,
+  getRecommendedProducts,
   getProductById,
   createProduct,
   updateProduct,
@@ -9,6 +13,12 @@ import {
 import { authenticateToken } from "../middlewares/auth.js";
 
 const router = express.Router();
+
+// Carousel Special Endpoints (must come before /:id)
+router.get("/recently-viewed", getRecentlyViewedProducts);
+router.get("/featured", getFeaturedProducts);
+router.get("/special-offers", getSpecialOffers);
+router.get("/recommended", getRecommendedProducts);
 
 // Publicly browse products
 router.get("/", getProducts);

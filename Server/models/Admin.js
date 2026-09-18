@@ -4,8 +4,15 @@ import bcrypt from "bcryptjs";
 const adminSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
+  phone: { type: String, default: "" },
   password: { type: String, required: true },
-  role: { type: String, default: 'admin' },
+  role: { type: String, default: 'admin' }, // 'admin' | 'super_admin' | 'subadmin'
+  permissions: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  status: { type: String, enum: ['active', 'suspended'], default: 'active' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 

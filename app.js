@@ -3,6 +3,7 @@ import cors from "cors";
 import path from "path";
 import fs from "fs";
 import dotenv from "dotenv";
+dotenv.config();
 import connectDB from "./config/db.js";
 
 // Ensure all upload directories exist on server startup
@@ -16,6 +17,7 @@ import connectDB from "./config/db.js";
 
 // Models & initial setup
 import Admin from "./Server/models/Admin.js";
+import User from "./Server/models/User.js";
 import bcrypt from "bcryptjs";
 
 // Routes
@@ -34,23 +36,20 @@ import wishlistRoutes from "./Server/routes/wishlistRoutes.js";
 import couponRoutes from "./Server/routes/couponRoutes.js";
 import reviewRoutes from "./Server/routes/reviewRoutes.js";
 import schoolRoutes from "./Server/routes/schoolRoutes.js";
+import contactRoutes from "./Server/routes/contactRoutes.js";
 
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-
-import { seedDatabaseIfEmpty } from "./Server/config/autoSeed.js";
 
 dotenv.config();
 
 const app = express();
 
 // 1. Connect to MongoDB
-connectDB().then(() => {
-  seedDatabaseIfEmpty();
-}).catch(() => {});
+connectDB().catch(() => {});
 
 
-// 2. Create Default Admin if doesn't exist
+// 2. Create Default Admin & ensure Phone 1231231232 has admin role
 const initDefaultAdmin = async () => {
   try {
     const adminExists = await Admin.findOne({ email: "admin@admin.com" });
@@ -62,6 +61,20 @@ const initDefaultAdmin = async () => {
         password: hashedPassword
       });
       console.log("Default admin created: admin@admin.com / admin123");
+    }
+
+    const phoneAdmin = await User.findOne({
+      $or: [
+        { phone: "1231231232" },
+        { phone: "+911231231232" },
+        { phone: "+91 1231231232" }
+      ]
+    });
+    if (phoneAdmin && phoneAdmin.role !== "admin") {
+      phoneAdmin.role = "admin";
+      phoneAdmin.status = "active";
+      await phoneAdmin.save();
+      console.log("Updated user 1231231232 to admin role");
     }
   } catch (error) {
     console.error("Default admin creation error:", error.message);
@@ -100,6 +113,21 @@ app.use("/api/admin/login", authLimiter);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Console Request Logger Middleware (Disabled by default to keep console clean on API calls)
+if (process.env.ENABLE_REQUEST_LOGGING === "true") {
+  app.use((req, res, next) => {
+    const hasAuth = req.headers.authorization || req.headers['x-user-phone'] || req.headers['x-seller-phone'] || req.headers['x-seller-id'] || req.headers['x-user-id'];
+    const authHeader = hasAuth ? ' [Auth: Present]' : ' [Auth: None]';
+    console.log(`📡 [BACKEND REQ] ${new Date().toLocaleTimeString('en-IN')} | ${req.method} ${req.originalUrl}${authHeader}`);
+    if (req.body && Object.keys(req.body).length > 0) {
+      const bodyCopy = { ...req.body };
+      if (bodyCopy.password) bodyCopy.password = '***';
+      console.log(`   └─ Body:`, JSON.stringify(bodyCopy).slice(0, 300));
+    }
+    next();
+  });
+}
+
 // 4. Serve Static Uploads (Documents & Product Images)
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads"), {
   setHeaders: (res, filePath) => {
@@ -127,6 +155,7 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/stores", storeRoutes);
 app.use("/api/schools", schoolRoutes);
+app.use("/api/contact", contactRoutes);
 
 // 6. Health & Status Check
 app.get("/api/health", (req, res) => {

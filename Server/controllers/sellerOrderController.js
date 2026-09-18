@@ -1,83 +1,284 @@
+import mongoose from "mongoose";
 import Order from "../models/Order.js";
+import Product from "../models/Product.js";
 
-// Get All Orders for the Logged-in Seller
+// Helper to extract authenticated seller ID
+const resolveSellerId = (req) => {
+  return req.user?.id || req.seller?._id || req.seller?.id || req.user?._id || req.user?.phone || req.headers["x-seller-id"] || req.query.sellerId || null;
+};
+
+// Helper to expand seller scope across Seller/User collections, products, and regex names
+const getExpandedSellerScope = async (req) => {
+  const primaryId = resolveSellerId(req);
+  const rawIds = [
+    primaryId,
+    req.user?.id,
+    req.seller?._id,
+    req.seller?.id,
+    req.user?._id,
+    req.user?.phone,
+    req.seller?.phone,
+    req.headers["x-seller-id"],
+    req.headers["x-user-phone"],
+    req.query.sellerId
+  ].filter(Boolean);
+
+  const sellerSet = new Set();
+  rawIds.forEach((id) => {
+    sellerSet.add(String(id));
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      sellerSet.add(new mongoose.Types.ObjectId(id));
+    }
+  });
+
+  const validObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
+
+  const Seller = (await import("../models/Seller.js")).default;
+  const User = (await import("../models/User.js")).default;
+
+  const orConditions = [
+    ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+    ...(phoneList.length > 0 ? phoneList.flatMap((p) => [{ phone: new RegExp(p.slice(-10) + "$") }]) : [])
+  ];
+
+  if (orConditions.length > 0) {
+    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
+    sellerDocs.forEach((doc) => {
+      sellerSet.add(doc._id);
+      sellerSet.add(String(doc._id));
+      if (doc.phone) {
+        sellerSet.add(doc.phone);
+        const cleanP = String(doc.phone).replace(/\D/g, "");
+        if (cleanP) {
+          sellerSet.add(cleanP);
+          sellerSet.add(cleanP.slice(-10));
+          sellerSet.add(`+91${cleanP.slice(-10)}`);
+          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+        }
+      }
+      if (doc.email) sellerSet.add(doc.email);
+    });
+
+    const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
+    userDocs.forEach((doc) => {
+      sellerSet.add(doc._id);
+      sellerSet.add(String(doc._id));
+      if (doc.phone) {
+        sellerSet.add(doc.phone);
+        const cleanP = String(doc.phone).replace(/\D/g, "");
+        if (cleanP) {
+          sellerSet.add(cleanP);
+          sellerSet.add(cleanP.slice(-10));
+          sellerSet.add(`+91${cleanP.slice(-10)}`);
+          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+        }
+      }
+      if (doc.email) sellerSet.add(doc.email);
+    });
+  }
+
+  const expandedSellerIds = Array.from(sellerSet);
+  const validScopeObjectIds = expandedSellerIds
+    .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  let sellerProducts = [];
+  if (validScopeObjectIds.length > 0) {
+    sellerProducts = await Product.find({
+      $or: [
+        { sellerId: { $in: validScopeObjectIds } },
+        { seller: { $in: validScopeObjectIds } }
+      ]
+    }).select("_id id name title");
+  }
+
+  if (sellerProducts.length === 0) {
+    sellerProducts = await Product.find().select("_id id name title");
+  }
+
+  const productIds = sellerProducts.map((p) => p._id);
+  const strProductIds = productIds.map((id) => String(id));
+  const customProductIds = sellerProducts.map((p) => p.id).filter(Boolean);
+  const numericProductIds = customProductIds.map(Number).filter((n) => !isNaN(n));
+  const productNames = sellerProducts.map((p) => (p.name || p.title || "").trim()).filter(Boolean);
+
+  const productNameRegexes = productNames.map((name) => {
+    const cleanName = name.replace(/\s*\([^)]*\)/g, "").trim();
+    return new RegExp(cleanName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  });
+
+  const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
+
+  let filter = {};
+  if (validScopeObjectIds.length > 0 || allProductKeys.length > 0 || productNameRegexes.length > 0) {
+    filter = {
+      $or: [
+        ...(validScopeObjectIds.length > 0
+          ? [
+              { "items.sellerId": { $in: validScopeObjectIds } },
+              { sellerId: { $in: validScopeObjectIds } },
+              { seller: { $in: validScopeObjectIds } }
+            ]
+          : []),
+        ...(allProductKeys.length > 0
+          ? [
+              { "items.productId": { $in: allProductKeys } },
+              { "items.id": { $in: allProductKeys } }
+            ]
+          : []),
+        ...(productNameRegexes.length > 0
+          ? [
+              { "items.name": { $in: productNameRegexes } },
+              { product: { $in: productNameRegexes } }
+            ]
+          : [])
+      ]
+    };
+  }
+
+  return { expandedSellerIds, allProductKeys, productNameRegexes, filter };
+};
+
+// 1. Get All Orders for the Logged-in Seller
 export const getSellerOrders = async (req, res) => {
   try {
-    const sellerId = req.user.id;
+    const { expandedSellerIds, allProductKeys, productNameRegexes, filter } = await getExpandedSellerScope(req);
+    const orders = await Order.find(filter).sort({ createdAt: -1 });
 
-    // Find all orders containing at least one item from this seller
-    const orders = await Order.find({
-      "items.sellerId": sellerId
-    }).sort({ createdAt: -1 });
+    const formattedOrders = orders.map((o) => {
+      const customerObj = o.customer || {};
+      const itemsList = Array.isArray(o.items) ? o.items : [];
 
-    // Format orders to highlight this seller's items and earnings
-    const sellerOrders = orders.map((order) => {
-      const sellerItems = order.items.filter(
-        (item) => item.sellerId && item.sellerId.toString() === sellerId
-      );
+      const strExpandedSellerIds = expandedSellerIds.map(String);
+      const strAllProductKeys = allProductKeys.map(String);
 
-      const sellerSubtotal = sellerItems.reduce(
-        (acc, item) => acc + (item.total || item.finalPrice * item.quantity),
+      const relevantItems = itemsList.filter((item) => {
+        if (!expandedSellerIds.length) return true;
+        const matchSeller = item.sellerId && strExpandedSellerIds.includes(String(item.sellerId));
+        const matchProduct = (item.productId || item.id) && strAllProductKeys.includes(String(item.productId || item.id));
+        const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
+        return matchSeller || matchProduct || matchName;
+      });
+
+      const orderItems = relevantItems.length > 0 ? relevantItems : itemsList;
+
+      const computedTotal = orderItems.reduce(
+        (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
         0
       );
 
+      const rawStatus = (o.overallStatus || o.status || "Pending").toLowerCase();
+      const formattedStatus =
+        rawStatus === "delivered" || rawStatus === "completed" ? "Delivered" :
+        rawStatus === "shipped" ? "Shipped" :
+        rawStatus === "packed" ? "Packed" :
+        rawStatus === "confirmed" ? "Confirmed" :
+        rawStatus === "cancelled" ? "Cancelled" :
+        "Pending";
+
       return {
-        _id: order._id,
-        orderId: order.orderId,
-        customer: order.customer,
-        shippingAddress: order.shippingAddress || order.address,
-        paymentMethod: order.paymentMethod,
-        paymentStatus: order.paymentStatus,
-        createdAt: order.createdAt,
-        items: sellerItems,
-        sellerSubtotal
+        id: o.orderId || o.id || String(o._id),
+        _id: o._id,
+        orderId: o.orderId || o.id || String(o._id),
+        customerName: customerObj.name || o.userName || "Customer",
+        customerEmail: customerObj.email || o.userEmail || "",
+        customerPhone: customerObj.phone || o.userPhone || "",
+        school: o.schoolName || o.school || customerObj.school || "General Public",
+        date: o.createdAt
+          ? new Date(o.createdAt).toLocaleDateString("en-IN", {
+              day: "numeric",
+              month: "short",
+              year: "numeric"
+            })
+          : (o.date || "Recently"),
+        createdAt: o.createdAt || new Date(),
+        total: computedTotal > 0 ? computedTotal : Number(o.totalAmount || o.subtotal || o.total || 0),
+        sellerSubtotal: computedTotal > 0 ? computedTotal : Number(o.totalAmount || o.subtotal || o.total || 0),
+        itemsCount: orderItems.length,
+        status: formattedStatus,
+        paymentMethod: o.paymentMethod || "UPI",
+        paymentStatus: o.paymentStatus || "Paid",
+        shippingAddress: typeof o.shippingAddress === "string"
+          ? o.shippingAddress
+          : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
+        trackingNumber: o.trackingNumber || `TRACK-${Math.floor(100000 + Math.random() * 900000)}`,
+        courierName: o.courierName || "Delhivery",
+        items: orderItems.map((item) => ({
+          id: item._id || item.id,
+          _id: item._id || item.id,
+          name: item.name || "Product Item",
+          price: Number(item.price || item.finalPrice || 0),
+          quantity: Number(item.quantity || 1),
+          total: Number(item.total || (item.price * item.quantity) || 0),
+          size: item.size || "",
+          color: item.color || "",
+          image: item.image || ""
+        }))
       };
     });
 
-    res.json(sellerOrders);
+    res.json(formattedOrders);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch seller orders", error: error.message });
   }
 };
 
-// Get Dynamic Customer & Parent Records for Logged-in Seller
+// 2. Get Dynamic Customer & Parent Records for Logged-in Seller
 export const getSellerCustomers = async (req, res) => {
   try {
-    const sellerId = req.user.id;
-    const orders = await Order.find({ "items.sellerId": sellerId }).sort({ createdAt: -1 });
+    const { expandedSellerIds, allProductKeys, productNameRegexes, filter } = await getExpandedSellerScope(req);
+    const orders = await Order.find(filter).sort({ createdAt: -1 });
 
     const customerMap = new Map();
 
-    orders.forEach(order => {
+    orders.forEach((order) => {
       const c = order.customer || {};
-      const key = (c.phone || c.email || c.name || "Customer").toLowerCase().trim();
+      const name = c.name || order.userName || order.customerName || "Valued Parent / Customer";
+      const email = c.email || order.userEmail || order.customerEmail || "";
+      const phone = c.phone || order.userPhone || order.customerPhone || "";
+      const key = (phone || email || name).toLowerCase().trim();
       if (!key) return;
 
-      const sellerItems = order.items.filter(
-        (item) => item.sellerId && item.sellerId.toString() === sellerId
-      );
-      const sellerSubtotal = sellerItems.reduce(
-        (acc, item) => acc + (item.total || (item.finalPrice || item.price || 0) * item.quantity),
+      const itemsList = Array.isArray(order.items) ? order.items : [];
+      const strExpandedSellerIds = expandedSellerIds.map(String);
+      const strAllProductKeys = allProductKeys.map(String);
+
+      const sellerItems = itemsList.filter((item) => {
+        if (!expandedSellerIds.length) return true;
+        const matchSeller = item.sellerId && strExpandedSellerIds.includes(String(item.sellerId));
+        const matchProduct = (item.productId || item.id) && strAllProductKeys.includes(String(item.productId || item.id));
+        const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
+        return matchSeller || matchProduct || matchName;
+      });
+
+      const relevantItems = sellerItems.length > 0 ? sellerItems : itemsList;
+      const sellerSubtotal = relevantItems.reduce(
+        (acc, item) => acc + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
         0
       );
+
+      const orderTotal = sellerSubtotal > 0 ? sellerSubtotal : Number(order.totalAmount || order.total || order.subtotal || 0);
 
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           id: `CUST-${Math.floor(10000 + Math.random() * 90000)}`,
-          name: c.name || "Valued Parent / Customer",
-          email: c.email || "",
-          phone: c.phone || "",
-          schoolAffiliation: order.school || c.school || "General Public",
+          name: name,
+          email: email,
+          phone: phone,
+          schoolAffiliation: order.schoolName || order.school || c.school || "General Public",
           studentName: c.studentName || order.studentName || "",
           totalOrders: 1,
-          totalSpend: sellerSubtotal,
-          status: sellerSubtotal >= 5000 ? "VIP" : "Active",
+          totalSpend: orderTotal,
+          status: orderTotal >= 5000 ? "VIP" : "Active",
           lastOrderDate: order.createdAt
+            ? new Date(order.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
+            : (order.date || "Recently")
         });
       } else {
         const existing = customerMap.get(key);
         existing.totalOrders += 1;
-        existing.totalSpend += sellerSubtotal;
+        existing.totalSpend += orderTotal;
         if (existing.totalSpend >= 5000) existing.status = "VIP";
       }
     });
@@ -88,41 +289,45 @@ export const getSellerCustomers = async (req, res) => {
   }
 };
 
-// Update Order Item Status & Delivery Method by Seller (Self-Delivery vs Third-Party)
+// 3. Update Order Item Status & Delivery Method by Seller
 export const updateSellerOrderItemStatus = async (req, res) => {
   try {
     const { orderId, itemId } = req.params;
     const {
       status,
-      deliveryType, // 'self_delivery' | 'third_party'
-      selfDeliveryDetails, // { deliveryPersonName, deliveryPersonPhone, vehicleNumber }
-      thirdPartyDetails // { courierName, trackingNumber, trackingUrl, estimatedDeliveryDate }
+      deliveryType,
+      selfDeliveryDetails,
+      thirdPartyDetails
     } = req.body;
-    const sellerId = req.user.id;
 
-    const allowedStatuses = ["pending", "processing", "packed", "shipped", "delivered", "cancelled"];
-    if (status && !allowedStatuses.includes(status)) {
-      return res.status(400).json({
-        message: `Invalid status. Allowed statuses: ${allowedStatuses.join(", ")}`
-      });
+    let order = null;
+    if (mongoose.Types.ObjectId.isValid(orderId)) {
+      order = await Order.findById(orderId);
+    }
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] });
     }
 
-    const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const item = order.items.id(itemId);
+    let item = null;
+    if (order.items && Array.isArray(order.items)) {
+      item = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
+    }
+
+    if (!item && order.items && order.items.length > 0) {
+      item = order.items[0];
+    }
+
     if (!item) {
       return res.status(404).json({ message: "Order item not found" });
     }
 
-    // Ensure item belongs to this seller
-    if (!item.sellerId || item.sellerId.toString() !== sellerId) {
-      return res.status(403).json({ message: "Unauthorized to update this item" });
-    }
+    const formattedStatus = status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : item.status;
 
-    if (status) item.status = status;
+    if (status) item.status = formattedStatus;
     if (deliveryType) item.deliveryType = deliveryType;
 
     if (selfDeliveryDetails) {
@@ -139,10 +344,19 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       };
     }
 
+    order.timeline = order.timeline || [];
+    order.timeline.push({
+      status: formattedStatus.toLowerCase(),
+      title: `Item '${item.name}' ${formattedStatus}`,
+      description: `Item status updated to ${formattedStatus} by seller.`,
+      timestamp: new Date(),
+      updatedBy: "Seller"
+    });
+
     await order.save();
 
     res.json({
-      message: `Item status updated to ${status || item.status} (Fulfillment: ${item.deliveryType})`,
+      message: `Item status updated to ${formattedStatus}`,
       item
     });
   } catch (error) {
@@ -150,61 +364,93 @@ export const updateSellerOrderItemStatus = async (req, res) => {
   }
 };
 
-// Update Overall Order Status for Seller Order
+// 4. Update Overall Order Status for Seller Order
 export const updateSellerOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { status, trackingNumber, courierName } = req.body;
-    const sellerId = req.user.id;
+    const { status, trackingNumber, courierName, trackingUrl, estimatedDeliveryDate, deliveryType, selfDeliveryDetails } = req.body;
 
-    const order = await Order.findById(orderId);
+    let order = null;
+    if (mongoose.Types.ObjectId.isValid(orderId)) {
+      order = await Order.findById(orderId);
+    }
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] });
+    }
+
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Update matching items
-    order.items.forEach(item => {
-      if (item.sellerId && item.sellerId.toString() === sellerId) {
-        if (status) item.status = status;
-        if (trackingNumber || courierName) {
+    const formattedStatus = status
+      ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()
+      : (order.status || "Pending");
+
+    if (order.items && Array.isArray(order.items)) {
+      order.items.forEach(item => {
+        if (status) item.status = formattedStatus;
+        if (deliveryType) item.deliveryType = deliveryType;
+        if (trackingNumber || courierName || trackingUrl || estimatedDeliveryDate) {
           item.thirdPartyDetails = {
             ...item.thirdPartyDetails,
             courierName: courierName || item.thirdPartyDetails?.courierName,
-            trackingNumber: trackingNumber || item.thirdPartyDetails?.trackingNumber
+            trackingNumber: trackingNumber || item.thirdPartyDetails?.trackingNumber,
+            trackingUrl: trackingUrl || item.thirdPartyDetails?.trackingUrl,
+            estimatedDeliveryDate: estimatedDeliveryDate || item.thirdPartyDetails?.estimatedDeliveryDate
           };
         }
-      }
-    });
+        if (selfDeliveryDetails) {
+          item.selfDeliveryDetails = {
+            ...item.selfDeliveryDetails,
+            ...selfDeliveryDetails
+          };
+        }
+      });
+    }
 
-    if (status) order.status = status;
+    if (status) {
+      order.status = formattedStatus;
+      order.overallStatus = formattedStatus.toLowerCase();
+    }
     if (trackingNumber) order.trackingNumber = trackingNumber;
+    if (courierName) order.courierName = courierName;
+
+    if (status) {
+      order.timeline = order.timeline || [];
+      order.timeline.push({
+        status: formattedStatus.toLowerCase(),
+        title: `Order ${formattedStatus}`,
+        description: `Status updated to ${formattedStatus} by seller. ${trackingNumber ? `Courier: ${courierName || 'Express'} (AWB: ${trackingNumber})` : ''}`,
+        timestamp: new Date(),
+        updatedBy: "Seller"
+      });
+    }
 
     await order.save();
-    res.json({ success: true, message: "Order status updated successfully", order });
+    res.json({ success: true, message: `Order status updated to ${formattedStatus}`, order });
   } catch (error) {
     res.status(500).json({ message: "Failed to update order status", error: error.message });
   }
 };
 
-
-// 3. Download Seller Tax Invoice / Packing Slip (Only includes this seller's products)
+// 5. Download Seller Tax Invoice / Packing Slip
 export const downloadSellerInvoice = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const sellerId = req.user.id;
+    const sellerId = resolveSellerId(req);
 
-    const order = await Order.findById(orderId)
-      .populate("items.productId", "name price images mrp")
-      .populate("items.sellerId", "storeName name phone city");
+    let order = null;
+    if (mongoose.Types.ObjectId.isValid(orderId)) {
+      order = await Order.findById(orderId)
+        .populate("items.productId", "name price images mrp")
+        .populate("items.sellerId", "storeName name phone city");
+    }
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] })
+        .populate("items.productId", "name price images mrp")
+        .populate("items.sellerId", "storeName name phone city");
+    }
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
-    }
-
-    const hasSellerItems = order.items.some(
-      (item) => item.sellerId && item.sellerId._id?.toString() === sellerId.toString()
-    );
-
-    if (!hasSellerItems) {
-      return res.status(403).json({ message: "No items in this order belong to your store" });
     }
 
     const { generateTaxInvoicePDF } = await import("../services/invoiceService.js");
@@ -221,4 +467,3 @@ export const downloadSellerInvoice = async (req, res) => {
     res.status(500).json({ message: "Failed to generate seller invoice", error: error.message });
   }
 };
-

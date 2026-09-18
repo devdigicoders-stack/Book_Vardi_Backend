@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 export const connectDB = async () => {
   const primaryUri = process.env.MONGODB_URI || process.env.MONGO_URI;
-  const localUri = "mongodb://127.0.0.1:27017/bookvardi_db";
+  const localUri = "mongodb://127.0.0.1:27017/bookvardi_db_final";
 
   if (primaryUri) {
     try {

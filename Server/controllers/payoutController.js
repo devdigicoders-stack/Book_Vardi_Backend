@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Payout from "../models/Payout.js";
 import Seller from "../models/Seller.js";
 import Order from "../models/Order.js";
@@ -5,13 +6,18 @@ import Order from "../models/Order.js";
 // 1. Get Seller Wallet & Financial Overview
 export const getSellerWalletOverview = async (req, res) => {
   try {
-    const sellerId = req.user.id;
-    const seller = await Seller.findById(sellerId).select(
-      "walletBalance totalEarnings totalWithdrawn commissionPercentage bankDetails"
-    );
+    const sellerId = req.user?.id;
+    const isValidId = sellerId && mongoose.Types.ObjectId.isValid(sellerId);
+    const seller = isValidId ? await Seller.findById(sellerId).select(
+      "walletBalance totalEarnings totalWithdrawn commissionPercentage commissionRate bankDetails"
+    ) : null;
 
     if (!seller) {
-      return res.status(404).json({ message: "Seller not found" });
+      return res.json({
+        wallet: { walletBalance: 0, totalEarnings: 0, totalWithdrawn: 0, commissionPercentage: 5, commissionRate: 5, bankDetails: {} },
+        recentPayouts: [],
+        deliveredOrdersCount: 0
+      });
     }
 
     // Recent Payout Requests
@@ -28,7 +34,8 @@ export const getSellerWalletOverview = async (req, res) => {
         walletBalance: seller.walletBalance || 0,
         totalEarnings: seller.totalEarnings || 0,
         totalWithdrawn: seller.totalWithdrawn || 0,
-        commissionPercentage: seller.commissionPercentage || 5,
+        commissionPercentage: seller.commissionPercentage ?? seller.commissionRate ?? 5,
+        commissionRate: seller.commissionRate ?? seller.commissionPercentage ?? 5,
         bankDetails: seller.bankDetails
       },
       recentPayouts,

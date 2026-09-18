@@ -1,46 +1,180 @@
+import mongoose from "mongoose";
 import Seller from "../models/Seller.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
+import path from "path";
+import fs from "fs";
+
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
+
+// Helper: Convert Base64 data URL to physical file on disk
+export const saveBase64ToFile = (dataUrl, folder = "documents", fieldName = "doc") => {
+  if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+    return dataUrl || "";
+  }
+  try {
+    const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
+    if (!matches) return dataUrl || "";
+
+    const mime = matches[1];
+    const base64Data = matches[2];
+    const buffer = Buffer.from(base64Data, "base64");
+
+    let ext = ".png";
+    if (mime.includes("pdf")) ext = ".pdf";
+    else if (mime.includes("jpeg") || mime.includes("jpg")) ext = ".jpg";
+    else if (mime.includes("webp")) ext = ".webp";
+
+    const targetSubfolder = folder === "avatars" ? "avatars" : "documents";
+    const uploadDir = path.join(process.cwd(), "uploads", targetSubfolder);
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    const filename = `${fieldName}-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+    fs.writeFileSync(filePath, buffer);
+
+    return `/uploads/${targetSubfolder}/${filename}`;
+  } catch (err) {
+    console.error("saveBase64ToFile error:", err);
+    return dataUrl || "";
+  }
+};
 
 // Seller Registration (with KYC Document Uploads, Location & Delivery Preferences)
 export const registerSeller = async (req, res) => {
   try {
-    const {
-      name,
-      storeName,
-      email,
-      phone,
-      password,
-      address,
-      city,
-      state,
-      pincode,
-      latitude,
-      longitude,
-      formattedAddress,
-      selfDelivery,
-      maxDeliveryRadiusKm,
-      thirdPartyDelivery,
-      gstNumber,
-      accountHolderName,
-      accountNumber,
-      ifscCode,
-      bankName,
-      branchName,
-      aadhaarNumber,
-      panNumber
-    } = req.body;
+    const name = req.body.name || req.body.sellerName || req.body.ownerFullName;
+    const storeName = req.body.storeName || req.body.tradeName || req.body.legalBusinessName;
+    const email = req.body.email || req.body.sellerEmail;
+    const phone = req.body.phone || req.body.sellerPhone;
+    const password = req.body.password || "BookVardiSeller@123";
+    const address = req.body.address || req.body.addressLine1 || `${req.body.addressLine1 || ''} ${req.body.addressLine2 || ''}`.trim();
+    const city = req.body.city;
+    const state = req.body.state || "Uttar Pradesh";
+    const pincode = req.body.pincode;
+    const gstNumber = req.body.gstNumber || req.body.gstin || "";
+    const msmeRegistrationNumber = req.body.msmeRegistrationNumber || req.body.msmeNumber || req.body.msme || "";
+    const cinNumber = req.body.cinNumber || req.body.cinRegistration || req.body.cin || "";
+    const accountHolderName = req.body.accountHolderName || req.body.bankAccountHolder || "";
+    const accountNumber = req.body.accountNumber || req.body.bankAccountNumber || "";
+    const ifscCode = req.body.ifscCode || req.body.bankIfscCode || "";
+    const bankName = req.body.bankName || "";
+    const branchName = req.body.branchName || req.body.bankBranch || "";
+    const aadhaarNumber = req.body.aadhaarNumber || req.body.ownerAadhaarLast4 || "";
+    const panNumber = req.body.panNumber || req.body.ownerPan || req.body.businessPan || "";
+    const yearStarted = req.body.yearStarted || "";
 
     // Validate required fields
-    if (!name || !storeName || !email || !phone || !password || !address || !city || !state || !pincode) {
+    if (!name || !storeName || !email || !phone || !address || !city || !state || !pincode) {
       return res.status(400).json({
         message: "Please fill all required personal, store, and address fields."
       });
     }
 
+    // Extract uploaded documents paths (supports multipart files AND base64 data URLs)
+    const files = req.files || {};
+    const aadhaarDoc = files.aadhaarDoc?.[0] ? `/uploads/documents/${files.aadhaarDoc[0].filename}` : saveBase64ToFile(req.body.aadhaarDoc, "documents", "aadhaar");
+    const panDoc = files.panDoc?.[0] ? `/uploads/documents/${files.panDoc[0].filename}` : saveBase64ToFile(req.body.panDoc, "documents", "pan");
+    const passbookDoc = files.passbookDoc?.[0] ? `/uploads/documents/${files.passbookDoc[0].filename}` : saveBase64ToFile(req.body.passbookDoc, "documents", "passbook");
+    const shopDoc = files.shopDoc?.[0] ? `/uploads/documents/${files.shopDoc[0].filename}` : saveBase64ToFile(req.body.shopDoc, "documents", "shop");
+    const addressProofDoc = files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : saveBase64ToFile(req.body.addressProofDoc, "documents", "addressProof");
+    const profilePhoto = files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : (files.avatar?.[0] ? `/uploads/avatars/${files.avatar[0].filename}` : saveBase64ToFile(req.body.profilePhoto || req.body.avatar, "avatars", "profilePhoto"));
+
+    // Check if seller email or phone already exists
+    const existingSeller = await Seller.findOne({
+      $or: [{ email: email.toLowerCase() }, { phone }]
+    });
+
+    const ownerDetailsObj = {
+      ownerFullName: req.body.ownerFullName || name || "",
+      ownerDesignation: req.body.ownerDesignation || "Proprietor",
+      ownerPan: req.body.ownerPan || req.body.businessPan || panNumber || "",
+      ownerAadhaarLast4: req.body.ownerAadhaarLast4 || aadhaarNumber || ""
+    };
+
+    const addressDetailsObj = {
+      addressLine1: req.body.addressLine1 || address || "",
+      addressLine2: req.body.addressLine2 || "",
+      landmark: req.body.landmark || "",
+      country: req.body.country || "India"
+    };
+
+    const addressProofDetailsObj = {
+      addressProofType: req.body.addressProofType || "",
+      addressProofDocNumber: req.body.addressProofDocNumber || ""
+    };
+
+    const storeDetailsObj = {
+      storeTagline: req.body.storeTagline || "",
+      storeDescription: req.body.storeDescription || "",
+      storeLogo: req.body.storeLogo || profilePhoto || ""
+    };
+
+    const catalogInfoObj = {
+      selectedCategories: Array.isArray(req.body.selectedCategories) ? req.body.selectedCategories : [],
+      primaryBrands: Array.isArray(req.body.primaryBrands) ? req.body.primaryBrands : [],
+      estimatedSkuCount: req.body.estimatedSkuCount || "",
+      sampleProductTitle: req.body.sampleProductTitle || ""
+    };
+
+    const agreementsObj = {
+      acceptedTerms: req.body.acceptedTerms === true || req.body.acceptedTerms === "true",
+      acceptedCommissionRate: req.body.acceptedCommissionRate === true || req.body.acceptedCommissionRate === "true",
+      acceptedReturnPolicy: req.body.acceptedReturnPolicy === true || req.body.acceptedReturnPolicy === "true",
+      authorizedSignatoryConfirmation: req.body.authorizedSignatoryConfirmation === true || req.body.authorizedSignatoryConfirmation === "true"
+    };
+
+    if (existingSeller) {
+      existingSeller.name = name || existingSeller.name;
+      existingSeller.storeName = storeName || existingSeller.storeName;
+      existingSeller.address = address || existingSeller.address;
+      existingSeller.city = city || existingSeller.city;
+      existingSeller.state = state || existingSeller.state;
+      existingSeller.pincode = pincode || existingSeller.pincode;
+      existingSeller.gstNumber = gstNumber || existingSeller.gstNumber;
+      existingSeller.msmeRegistrationNumber = msmeRegistrationNumber || existingSeller.msmeRegistrationNumber;
+      existingSeller.cinNumber = cinNumber || existingSeller.cinNumber;
+      existingSeller.yearStarted = yearStarted || existingSeller.yearStarted;
+      existingSeller.businessType = req.body.businessType || existingSeller.businessType || "Proprietorship";
+      existingSeller.annualTurnoverEstimate = req.body.annualTurnoverEstimate || existingSeller.annualTurnoverEstimate || "";
+      existingSeller.ownerDetails = { ...existingSeller.ownerDetails, ...ownerDetailsObj };
+      existingSeller.addressDetails = { ...existingSeller.addressDetails, ...addressDetailsObj };
+      existingSeller.addressProofDetails = { ...existingSeller.addressProofDetails, ...addressProofDetailsObj };
+      existingSeller.storeDetails = { ...existingSeller.storeDetails, ...storeDetailsObj };
+      existingSeller.catalogInfo = { ...existingSeller.catalogInfo, ...catalogInfoObj };
+      existingSeller.agreements = { ...existingSeller.agreements, ...agreementsObj };
+      existingSeller.status = "pending";
+      existingSeller.bankDetails = {
+        accountHolderName: accountHolderName || existingSeller.bankDetails?.accountHolderName || "",
+        accountNumber: accountNumber || existingSeller.bankDetails?.accountNumber || "",
+        ifscCode: ifscCode || existingSeller.bankDetails?.ifscCode || "",
+        bankName: bankName || existingSeller.bankDetails?.bankName || "",
+        branchName: branchName || existingSeller.bankDetails?.branchName || "",
+        accountType: req.body.accountType || existingSeller.bankDetails?.accountType || "Savings Account"
+      };
+      existingSeller.documents = {
+        ...existingSeller.documents,
+        aadhaarNumber: aadhaarNumber || existingSeller.documents?.aadhaarNumber || "",
+        panNumber: panNumber || existingSeller.documents?.panNumber || "",
+        msmeRegistrationNumber: msmeRegistrationNumber || existingSeller.documents?.msmeRegistrationNumber || "",
+        cinNumber: cinNumber || existingSeller.documents?.cinNumber || "",
+        addressProofDoc: addressProofDoc || existingSeller.documents?.addressProofDoc || "",
+        profilePhoto: profilePhoto || existingSeller.documents?.profilePhoto || ""
+      };
+      await existingSeller.save();
+      return res.status(200).json({
+        message: "Seller application updated successfully! Pending Admin review.",
+        sellerId: existingSeller._id,
+        storeName: existingSeller.storeName,
+        status: existingSeller.status
+      });
+    }
+
     // Validate self delivery radius if self delivery is chosen
+    const { selfDelivery, maxDeliveryRadiusKm, thirdPartyDelivery, latitude, longitude, formattedAddress } = req.body;
     const isSelfDelivery = selfDelivery === undefined || selfDelivery === true || selfDelivery === "true";
     const parsedRadius = maxDeliveryRadiusKm ? parseFloat(maxDeliveryRadiusKm) : 10;
     if (isSelfDelivery && (isNaN(parsedRadius) || parsedRadius <= 0)) {
@@ -48,26 +182,6 @@ export const registerSeller = async (req, res) => {
         message: "Please specify a valid self-delivery radius in KM (e.g. 5, 10, 15 km)."
       });
     }
-
-    // Check if seller email or phone already exists
-    const existingSeller = await Seller.findOne({
-      $or: [{ email: email.toLowerCase() }, { phone }]
-    });
-
-    if (existingSeller) {
-      return res.status(400).json({
-        message: "A seller with this email or phone number already exists."
-      });
-    }
-
-    // Extract uploaded documents paths
-    const files = req.files || {};
-    const aadhaarDoc = files.aadhaarDoc?.[0] ? `/uploads/documents/${files.aadhaarDoc[0].filename}` : "";
-    const panDoc = files.panDoc?.[0] ? `/uploads/documents/${files.panDoc[0].filename}` : "";
-    const passbookDoc = files.passbookDoc?.[0] ? `/uploads/documents/${files.passbookDoc[0].filename}` : "";
-    const shopDoc = files.shopDoc?.[0] ? `/uploads/documents/${files.shopDoc[0].filename}` : "";
-    const addressProofDoc = files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : "";
-    const profilePhoto = files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : (files.avatar?.[0] ? `/uploads/documents/${files.avatar[0].filename}` : "");
 
     // Parse coordinates if provided
     const lat = latitude ? parseFloat(latitude) : null;
@@ -87,6 +201,15 @@ export const registerSeller = async (req, res) => {
       city,
       state,
       pincode,
+      yearStarted: yearStarted || "",
+      businessType: req.body.businessType || "Proprietorship",
+      annualTurnoverEstimate: req.body.annualTurnoverEstimate || "",
+      ownerDetails: ownerDetailsObj,
+      addressDetails: addressDetailsObj,
+      addressProofDetails: addressProofDetailsObj,
+      storeDetails: storeDetailsObj,
+      catalogInfo: catalogInfoObj,
+      agreements: agreementsObj,
       location: {
         latitude: lat,
         longitude: lng,
@@ -97,6 +220,8 @@ export const registerSeller = async (req, res) => {
         }
       },
       gstNumber: gstNumber || "",
+      msmeRegistrationNumber: msmeRegistrationNumber || "",
+      cinNumber: cinNumber || "",
       deliveryPreferences: {
         selfDelivery: isSelfDelivery,
         maxDeliveryRadiusKm: parsedRadius,
@@ -107,13 +232,16 @@ export const registerSeller = async (req, res) => {
         accountNumber: accountNumber || "",
         ifscCode: ifscCode || "",
         bankName: bankName || "",
-        branchName: branchName || ""
+        branchName: branchName || "",
+        accountType: req.body.accountType || "Savings Account"
       },
       documents: {
         aadhaarNumber: aadhaarNumber || "",
         aadhaarDoc,
         panNumber: panNumber || "",
         panDoc,
+        msmeRegistrationNumber: msmeRegistrationNumber || "",
+        cinNumber: cinNumber || "",
         passbookDoc,
         shopDoc,
         addressProofDoc,
@@ -215,24 +343,40 @@ export const loginSeller = async (req, res) => {
 // Get Logged-in Seller Profile
 export const getSellerProfile = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.user.id).select("-password");
-    if (!seller) {
-      return res.status(404).json({ message: "Seller not found" });
+    const isValidId = req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id);
+    const seller = isValidId ? await Seller.findById(req.user.id).select("-password") : null;
+
+    if (seller) {
+      return res.json(seller);
     }
-    res.json(seller);
+
+    if (req.seller) {
+      return res.json(req.seller);
+    }
+
+    return res.status(404).json({ message: "Seller profile not found. Please log in." });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Failed to fetch seller profile", error: error.message });
   }
 };
 
-// Update Seller Profile (Store, Address, Location, Bank details)
+// Update Seller Profile (Store, Address, Location, Bank details, Avatar & Documents)
 export const updateSellerProfile = async (req, res) => {
   try {
+    const files = req.files || {};
     const {
       name,
+      sellerName,
+      ownerFullName,
       storeName,
+      tradeName,
+      legalBusinessName,
       phone,
+      sellerPhone,
+      email,
+      sellerEmail,
       address,
+      addressLine1,
       city,
       state,
       pincode,
@@ -241,29 +385,134 @@ export const updateSellerProfile = async (req, res) => {
       formattedAddress,
       deliveryPreferences,
       gstNumber,
-      bankDetails
+      gstin,
+      msmeRegistrationNumber,
+      cinNumber,
+      bankDetails,
+      bankAccountHolder,
+      bankAccountNumber,
+      bankIfscCode,
+      bankName,
+      bankBranch,
+      branchName,
+      yearStarted,
+      designation,
+      ownerDesignation,
+      avatar,
+      profilePhoto,
+      documents
     } = req.body;
 
+    const seller = await Seller.findById(req.user.id);
+    if (!seller) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
     const updates = {};
-    if (name) updates.name = name;
-    if (storeName) updates.storeName = storeName;
-    if (phone) updates.phone = phone;
-    if (address) updates.address = address;
+    const finalName = name || sellerName || ownerFullName;
+    if (finalName) updates.name = finalName;
+    const finalStoreName = storeName || tradeName || legalBusinessName;
+    if (finalStoreName) updates.storeName = finalStoreName;
+    const finalPhone = phone || sellerPhone;
+    if (finalPhone) updates.phone = finalPhone;
+    const finalEmail = email || sellerEmail;
+    if (finalEmail) updates.email = finalEmail.toLowerCase();
+    const finalAddress = address || addressLine1;
+    if (finalAddress) updates.address = finalAddress;
     if (city) updates.city = city;
     if (state) updates.state = state;
     if (pincode) updates.pincode = pincode;
-    if (gstNumber) updates.gstNumber = gstNumber;
-    if (bankDetails) updates.bankDetails = bankDetails;
+    if (gstNumber !== undefined || gstin !== undefined) updates.gstNumber = gstNumber || gstin || "";
+    if (msmeRegistrationNumber !== undefined) {
+      updates.msmeRegistrationNumber = msmeRegistrationNumber;
+    }
+    if (cinNumber !== undefined) {
+      updates.cinNumber = cinNumber;
+    }
+    const finalYearStarted = yearStarted || req.body.establishedYear;
+    if (finalYearStarted) updates.yearStarted = finalYearStarted;
+
+    // Detailed Address Info (Line 1, Line 2 / Colony, Landmark)
+    const finalLine1 = addressLine1 || address || seller.addressDetails?.addressLine1 || seller.address || "";
+    const finalLine2 = req.body.addressLine2 || req.body.colony || seller.addressDetails?.addressLine2 || "";
+    const finalLandmark = req.body.landmark || seller.addressDetails?.landmark || "";
+
+    updates.addressDetails = {
+      addressLine1: finalLine1,
+      addressLine2: finalLine2,
+      landmark: finalLandmark,
+      country: req.body.country || seller.addressDetails?.country || "India"
+    };
+
+    if (ownerFullName || designation || ownerDesignation || req.body.ownerPan || req.body.ownerAadhaarLast4) {
+      updates.ownerDetails = {
+        ownerFullName: ownerFullName || finalName || seller.ownerDetails?.ownerFullName || seller.name || "",
+        ownerDesignation: designation || ownerDesignation || seller.ownerDetails?.ownerDesignation || "Proprietor",
+        ownerPan: req.body.ownerPan || req.body.businessPan || seller.ownerDetails?.ownerPan || "",
+        ownerAadhaarLast4: req.body.ownerAadhaarLast4 || req.body.aadhaarNumber || seller.ownerDetails?.ownerAadhaarLast4 || ""
+      };
+    }
+
+    // Bank Details update
+    if (bankDetails || bankAccountHolder || bankAccountNumber || bankIfscCode || bankName || bankBranch || branchName) {
+      updates.bankDetails = {
+        accountHolderName: bankDetails?.accountHolderName || bankDetails?.bankAccountHolder || bankAccountHolder || seller.bankDetails?.accountHolderName || "",
+        accountNumber: bankDetails?.accountNumber || bankDetails?.bankAccountNumber || bankAccountNumber || seller.bankDetails?.accountNumber || "",
+        ifscCode: bankDetails?.ifscCode || bankDetails?.bankIfscCode || bankIfscCode || seller.bankDetails?.ifscCode || "",
+        bankName: bankDetails?.bankName || bankName || seller.bankDetails?.bankName || "",
+        branchName: bankDetails?.branchName || bankDetails?.bankBranch || bankBranch || branchName || seller.bankDetails?.branchName || ""
+      };
+    }
+
     if (deliveryPreferences) updates.deliveryPreferences = deliveryPreferences;
 
-    // Update location if coordinates provided
+    // Documents & Images processing (supports multipart attachments AND base64 data URLs)
+    const docUpdates = { ...(seller.documents || {}) };
+
+    let uploadedAvatar = files.avatar?.[0] ? `/uploads/avatars/${files.avatar[0].filename}` : (files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : null);
+    if (!uploadedAvatar && avatar) uploadedAvatar = saveBase64ToFile(avatar, "avatars", "avatar");
+    if (!uploadedAvatar && profilePhoto) uploadedAvatar = saveBase64ToFile(profilePhoto, "avatars", "profilePhoto");
+    if (!uploadedAvatar && documents?.profilePhoto) uploadedAvatar = saveBase64ToFile(documents.profilePhoto, "avatars", "profilePhoto");
+
+    if (uploadedAvatar) {
+      updates.avatar = uploadedAvatar;
+      docUpdates.profilePhoto = uploadedAvatar;
+    }
+
+    let uploadedAddressProof = files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : null;
+    if (!uploadedAddressProof && req.body.addressProofDoc) uploadedAddressProof = saveBase64ToFile(req.body.addressProofDoc, "documents", "addressProof");
+    if (!uploadedAddressProof && documents?.addressProofDoc) uploadedAddressProof = saveBase64ToFile(documents.addressProofDoc, "documents", "addressProof");
+    if (uploadedAddressProof) {
+      docUpdates.addressProofDoc = uploadedAddressProof;
+    }
+
+    let uploadedAadhaar = files.aadhaarDoc?.[0] ? `/uploads/documents/${files.aadhaarDoc[0].filename}` : null;
+    if (!uploadedAadhaar && req.body.aadhaarDoc) uploadedAadhaar = saveBase64ToFile(req.body.aadhaarDoc, "documents", "aadhaar");
+    if (uploadedAadhaar) docUpdates.aadhaarDoc = uploadedAadhaar;
+
+    let uploadedPan = files.panDoc?.[0] ? `/uploads/documents/${files.panDoc[0].filename}` : null;
+    if (!uploadedPan && req.body.panDoc) uploadedPan = saveBase64ToFile(req.body.panDoc, "documents", "pan");
+    if (uploadedPan) docUpdates.panDoc = uploadedPan;
+
+    if (req.body.aadhaarNumber || req.body.ownerAadhaarLast4) {
+      docUpdates.aadhaarNumber = req.body.aadhaarNumber || req.body.ownerAadhaarLast4;
+    }
+    if (req.body.panNumber || req.body.ownerPan || req.body.businessPan || req.body.pan) {
+      docUpdates.panNumber = req.body.panNumber || req.body.ownerPan || req.body.businessPan || req.body.pan;
+    }
+    if (msmeRegistrationNumber !== undefined) docUpdates.msmeRegistrationNumber = msmeRegistrationNumber;
+    if (cinNumber !== undefined) docUpdates.cinNumber = cinNumber;
+
+    updates.documents = docUpdates;
+
+    // Location update
     if (latitude !== undefined && longitude !== undefined) {
       const lat = parseFloat(latitude);
       const lng = parseFloat(longitude);
       updates.location = {
         latitude: lat,
         longitude: lng,
-        formattedAddress: formattedAddress || address || "",
+        formattedAddress: formattedAddress || address || seller.address || "",
         geo: {
           type: "Point",
           coordinates: [lng, lat]
@@ -276,6 +525,7 @@ export const updateSellerProfile = async (req, res) => {
     }).select("-password");
 
     res.json({
+      success: true,
       message: "Profile updated successfully",
       seller: updatedSeller
     });
@@ -287,24 +537,44 @@ export const updateSellerProfile = async (req, res) => {
 // Get Seller Store Operations Settings
 export const getSellerSettings = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.user.id).select(
-      "storeName email phone address city state pincode gstNumber deliveryPreferences bankDetails storeDetails"
-    );
-    if (!seller) return res.status(404).json({ message: "Seller not found" });
+    const isValidId = req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id);
+    const seller = isValidId ? await Seller.findById(req.user.id).select(
+      "storeName name email phone address city state pincode gstNumber deliveryPreferences bankDetails storeDetails"
+    ) : null;
 
-    res.json({
-      storeName: seller.storeName,
-      legalName: seller.name,
-      email: seller.email,
-      phone: seller.phone,
-      gstin: seller.gstNumber,
-      address: seller.address,
-      city: seller.city,
-      pincode: seller.pincode,
-      deliveryPreferences: seller.deliveryPreferences,
-      bankDetails: seller.bankDetails,
-      storeDetails: seller.storeDetails || {}
-    });
+    if (seller) {
+      return res.json({
+        storeName: seller.storeName,
+        legalName: seller.name,
+        email: seller.email,
+        phone: seller.phone,
+        gstin: seller.gstNumber,
+        address: seller.address,
+        city: seller.city,
+        pincode: seller.pincode,
+        deliveryPreferences: seller.deliveryPreferences,
+        bankDetails: seller.bankDetails,
+        storeDetails: seller.storeDetails || {}
+      });
+    }
+
+    if (req.seller) {
+      return res.json({
+        storeName: req.seller.storeName || "",
+        legalName: req.seller.name || "",
+        email: req.seller.email || "",
+        phone: req.seller.phone || "",
+        gstin: req.seller.gstNumber || "",
+        address: req.seller.address || "",
+        city: req.seller.city || "",
+        pincode: req.seller.pincode || "",
+        deliveryPreferences: req.seller.deliveryPreferences || {},
+        bankDetails: req.seller.bankDetails || {},
+        storeDetails: req.seller.storeDetails || {}
+      });
+    }
+
+    return res.status(404).json({ message: "Seller settings not found." });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch seller settings", error: error.message });
   }
@@ -455,18 +725,47 @@ export const verifySellerPhoneOtp = async (req, res) => {
 // Get Application Status for Logged-in Seller
 export const getSellerApplicationStatus = async (req, res) => {
   try {
-    const seller = await Seller.findById(req.user.id).select("status storeName name phone rejectionReason");
-    if (!seller) return res.status(404).json({ message: "Seller not found" });
+    let seller = null;
+    const isValidId = req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id);
+    if (isValidId) {
+      seller = await Seller.findById(req.user.id).select("status storeName name phone rejectionReason");
+    }
 
-    res.json({
-      sellerStatus: seller.status,
-      storeName: seller.storeName,
-      name: seller.name,
-      phone: seller.phone,
-      rejectionReason: seller.rejectionReason
-    });
+    const phone = req.query?.phone || req.body?.phone || req.user?.phone || req.seller?.phone;
+    if (!seller && phone) {
+      const cleanPhone = String(phone).trim();
+      const rawDigits = cleanPhone.replace(/\D/g, "");
+      const digits10 = rawDigits.slice(-10);
+      seller = await Seller.findOne({
+        $or: [
+          { phone: cleanPhone },
+          { phone: rawDigits },
+          ...(digits10 ? [{ phone: { $regex: digits10 + "$" } }] : [])
+        ]
+      }).select("status storeName name phone rejectionReason");
+    }
+
+    if (!seller && req.seller) {
+      seller = req.seller;
+    }
+
+    if (seller) {
+      const currentStatus = seller.status || seller.submissionStatus || "pending";
+      return res.json({
+        success: true,
+        status: currentStatus,
+        sellerStatus: currentStatus,
+        approvalStatus: currentStatus,
+        storeName: seller.storeName || "",
+        name: seller.name || "",
+        phone: seller.phone || "",
+        rejectionReason: seller.rejectionReason || null
+      });
+    }
+
+    return res.status(404).json({ success: false, message: "Seller application status not found." });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch status", error: error.message });
+    res.status(500).json({ success: false, message: "Failed to fetch status", error: error.message });
   }
 };
 
@@ -513,7 +812,10 @@ export const updateSellerApplication = async (req, res) => {
       bankAccountHolder,
       bankAccountNumber,
       bankIfscCode,
-      bankName
+      bankName,
+      bankBranch,
+      branchName,
+      yearStarted
     } = req.body;
 
     const files = req.files || {};
@@ -527,28 +829,102 @@ export const updateSellerApplication = async (req, res) => {
       state,
       pincode,
       gstNumber: gstin,
+      yearStarted,
       status: "pending" // Resubmit resets status to pending for review
     };
 
     // Clean undefined fields
     Object.keys(updates).forEach(key => updates[key] === undefined && delete updates[key]);
 
-    if (bankAccountHolder || bankAccountNumber || bankIfscCode) {
+    if (bankAccountHolder || bankAccountNumber || bankIfscCode || bankName || bankBranch || branchName) {
       updates.bankDetails = {
-        accountHolderName: bankAccountHolder || "",
-        accountNumber: bankAccountNumber || "",
-        ifscCode: bankIfscCode || "",
-        bankName: bankName || ""
+        accountHolderName: bankAccountHolder || req.body.accountHolderName || "",
+        accountNumber: bankAccountNumber || req.body.accountNumber || "",
+        ifscCode: bankIfscCode || req.body.ifscCode || "",
+        bankName: bankName || req.body.bankName || "",
+        branchName: branchName || bankBranch || req.body.branchName || req.body.bankBranch || ""
       };
     }
 
-    if (files.profilePhoto?.[0] || files.addressProofDoc?.[0]) {
-      updates.documents = {
-        profilePhoto: files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : undefined,
-        addressProofDoc: files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : undefined,
-        panNumber: ownerPan || businessPan
+    const existingSeller = await Seller.findById(sellerId);
+    if (!existingSeller) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    if (req.body.businessType) updates.businessType = req.body.businessType;
+    if (req.body.annualTurnoverEstimate) updates.annualTurnoverEstimate = req.body.annualTurnoverEstimate;
+
+    updates.ownerDetails = {
+      ownerFullName: ownerFullName || req.body.name || existingSeller.ownerDetails?.ownerFullName || existingSeller.name || "",
+      ownerDesignation: ownerDesignation || existingSeller.ownerDetails?.ownerDesignation || "Proprietor",
+      ownerPan: ownerPan || businessPan || req.body.pan || existingSeller.ownerDetails?.ownerPan || "",
+      ownerAadhaarLast4: req.body.ownerAadhaarLast4 || req.body.aadhaarNumber || existingSeller.ownerDetails?.ownerAadhaarLast4 || ""
+    };
+
+    updates.addressDetails = {
+      addressLine1: addressLine1 || req.body.address || existingSeller.addressDetails?.addressLine1 || existingSeller.address || "",
+      addressLine2: req.body.addressLine2 || existingSeller.addressDetails?.addressLine2 || "",
+      landmark: req.body.landmark || existingSeller.addressDetails?.landmark || "",
+      country: req.body.country || existingSeller.addressDetails?.country || "India"
+    };
+
+    if (req.body.addressProofType || req.body.addressProofDocNumber) {
+      updates.addressProofDetails = {
+        addressProofType: req.body.addressProofType || existingSeller.addressProofDetails?.addressProofType || "",
+        addressProofDocNumber: req.body.addressProofDocNumber || existingSeller.addressProofDetails?.addressProofDocNumber || ""
       };
     }
+
+    if (tradeName || legalBusinessName || req.body.storeTagline || req.body.storeDescription || req.body.storeLogo) {
+      updates.storeDetails = {
+        storeTagline: req.body.storeTagline || existingSeller.storeDetails?.storeTagline || "",
+        storeDescription: req.body.storeDescription || existingSeller.storeDetails?.storeDescription || "",
+        storeLogo: req.body.storeLogo || existingSeller.storeDetails?.storeLogo || ""
+      };
+    }
+
+    if (req.body.selectedCategories || req.body.primaryBrands || req.body.estimatedSkuCount || req.body.sampleProductTitle) {
+      updates.catalogInfo = {
+        selectedCategories: Array.isArray(req.body.selectedCategories) ? req.body.selectedCategories : (existingSeller.catalogInfo?.selectedCategories || []),
+        primaryBrands: Array.isArray(req.body.primaryBrands) ? req.body.primaryBrands : (existingSeller.catalogInfo?.primaryBrands || []),
+        estimatedSkuCount: req.body.estimatedSkuCount || existingSeller.catalogInfo?.estimatedSkuCount || "",
+        sampleProductTitle: req.body.sampleProductTitle || existingSeller.catalogInfo?.sampleProductTitle || ""
+      };
+    }
+
+    if (req.body.acceptedTerms !== undefined || req.body.acceptedCommissionRate !== undefined) {
+      updates.agreements = {
+        acceptedTerms: req.body.acceptedTerms === true || req.body.acceptedTerms === "true" || Boolean(existingSeller.agreements?.acceptedTerms),
+        acceptedCommissionRate: req.body.acceptedCommissionRate === true || req.body.acceptedCommissionRate === "true" || Boolean(existingSeller.agreements?.acceptedCommissionRate),
+        acceptedReturnPolicy: req.body.acceptedReturnPolicy === true || req.body.acceptedReturnPolicy === "true" || Boolean(existingSeller.agreements?.acceptedReturnPolicy),
+        authorizedSignatoryConfirmation: req.body.authorizedSignatoryConfirmation === true || req.body.authorizedSignatoryConfirmation === "true" || Boolean(existingSeller.agreements?.authorizedSignatoryConfirmation)
+      };
+    }
+
+    if (bankAccountHolder || bankAccountNumber || bankIfscCode || bankName || bankBranch || branchName || req.body.accountType) {
+      updates.bankDetails = {
+        accountHolderName: bankAccountHolder || req.body.accountHolderName || existingSeller.bankDetails?.accountHolderName || "",
+        accountNumber: bankAccountNumber || req.body.accountNumber || existingSeller.bankDetails?.accountNumber || "",
+        ifscCode: bankIfscCode || req.body.ifscCode || existingSeller.bankDetails?.ifscCode || "",
+        bankName: bankName || req.body.bankName || existingSeller.bankDetails?.bankName || "",
+        branchName: branchName || bankBranch || req.body.branchName || req.body.bankBranch || existingSeller.bankDetails?.branchName || "",
+        accountType: req.body.accountType || existingSeller.bankDetails?.accountType || "Savings Account"
+      };
+    }
+
+    const docUpdates = { ...(existingSeller?.documents || {}) };
+
+    let uploadedProfile = files.profilePhoto?.[0] ? `/uploads/documents/${files.profilePhoto[0].filename}` : (files.avatar?.[0] ? `/uploads/avatars/${files.avatar[0].filename}` : saveBase64ToFile(req.body.profilePhoto || req.body.avatar, "avatars", "profilePhoto"));
+    if (uploadedProfile) {
+      docUpdates.profilePhoto = uploadedProfile;
+      updates.avatar = uploadedProfile;
+    }
+
+    let uploadedAddressProof = files.addressProofDoc?.[0] ? `/uploads/documents/${files.addressProofDoc[0].filename}` : saveBase64ToFile(req.body.addressProofDoc, "documents", "addressProof");
+    if (uploadedAddressProof) docUpdates.addressProofDoc = uploadedAddressProof;
+
+    if (ownerPan || businessPan) docUpdates.panNumber = ownerPan || businessPan;
+    updates.documents = docUpdates;
 
     const updatedSeller = await Seller.findByIdAndUpdate(sellerId, updates, { new: true });
     res.json({

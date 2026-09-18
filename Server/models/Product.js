@@ -39,7 +39,7 @@ const productSchema = new mongoose.Schema(
     },
     gender: {
       type: String,
-      enum: ["Boy", "Girl", "Unisex", "All"],
+      enum: ["Boy", "Girl", "Boys", "Girls", "Unisex", "All"],
       default: "Unisex"
     },
     ageGroup: {
@@ -55,6 +55,37 @@ const productSchema = new mongoose.Schema(
       type: [String], // e.g. ["24", "26", "28", "30", "32", "34", "S", "M", "L", "XL"]
       default: []
     },
+    sizeVariants: [
+      {
+        size: {
+          type: String,
+          trim: true
+        },
+        price: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        mrp: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        stock: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        image: {
+          type: String,
+          default: ""
+        },
+        sku: {
+          type: String,
+          default: ""
+        }
+      }
+    ],
     colors: {
       type: [String], // e.g. ["White", "Navy Blue"]
       default: []
@@ -171,6 +202,16 @@ const productSchema = new mongoose.Schema(
     rejectionReason: {
       type: String,
       default: ""
+    },
+    // Payment Method Options decided by Seller / Admin
+    paymentMethodAllowed: {
+      type: String,
+      enum: ["Both", "Online_Only", "COD_Only"],
+      default: "Both"
+    },
+    paymentMethodsAllowed: {
+      type: [String],
+      default: ["COD", "Online"]
     }
   },
   {

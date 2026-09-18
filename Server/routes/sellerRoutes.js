@@ -80,7 +80,7 @@ router.post("/login", loginSeller);
 
 // Protected Seller Profile & Settings
 router.get("/profile", authenticateSeller, getSellerProfile);
-router.put("/profile", authenticateSeller, updateSellerProfile);
+router.put("/profile", authenticateSeller, uploadSellerDocs, updateSellerProfile);
 router.get("/settings", authenticateSeller, getSellerSettings);
 router.put("/settings", authenticateSeller, updateSellerSettings);
 

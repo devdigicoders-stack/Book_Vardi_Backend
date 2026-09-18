@@ -1,4 +1,5 @@
 import Seller from "../models/Seller.js";
+import User from "../models/User.js";
 
 // Get All Sellers (with optional status filter)
 export const getAllSellers = async (req, res) => {
@@ -73,6 +74,21 @@ export const approveSeller = async (req, res) => {
 
     await seller.save();
 
+    // Also update corresponding User document in DB if exists
+    if (seller.email || seller.phone) {
+      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
+      const userConditions = [];
+      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+      if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+
+      if (userConditions.length > 0) {
+        await User.updateMany(
+          { $or: userConditions },
+          { $set: { isSeller: true, sellerStatus: "approved", role: "Partner Merchant" } }
+        );
+      }
+    }
+
     res.json({
       message: `Seller '${seller.storeName}' has been APPROVED successfully. They can now log in and manage products.`,
       seller: {
@@ -108,6 +124,20 @@ export const rejectSeller = async (req, res) => {
     seller.status = "rejected";
     seller.rejectionReason = reason.trim();
     await seller.save();
+
+    if (seller.email || seller.phone) {
+      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
+      const userConditions = [];
+      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+      if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+
+      if (userConditions.length > 0) {
+        await User.updateMany(
+          { $or: userConditions },
+          { $set: { isSeller: false, sellerStatus: "rejected" } }
+        );
+      }
+    }
 
     res.json({
       message: `Seller '${seller.storeName}' has been REJECTED.`,
@@ -155,3 +185,38 @@ export const toggleSellerStatus = async (req, res) => {
     res.status(500).json({ message: "Failed to update seller status", error: error.message });
   }
 };
+
+// Update Seller Commission Rate (%)
+export const updateSellerCommission = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { commissionRate } = req.body;
+
+    const rate = Number(commissionRate);
+    if (isNaN(rate) || rate < 0 || rate > 100) {
+      return res.status(400).json({ message: "Invalid commission rate. Must be a percentage between 0 and 100." });
+    }
+
+    const seller = await Seller.findById(id);
+    if (!seller) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    seller.commissionRate = rate;
+    seller.commissionPercentage = rate;
+    await seller.save();
+
+    res.json({
+      message: `Commission rate for '${seller.storeName}' updated to ${rate}%.`,
+      seller: {
+        id: seller._id,
+        storeName: seller.storeName,
+        commissionRate: seller.commissionRate,
+        commissionPercentage: seller.commissionPercentage
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update seller commission", error: error.message });
+  }
+};
+

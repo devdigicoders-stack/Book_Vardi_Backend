@@ -1,12 +1,15 @@
 import mongoose from "mongoose";
 
-const requirementItemSchema = new mongoose.Schema({
-  category: { type: String, required: true },
-  itemName: { type: String, required: true },
-  quantity: { type: Number, required: true, default: 100 },
-  sampleImage: { type: String, default: "" },
-  notes: { type: String, default: "" }
-});
+const requirementItemSchema = new mongoose.Schema(
+  {
+    category: { type: String, default: "General Bulk Procurement" },
+    itemName: { type: String, default: "Bulk Stationery / Uniform" },
+    quantity: { type: Number, default: 100 },
+    sampleImage: { type: String, default: "" },
+    notes: { type: String, default: "" }
+  },
+  { _id: false }
+);
 
 const schoolBulkOrderSchema = new mongoose.Schema(
   {
@@ -16,14 +19,14 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     institutionType: { type: String, default: "K-12 School" },
 
     contactName: { type: String, required: true },
-    contactEmail: { type: String, required: true },
+    contactEmail: { type: String, default: "" },
     contactPhone: { type: String, required: true },
     designation: { type: String, default: "Administrator" },
 
     address: { type: String, default: "" },
-    city: { type: String, required: true },
-    state: { type: String, required: true },
-    pincode: { type: String, required: true },
+    city: { type: String, default: "" },
+    state: { type: String, default: "" },
+    pincode: { type: String, default: "" },
 
     requirements: [requirementItemSchema],
 

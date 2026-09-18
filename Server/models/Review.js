@@ -45,10 +45,23 @@ const reviewSchema = new mongoose.Schema(
       type: String,
       enum: ["pending", "approved", "rejected"],
       default: "pending"
+    },
+    reply: {
+      type: String,
+      default: ""
+    },
+    repliedAt: {
+      type: Date,
+      default: null
+    },
+    sellerId: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
     }
   },
   {
-    timestamps: true
+    timestamps: true,
+    strict: false
   }
 );
 

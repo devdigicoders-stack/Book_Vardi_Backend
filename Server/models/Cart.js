@@ -1,41 +1,5 @@
 import mongoose from "mongoose";
 
-const cartItemSchema = new mongoose.Schema({
-  id: {
-    type: mongoose.Schema.Types.Mixed
-  },
-  productId: {
-    type: mongoose.Schema.Types.Mixed,
-    default: null
-  },
-  name: {
-    type: String,
-    default: ""
-  },
-  subtitle: {
-    type: String,
-    default: ""
-  },
-  image: {
-    type: String,
-    default: ""
-  },
-  quantity: {
-    type: Number,
-    required: true,
-    min: 1,
-    default: 1
-  },
-  price: {
-    type: Number,
-    default: 0
-  },
-  originalPrice: {
-    type: Number,
-    default: 0
-  }
-});
-
 const cartSchema = new mongoose.Schema(
   {
     userId: {
@@ -46,7 +10,11 @@ const cartSchema = new mongoose.Schema(
       type: String,
       default: ""
     },
-    items: [cartItemSchema],
+    items: [
+      {
+        type: mongoose.Schema.Types.Mixed
+      }
+    ],
     totalAmount: {
       type: Number,
       default: 0
@@ -58,7 +26,10 @@ const cartSchema = new mongoose.Schema(
 );
 
 cartSchema.pre("save", function (next) {
-  this.totalAmount = (this.items || []).reduce((total, item) => total + (item.price || 0) * (item.quantity || 1), 0);
+  this.totalAmount = (this.items || []).reduce(
+    (total, item) => total + (Number(item?.price) || 0) * (Number(item?.quantity) || 1),
+    0
+  );
   next();
 });
 

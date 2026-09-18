@@ -1,5 +1,6 @@
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
+import Kit from "../models/Kit.js";
 import User from "../models/User.js";
 import mongoose from "mongoose";
 
@@ -173,6 +174,33 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ message: "Cannot place order with empty items" });
     }
 
+    // Auto-populate productId, sellerId, and image on order items from Product collection
+    for (const item of orderItems) {
+      let prod = null;
+      const searchId = item.productId || item.id || item._id;
+      if (searchId) {
+        if (mongoose.Types.ObjectId.isValid(searchId)) {
+          prod = await Product.findById(searchId);
+        }
+        if (!prod) {
+          prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
+        }
+      }
+      if (!prod && item.name) {
+        const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+        prod = await Product.findOne({
+          name: { $regex: new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }
+        });
+      }
+
+      if (prod) {
+        if (!item.productId) item.productId = prod._id;
+        if (!item.id) item.id = prod._id;
+        if (!item.sellerId && prod.sellerId) item.sellerId = prod.sellerId;
+        if (!item.image && prod.images && prod.images.length > 0) item.image = prod.images[0];
+      }
+    }
+
     const orderIdVal = id || orderId || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
 
     const newOrder = new Order({
@@ -206,6 +234,31 @@ export const createOrder = async (req, res) => {
     });
 
     await newOrder.save();
+
+    // Auto-decrease product and kit stock in MongoDB as order is placed
+    try {
+      for (const item of orderItems) {
+        const qty = Math.max(1, Number(item.quantity) || 1);
+        const searchId = item.productId || item.id || item._id;
+
+        if (searchId) {
+          if (mongoose.Types.ObjectId.isValid(searchId)) {
+            await Product.findByIdAndUpdate(searchId, { $inc: { stock: -qty } });
+            await Kit.findByIdAndUpdate(searchId, { $inc: { stock: -qty } });
+          } else {
+            await Product.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: -qty } });
+            await Kit.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: -qty } });
+          }
+        } else if (item.name) {
+          const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+          const nameRegex = new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          await Product.findOneAndUpdate({ name: nameRegex }, { $inc: { stock: -qty } });
+          await Kit.findOneAndUpdate({ title: nameRegex }, { $inc: { stock: -qty } });
+        }
+      }
+    } catch (stockErr) {
+      console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
+    }
 
     return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
@@ -322,10 +375,16 @@ export const updateOrder = async (req, res) => {
       // Restock if cancelled
       if (newStatus === "cancelled" && previousStatus !== "cancelled") {
         for (const item of existingOrder.items) {
-          if (item.productId) {
-            await Product.findByIdAndUpdate(item.productId, {
-              $inc: { stock: item.quantity || 1 }
-            });
+          const qty = Math.max(1, Number(item.quantity) || 1);
+          const searchId = item.productId || item.id || item._id;
+          if (searchId) {
+            if (mongoose.Types.ObjectId.isValid(searchId)) {
+              await Product.findByIdAndUpdate(searchId, { $inc: { stock: qty } });
+              await Kit.findByIdAndUpdate(searchId, { $inc: { stock: qty } });
+            } else {
+              await Product.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: qty } });
+              await Kit.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: qty } });
+            }
           }
         }
         if (cancellationReason) existingOrder.cancellationReason = cancellationReason;
@@ -339,7 +398,7 @@ export const updateOrder = async (req, res) => {
             const seller = await Seller.findById(item.sellerId);
             if (seller) {
               const itemTotal = item.total || (item.finalPrice || item.price) * (item.quantity || 1);
-              const commissionRate = seller.commissionPercentage !== undefined ? seller.commissionPercentage : 5;
+              const commissionRate = seller.commissionPercentage !== undefined ? seller.commissionPercentage : (seller.commissionRate !== undefined ? seller.commissionRate : 5);
               const commissionAmount = Math.round(((itemTotal * commissionRate) / 100) * 100) / 100;
               const sellerEarnings = Math.max(0, itemTotal - commissionAmount);
 
