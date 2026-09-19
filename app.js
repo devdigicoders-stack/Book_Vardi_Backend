@@ -186,7 +186,7 @@ app.get("/api/health", (req, res) => {
 
   res.json({
     status: "OK",
-    server: "started",
+    server: "start",
     serverStarted: true,
     mongodb: mongoStatus,
     mongodbConnected: isMongoConnected,
