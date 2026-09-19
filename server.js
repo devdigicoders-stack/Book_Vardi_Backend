@@ -1,16 +1,8 @@
-import dns from 'dns';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Fix MongoDB Atlas SRV DNS resolution across all environments (including Render cloud containers)
-try {
-  dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
-} catch (err) {
-  console.warn('DNS setServers warning:', err.message);
-}
-
-// Import app AFTER DNS configuration
+// Import app
 const { default: app, allowedOrigins } = await import('./app.js');
 
 const PORT = process.env.PORT || 5000;
