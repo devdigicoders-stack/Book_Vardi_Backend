@@ -84,7 +84,27 @@ initDefaultAdmin();
 
 // 3. Security Middlewares (Helmet & Rate Limiting)
 app.use(helmet({ crossOriginResourcePolicy: false })); // Secure HTTP Headers
-app.use(cors());
+
+export const allowedOrigins = Array.from(new Set([
+  process.env.CLIENT_URL,
+  process.env.SELLER_PANEL_URL,
+  process.env.ADMIN_PANEL_URL,
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:5175",
+  "http://localhost:3000"
+].filter(Boolean)));
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS Policy Error: Origin ${origin} is not allowed`));
+    }
+  },
+  credentials: true
+}));
 
 // Global Rate Limiter: 500 requests per 15 mins
 const globalLimiter = rateLimit({
