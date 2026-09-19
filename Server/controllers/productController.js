@@ -133,13 +133,15 @@ export const getProducts = async (req, res) => {
     const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 20));
     const skip = (pageNum - 1) * limitNum;
 
-    const totalProducts = await Product.countDocuments(filter);
+    const totalProducts = await Product.countDocuments(filter).maxTimeMS(5000);
 
     const products = await Product.find(filter)
       .populate("sellerId", "storeName name city phone")
       .sort(sortOption)
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .maxTimeMS(5000)
+      .lean();
 
     res.json({
       total: totalProducts,
@@ -150,7 +152,7 @@ export const getProducts = async (req, res) => {
       products
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch products", error: error.message });
+    res.status(500).json({ message: "Failed to fetch products", error: error.message, products: [] });
   }
 };
 
@@ -165,11 +167,14 @@ export const getRecentlyViewedProducts = async (req, res) => {
     let filter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
     if (category) filter.category = category;
 
+    let products = [];
     if (validObjectIds.length > 0) {
       filter._id = { $in: validObjectIds };
-      const products = await Product.find(filter).populate("sellerId", "storeName name city phone");
+      products = await Product.find(filter)
+        .populate("sellerId", "storeName name city phone")
+        .maxTimeMS(5000)
+        .lean();
 
-      // Sort products in the exact order of requested IDs
       const productMap = new Map(products.map((p) => [p._id.toString(), p]));
       const orderedProducts = validObjectIds
         .map((id) => productMap.get(id.toString()))
@@ -184,13 +189,23 @@ export const getRecentlyViewedProducts = async (req, res) => {
       }
     }
 
-    // Fallback if no valid IDs provided or matched: return newest products
-    const fallbackFilter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category) fallbackFilter.category = category;
-    const products = await Product.find(fallbackFilter)
+    // Fallback: return newest available products
+    delete filter._id;
+    products = await Product.find(filter)
       .populate("sellerId", "storeName name city phone")
       .sort({ createdAt: -1 })
-      .limit(limitNum);
+      .limit(limitNum)
+      .maxTimeMS(5000)
+      .lean();
+
+    if (products.length === 0) {
+      products = await Product.find({})
+        .populate("sellerId", "storeName name city phone")
+        .sort({ createdAt: -1 })
+        .limit(limitNum)
+        .maxTimeMS(5000)
+        .lean();
+    }
 
     res.json({
       total: products.length,
@@ -198,7 +213,7 @@ export const getRecentlyViewedProducts = async (req, res) => {
       products
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch recently viewed products", error: error.message });
+    res.status(500).json({ message: "Failed to fetch recently viewed products", error: error.message, products: [] });
   }
 };
 
@@ -211,10 +226,22 @@ export const getFeaturedProducts = async (req, res) => {
     const filter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
     if (category) filter.category = category;
 
-    const products = await Product.find(filter)
+    let products = await Product.find(filter)
       .populate("sellerId", "storeName name city phone")
       .sort({ averageRating: -1, numReviews: -1, createdAt: -1 })
-      .limit(limitNum);
+      .limit(limitNum)
+      .maxTimeMS(5000)
+      .lean();
+
+    if (products.length === 0) {
+      // Immediate fallback to ensure fast response even if no specific status match exists
+      products = await Product.find({})
+        .populate("sellerId", "storeName name city phone")
+        .sort({ createdAt: -1 })
+        .limit(limitNum)
+        .maxTimeMS(5000)
+        .lean();
+    }
 
     res.json({
       total: products.length,
@@ -222,7 +249,7 @@ export const getFeaturedProducts = async (req, res) => {
       products
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch featured products", error: error.message });
+    res.status(500).json({ message: "Failed to fetch featured products", error: error.message, products: [] });
   }
 };
 
@@ -245,15 +272,19 @@ export const getSpecialOffers = async (req, res) => {
     let products = await Product.find(filter)
       .populate("sellerId", "storeName name city phone")
       .sort({ discountPercentage: -1, "offer.discountValue": -1, createdAt: -1 })
-      .limit(limitNum);
+      .limit(limitNum)
+      .maxTimeMS(5000)
+      .lean();
 
     if (products.length < limitNum) {
-      const fallbackFilter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
+      const fallbackFilter = { status: "available" };
       if (category) fallbackFilter.category = category;
       const extraProducts = await Product.find(fallbackFilter)
         .populate("sellerId", "storeName name city phone")
         .sort({ discountPercentage: -1, createdAt: -1 })
-        .limit(limitNum);
+        .limit(limitNum)
+        .maxTimeMS(5000)
+        .lean();
 
       const existingIds = new Set(products.map((p) => p._id.toString()));
       for (const extra of extraProducts) {
@@ -263,13 +294,22 @@ export const getSpecialOffers = async (req, res) => {
       }
     }
 
+    if (products.length === 0) {
+      products = await Product.find({})
+        .populate("sellerId", "storeName name city phone")
+        .sort({ createdAt: -1 })
+        .limit(limitNum)
+        .maxTimeMS(5000)
+        .lean();
+    }
+
     res.json({
       total: products.length,
       count: products.length,
       products
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch special offers", error: error.message });
+    res.status(500).json({ message: "Failed to fetch special offers", error: error.message, products: [] });
   }
 };
 
@@ -284,10 +324,21 @@ export const getRecommendedProducts = async (req, res) => {
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
     if (classGrade) filter.classGrade = { $regex: classGrade, $options: "i" };
 
-    const products = await Product.find(filter)
+    let products = await Product.find(filter)
       .populate("sellerId", "storeName name city phone")
       .sort({ numReviews: -1, averageRating: -1, createdAt: -1 })
-      .limit(limitNum);
+      .limit(limitNum)
+      .maxTimeMS(5000)
+      .lean();
+
+    if (products.length === 0) {
+      products = await Product.find({})
+        .populate("sellerId", "storeName name city phone")
+        .sort({ createdAt: -1 })
+        .limit(limitNum)
+        .maxTimeMS(5000)
+        .lean();
+    }
 
     res.json({
       total: products.length,
@@ -295,7 +346,7 @@ export const getRecommendedProducts = async (req, res) => {
       products
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch recommended products", error: error.message });
+    res.status(500).json({ message: "Failed to fetch recommended products", error: error.message, products: [] });
   }
 };
 

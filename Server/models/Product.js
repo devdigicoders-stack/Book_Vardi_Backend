@@ -222,6 +222,9 @@ const productSchema = new mongoose.Schema(
 // Indexes
 productSchema.index({ sellerId: 1 });
 productSchema.index({ category: 1, approvalStatus: 1 });
+productSchema.index({ status: 1, approvalStatus: 1 });
+productSchema.index({ status: 1, approvalStatus: 1, createdAt: -1 });
+productSchema.index({ averageRating: -1, numReviews: -1 });
 
 // Pre-save hook to calculate discountPercentage, offerPrice automatically & set MRP fallback
 productSchema.pre("save", function (next) {

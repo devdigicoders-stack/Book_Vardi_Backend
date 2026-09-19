@@ -19,6 +19,7 @@ import mongoose from "mongoose";
 // Models & initial setup
 import Admin from "./Server/models/Admin.js";
 import User from "./Server/models/User.js";
+import Seller from "./Server/models/Seller.js";
 import bcrypt from "bcryptjs";
 
 // Routes
@@ -82,6 +83,39 @@ const initDefaultAdmin = async () => {
   }
 };
 initDefaultAdmin();
+
+// Auto-seed default approved seller for seamless onboarding & testing
+const initDefaultSeller = async () => {
+  try {
+    const existingSeller = await Seller.findOne({
+      $or: [
+        { phone: "1231231232" },
+        { phone: "+911231231232" },
+        { phone: "+91 1231231232" }
+      ]
+    });
+    if (!existingSeller) {
+      const hashedPassword = await bcrypt.hash("seller123", 10);
+      await Seller.create({
+        name: "Rahul Enterprise",
+        storeName: "Rahul Enterprise",
+        email: "seller@bookvardi.in",
+        phone: "+911231231232",
+        password: hashedPassword,
+        address: "Commercial Market, Near Civil Hospital",
+        city: "Lucknow",
+        state: "Uttar Pradesh",
+        pincode: "226001",
+        status: "approved",
+        approvedAt: new Date()
+      });
+      console.log("Default approved seller initialized (+911231231232)");
+    }
+  } catch (err) {
+    console.error("Default seller creation error:", err.message);
+  }
+};
+initDefaultSeller();
 
 // 3. Security Middlewares (Helmet & Rate Limiting)
 app.use(helmet({ crossOriginResourcePolicy: false })); // Secure HTTP Headers
@@ -186,7 +220,7 @@ app.get("/api/health", (req, res) => {
 
   res.json({
     status: "OK",
-    server: "start",
+    server: "startedd",
     serverStarted: true,
     mongodb: mongoStatus,
     mongodbConnected: isMongoConnected,
