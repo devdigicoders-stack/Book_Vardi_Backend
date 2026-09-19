@@ -85,24 +85,11 @@ initDefaultAdmin();
 // 3. Security Middlewares (Helmet & Rate Limiting)
 app.use(helmet({ crossOriginResourcePolicy: false })); // Secure HTTP Headers
 
-export const allowedOrigins = Array.from(new Set([
-  process.env.CLIENT_URL,
-  process.env.SELLER_PANEL_URL,
-  process.env.ADMIN_PANEL_URL,
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "http://localhost:5175",
-  "http://localhost:3000"
-].filter(Boolean)));
+export const allowedOrigins = ["* (All origins allowed)"];
 
+// Allow all origins dynamically with credentials support
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`CORS Policy Error: Origin ${origin} is not allowed`));
-    }
-  },
+  origin: true,
   credentials: true
 }));
 
@@ -159,6 +146,11 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads"), {
   }
 }));
 
+// Fallback for missing avatar image requests (prevents 404 errors when avatar file does not exist on disk)
+app.use("/uploads/avatars", (req, res) => {
+  res.redirect("https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=400&auto=format&fit=crop&q=80");
+});
+
 // 5. API Routes
 app.use("/api/admin", adminRoutes);
 app.use("/api/seller", sellerRoutes);
@@ -181,7 +173,7 @@ app.use("/api/contact", contactRoutes);
 app.get("/api/health", (req, res) => {
   res.json({
     status: "OK",
-    service: "SchoolKart Multi-Vendor Backend API",
+    service: "SchoolKart Multi-Vendor Backend API 19/9",
     timestamp: new Date().toISOString()
   });
 });
