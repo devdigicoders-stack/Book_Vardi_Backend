@@ -3,13 +3,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Fix MongoDB Atlas SRV DNS resolution safely in non-production environments
-if (process.env.NODE_ENV !== 'production') {
-  try {
-    dns.setServers(['8.8.8.8', '8.8.4.4']);
-  } catch (err) {
-    console.warn('DNS setServers warning:', err.message);
-  }
+// Fix MongoDB Atlas SRV DNS resolution across all environments (including Render cloud containers)
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+} catch (err) {
+  console.warn('DNS setServers warning:', err.message);
 }
 
 // Import app AFTER DNS configuration

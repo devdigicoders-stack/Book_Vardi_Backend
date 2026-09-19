@@ -5,6 +5,7 @@ import fs from "fs";
 import dotenv from "dotenv";
 dotenv.config();
 import connectDB from "./config/db.js";
+import mongoose from "mongoose";
 
 // Ensure all upload directories exist on server startup
 ["uploads", "uploads/avatars", "uploads/documents", "uploads/products"].forEach((dir) => {
@@ -171,9 +172,28 @@ app.use("/api/contact", contactRoutes);
 
 // 6. Health & Status Check
 app.get("/api/health", (req, res) => {
+  const mongoStateMap = {
+    0: "disconnected",
+    1: "connected",
+    2: "connecting",
+    3: "disconnecting"
+  };
+  const mongoStateCode = mongoose.connection.readyState;
+  const mongoStatus = mongoStateMap[mongoStateCode] || "unknown";
+  const isMongoConnected = mongoStateCode === 1;
+
+  console.log(`🩺 [HEALTH CHECK] Server is running | MongoDB Status: ${mongoStatus.toUpperCase()} (Connected: ${isMongoConnected})`);
+
   res.json({
     status: "OK",
-    service: "SchoolKart Multi-Vendor Backend API 19/9",
+    server: "started",
+    serverStarted: true,
+    mongodb: mongoStatus,
+    mongodbConnected: isMongoConnected,
+    dbName: isMongoConnected ? (mongoose.connection.name || null) : null,
+    host: isMongoConnected ? (mongoose.connection.host || null) : null,
+    uptime: `${Math.floor(process.uptime())}s`,
+    service: "SchoolKart Multi-Vendor Backend API",
     timestamp: new Date().toISOString()
   });
 });
