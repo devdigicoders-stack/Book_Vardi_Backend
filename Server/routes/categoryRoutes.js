@@ -1,11 +1,12 @@
 import express from 'express';
 import Category from '../models/Category.js';
 import authenticateToken from '../middlewares/auth.js';
+import { cacheMiddleware, clearCache } from '../utils/cache.js';
 
 const router = express.Router();
 
 // Get all categories (Public for header and store browsing)
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware(120), async (req, res) => {
   try {
     const categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
     res.json(categories);
@@ -15,7 +16,7 @@ router.get('/', async (req, res) => {
 });
 
 // Get category tree with subcategories (Public)
-router.get('/tree', async (req, res) => {
+router.get('/tree', cacheMiddleware(120), async (req, res) => {
   try {
     const categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
     res.json(categories);
@@ -31,6 +32,7 @@ router.post('/', authenticateToken, async (req, res) => {
     const { name, description } = req.body;
     const category = new Category({ name, description });
     await category.save();
+    clearCache('categor');
     res.status(201).json({ message: 'Category created successfully', category });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -46,6 +48,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
     }
+    clearCache('categor');
     res.json({ message: 'Category updated successfully', category });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -60,6 +63,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
     }
+    clearCache('categor');
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });

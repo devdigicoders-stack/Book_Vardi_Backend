@@ -220,7 +220,7 @@ app.get("/api/health", (req, res) => {
 
   res.json({
     status: "OK",
-    server: "startedd",
+    server: "starteddddd",
     serverStarted: true,
     mongodb: mongoStatus,
     mongodbConnected: isMongoConnected,

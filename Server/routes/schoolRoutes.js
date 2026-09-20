@@ -1,6 +1,7 @@
 import express from "express";
 import School from "../models/School.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
+import { cacheMiddleware, clearCache } from "../utils/cache.js";
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ function normalizeClasses(cls) {
 }
 
 // GET all partner schools with optional district/subdistrict filtering and pagination
-router.get("/", async (req, res) => {
+router.get("/", cacheMiddleware(120), async (req, res) => {
   try {
     const { district, subdistrict, city, page, limit } = req.query;
     
@@ -82,7 +83,7 @@ router.get("/", async (req, res) => {
 });
 
 // GET single school by ID
-router.get("/:id", async (req, res) => {
+router.get("/:id", cacheMiddleware(120), async (req, res) => {
   try {
     const school = await School.findById(req.params.id);
     if (!school) {
@@ -106,6 +107,7 @@ router.post("/", async (req, res) => {
       status: schoolData.status || "Partner Active"
     });
     await school.save();
+    clearCache("school");
     res.status(201).json({ success: true, message: "School created successfully", school });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -119,6 +121,7 @@ router.put("/:id", async (req, res) => {
     if (!school) {
       return res.status(404).json({ success: false, message: "School not found" });
     }
+    clearCache("school");
     res.json({ success: true, message: "School updated successfully", school });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -132,6 +135,7 @@ router.delete("/:id", async (req, res) => {
     if (!school) {
       return res.status(404).json({ success: false, message: "School not found" });
     }
+    clearCache("school");
     res.json({ success: true, message: "School deleted successfully" });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

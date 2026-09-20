@@ -11,18 +11,19 @@ import {
   deleteProduct
 } from "../controllers/productController.js";
 import { authenticateToken } from "../middlewares/auth.js";
+import { cacheMiddleware } from "../utils/cache.js";
 
 const router = express.Router();
 
 // Carousel Special Endpoints (must come before /:id)
-router.get("/recently-viewed", getRecentlyViewedProducts);
-router.get("/featured", getFeaturedProducts);
-router.get("/special-offers", getSpecialOffers);
-router.get("/recommended", getRecommendedProducts);
+router.get("/recently-viewed", cacheMiddleware(60), getRecentlyViewedProducts);
+router.get("/featured", cacheMiddleware(60), getFeaturedProducts);
+router.get("/special-offers", cacheMiddleware(60), getSpecialOffers);
+router.get("/recommended", cacheMiddleware(60), getRecommendedProducts);
 
 // Publicly browse products
-router.get("/", getProducts);
-router.get("/:id", getProductById);
+router.get("/", cacheMiddleware(60), getProducts);
+router.get("/:id", cacheMiddleware(60), getProductById);
 
 // Admin / Authenticated endpoints
 router.post("/", authenticateToken, createProduct);
