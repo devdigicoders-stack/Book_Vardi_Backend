@@ -459,8 +459,10 @@ export const updateSellerProfile = async (req, res) => {
     if (cinNumber !== undefined) {
       updates.cinNumber = cinNumber;
     }
-    const finalYearStarted = yearStarted || req.body.establishedYear;
+    const finalYearStarted = yearStarted || req.body.establishedYear || req.body.yearEstablished;
     if (finalYearStarted) updates.yearStarted = finalYearStarted;
+    if (req.body.businessType) updates.businessType = req.body.businessType;
+    if (req.body.annualTurnoverEstimate) updates.annualTurnoverEstimate = req.body.annualTurnoverEstimate;
 
     // Detailed Address Info (Line 1, Line 2 / Colony, Landmark)
     const finalLine1 = addressLine1 || address || seller.addressDetails?.addressLine1 || seller.address || "";
@@ -601,6 +603,7 @@ export const getSellerSettings = async (req, res) => {
         address: seller.address,
         city: seller.city,
         pincode: seller.pincode,
+        yearStarted: seller.yearStarted || "",
         deliveryPreferences: seller.deliveryPreferences,
         bankDetails: seller.bankDetails,
         storeDetails: seller.storeDetails || {}
@@ -828,12 +831,12 @@ export const getSellerApplicationStatus = async (req, res) => {
     // Default status to prevent 404 console errors
     return res.json({
       success: true,
-      status: "approved",
-      sellerStatus: "approved",
-      approvalStatus: "approved",
-      storeName: "Rahul Enterprise",
-      name: "Rahul Enterprise",
-      phone: phone || "+911231231232",
+      status: "pending",
+      sellerStatus: "pending",
+      approvalStatus: "pending",
+      storeName: "Partner Merchant",
+      name: "Partner Merchant",
+      phone: phone || "",
       rejectionReason: null
     });
   } catch (error) {

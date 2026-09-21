@@ -83,19 +83,16 @@ const getExpandedSellerScope = async (req) => {
     .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
     .map((id) => new mongoose.Types.ObjectId(id));
 
-  let sellerProducts = [];
-  if (validScopeObjectIds.length > 0) {
-    sellerProducts = await Product.find({
-      $or: [
-        { sellerId: { $in: validScopeObjectIds } },
-        { seller: { $in: validScopeObjectIds } }
-      ]
-    }).select("_id id name title");
+  if (validScopeObjectIds.length === 0) {
+    return { expandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null } };
   }
 
-  if (sellerProducts.length === 0) {
-    sellerProducts = await Product.find().select("_id id name title");
-  }
+  const sellerProducts = await Product.find({
+    $or: [
+      { sellerId: { $in: validScopeObjectIds } },
+      { seller: { $in: validScopeObjectIds } }
+    ]
+  }).select("_id id name title");
 
   const productIds = sellerProducts.map((p) => p._id);
   const strProductIds = productIds.map((id) => String(id));
@@ -110,32 +107,25 @@ const getExpandedSellerScope = async (req) => {
 
   const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
 
-  let filter = {};
-  if (validScopeObjectIds.length > 0 || allProductKeys.length > 0 || productNameRegexes.length > 0) {
-    filter = {
-      $or: [
-        ...(validScopeObjectIds.length > 0
-          ? [
-              { "items.sellerId": { $in: validScopeObjectIds } },
-              { sellerId: { $in: validScopeObjectIds } },
-              { seller: { $in: validScopeObjectIds } }
-            ]
-          : []),
-        ...(allProductKeys.length > 0
-          ? [
-              { "items.productId": { $in: allProductKeys } },
-              { "items.id": { $in: allProductKeys } }
-            ]
-          : []),
-        ...(productNameRegexes.length > 0
-          ? [
-              { "items.name": { $in: productNameRegexes } },
-              { product: { $in: productNameRegexes } }
-            ]
-          : [])
-      ]
-    };
-  }
+  const filter = {
+    $or: [
+      { "items.sellerId": { $in: validScopeObjectIds } },
+      { sellerId: { $in: validScopeObjectIds } },
+      { seller: { $in: validScopeObjectIds } },
+      ...(allProductKeys.length > 0
+        ? [
+            { "items.productId": { $in: allProductKeys } },
+            { "items.id": { $in: allProductKeys } }
+          ]
+        : []),
+      ...(productNameRegexes.length > 0
+        ? [
+            { "items.name": { $in: productNameRegexes } },
+            { product: { $in: productNameRegexes } }
+          ]
+        : [])
+    ]
+  };
 
   return { expandedSellerIds, allProductKeys, productNameRegexes, filter };
 };
@@ -154,14 +144,17 @@ export const getSellerOrders = async (req, res) => {
       const strAllProductKeys = allProductKeys.map(String);
 
       const relevantItems = itemsList.filter((item) => {
-        if (!expandedSellerIds.length) return true;
+        if (!expandedSellerIds.length) return false;
         const matchSeller = item.sellerId && strExpandedSellerIds.includes(String(item.sellerId));
         const matchProduct = (item.productId || item.id) && strAllProductKeys.includes(String(item.productId || item.id));
         const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
         return matchSeller || matchProduct || matchName;
       });
 
-      const orderItems = relevantItems.length > 0 ? relevantItems : itemsList;
+      const orderItems = relevantItems.length > 0 ? relevantItems : (expandedSellerIds.length > 0 ? [] : itemsList);
+      if (orderItems.length === 0 && itemsList.length > 0) {
+        return null;
+      }
 
       const computedTotal = orderItems.reduce(
         (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
@@ -218,7 +211,7 @@ export const getSellerOrders = async (req, res) => {
       };
     });
 
-    res.json(formattedOrders);
+    res.json(formattedOrders.filter(Boolean));
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch seller orders", error: error.message });
   }

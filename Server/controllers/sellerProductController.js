@@ -103,24 +103,22 @@ export const getSellerProductCategories = async (req, res) => {
       .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
       .map((id) => new mongoose.Types.ObjectId(id));
 
-    const filter = validObjectIds.length > 0
-      ? {
-          $or: [
-            { sellerId: { $in: validObjectIds } },
-            { userId: { $in: validObjectIds } },
-            { seller: { $in: validObjectIds } },
-            { user: { $in: validObjectIds } },
-            { createdBy: { $in: validObjectIds } }
-          ]
-        }
-      : {};
-    let categories = await Product.distinct("category", filter);
-    let items = await Product.find(filter, "name price category status stock images").sort({ name: 1 });
-
-    if (items.length === 0) {
-      categories = await Product.distinct("category");
-      items = await Product.find({}, "name price category status stock images").sort({ name: 1 });
+    if (validObjectIds.length === 0) {
+      return res.json({ categories: [], items: [] });
     }
+
+    const filter = {
+      $or: [
+        { sellerId: { $in: validObjectIds } },
+        { userId: { $in: validObjectIds } },
+        { seller: { $in: validObjectIds } },
+        { user: { $in: validObjectIds } },
+        { createdBy: { $in: validObjectIds } }
+      ]
+    };
+
+    const categories = await Product.distinct("category", filter);
+    const items = await Product.find(filter, "name price category status stock images").sort({ name: 1 });
 
     res.json({
       categories: categories.filter(Boolean),
@@ -147,18 +145,19 @@ export const getSellerProducts = async (req, res) => {
       .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
       .map((id) => new mongoose.Types.ObjectId(id));
 
-    let filter = {};
-    if (validObjectIds.length > 0) {
-      filter = {
-        $or: [
-          { sellerId: { $in: validObjectIds } },
-          { userId: { $in: validObjectIds } },
-          { seller: { $in: validObjectIds } },
-          { user: { $in: validObjectIds } },
-          { createdBy: { $in: validObjectIds } }
-        ]
-      };
+    if (validObjectIds.length === 0) {
+      return res.json([]);
     }
+
+    let filter = {
+      $or: [
+        { sellerId: { $in: validObjectIds } },
+        { userId: { $in: validObjectIds } },
+        { seller: { $in: validObjectIds } },
+        { user: { $in: validObjectIds } },
+        { createdBy: { $in: validObjectIds } }
+      ]
+    };
 
     if (category) filter.category = category;
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
@@ -175,19 +174,10 @@ export const getSellerProducts = async (req, res) => {
         { category: searchRegex },
         { ageGroup: searchRegex }
       ];
-      if (filter.$or) {
-        filter = { $and: [{ $or: filter.$or }, { $or: searchOr }] };
-      } else {
-        filter.$or = searchOr;
-      }
+      filter = { $and: [{ $or: filter.$or }, { $or: searchOr }] };
     }
 
-    let products = await Product.find(filter).sort({ createdAt: -1 });
-
-    if (products.length === 0 && !category && !search && !schoolName) {
-      products = await Product.find().sort({ createdAt: -1 });
-    }
-
+    const products = await Product.find(filter).sort({ createdAt: -1 });
     res.json(products);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch products", error: error.message });
@@ -376,9 +366,6 @@ export const updateProduct = async (req, res) => {
         { userId: { $in: validObjectIds } }
       ]
     });
-    if (!product) {
-      product = await Product.findById(id);
-    }
     if (!product) {
       return res.status(404).json({ message: "Product not found or unauthorized" });
     }

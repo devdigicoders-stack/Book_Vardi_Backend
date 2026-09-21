@@ -39,6 +39,7 @@ import couponRoutes from "./Server/routes/couponRoutes.js";
 import reviewRoutes from "./Server/routes/reviewRoutes.js";
 import schoolRoutes from "./Server/routes/schoolRoutes.js";
 import contactRoutes from "./Server/routes/contactRoutes.js";
+import announcementRoutes from "./Server/routes/announcementRoutes.js";
 
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -203,6 +204,7 @@ app.use("/api/delivery", deliveryRoutes);
 app.use("/api/stores", storeRoutes);
 app.use("/api/schools", schoolRoutes);
 app.use("/api/contact", contactRoutes);
+app.use("/api/announcements", announcementRoutes);
 
 // 6. Health & Status Check
 app.get("/api/health", (req, res) => {
@@ -220,7 +222,7 @@ app.get("/api/health", (req, res) => {
 
   res.json({
     status: "OK",
-    server: "starteddddd",
+    server: "started",
     serverStarted: true,
     mongodb: mongoStatus,
     mongodbConnected: isMongoConnected,

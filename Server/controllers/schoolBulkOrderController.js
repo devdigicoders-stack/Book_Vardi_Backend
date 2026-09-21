@@ -76,6 +76,10 @@ export const updateSellerSchoolOrder = async (req, res) => {
       return res.status(404).json({ message: "School bulk requirement request not found" });
     }
 
+    if (bulkOrder.sellerId && String(bulkOrder.sellerId) !== String(req.user.id) && req.user?.role !== "admin") {
+      return res.status(403).json({ message: "Access denied. You can only update your own school bulk orders." });
+    }
+
     if (status) bulkOrder.status = status;
     if (quantity) bulkOrder.totalQuantity = Number(quantity);
     if (targetDeliveryDate) bulkOrder.targetDeliveryDate = targetDeliveryDate;
@@ -93,6 +97,15 @@ export const updateSellerSchoolOrder = async (req, res) => {
 export const deleteSellerSchoolOrder = async (req, res) => {
   try {
     const { id } = req.params;
+    const bulkOrder = await SchoolBulkOrder.findById(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ message: "School bulk requirement request not found" });
+    }
+
+    if (bulkOrder.sellerId && String(bulkOrder.sellerId) !== String(req.user.id) && req.user?.role !== "admin") {
+      return res.status(403).json({ message: "Access denied. You can only delete your own school bulk orders." });
+    }
+
     await SchoolBulkOrder.findByIdAndDelete(id);
     res.json({ success: true, message: "School bulk order deleted successfully" });
   } catch (error) {

@@ -11,7 +11,10 @@ const resolveSellerId = (req) => {
 export const getSellerOffers = async (req, res) => {
   try {
     const sellerId = resolveSellerId(req);
-    const filter = sellerId ? { sellerId } : {};
+    if (!sellerId) {
+      return res.json([]);
+    }
+    const filter = { sellerId };
     const offers = await SellerOffer.find(filter).sort({ createdAt: -1 });
 
     const normalized = offers.map((o) => ({
@@ -235,8 +238,12 @@ export const updateSellerOffer = async (req, res) => {
 export const deleteSellerOffer = async (req, res) => {
   try {
     const { id } = req.params;
+    const sellerId = resolveSellerId(req);
 
-    const offer = await SellerOffer.findByIdAndDelete(id);
+    const offer = await SellerOffer.findOneAndDelete({ _id: id, ...(sellerId ? { sellerId } : {}) });
+    if (!offer) {
+      return res.status(404).json({ message: "Offer not found or unauthorized" });
+    }
 
     if (offer && offer.code) {
       try {
@@ -254,9 +261,10 @@ export const deleteSellerOffer = async (req, res) => {
 export const toggleSellerOfferStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const offer = await SellerOffer.findById(id);
+    const sellerId = resolveSellerId(req);
+    const offer = await SellerOffer.findOne({ _id: id, ...(sellerId ? { sellerId } : {}) });
     if (!offer) {
-      return res.status(404).json({ message: "Offer not found" });
+      return res.status(404).json({ message: "Offer not found or unauthorized" });
     }
 
     offer.status = offer.status === "active" ? "expired" : "active";

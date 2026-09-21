@@ -104,15 +104,57 @@ export const approveSeller = async (req, res) => {
   }
 };
 
+// Set Seller Application Status Back to Pending
+export const setPendingSeller = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const seller = await Seller.findById(id);
+    if (!seller) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    seller.status = "pending";
+    seller.rejectionReason = "";
+    await seller.save();
+
+    if (seller.email || seller.phone) {
+      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
+      const userConditions = [];
+      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+      if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+
+      if (userConditions.length > 0) {
+        await User.updateMany(
+          { $or: userConditions },
+          { $set: { isSeller: false, sellerStatus: "pending" } }
+        );
+      }
+    }
+
+    res.json({
+      message: `Seller '${seller.storeName}' status reset to PENDING approval.`,
+      seller: {
+        id: seller._id,
+        storeName: seller.storeName,
+        status: seller.status
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to set seller status to pending", error: error.message });
+  }
+};
+
 // Reject Seller Application (with reason)
 export const rejectSeller = async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body;
+    const { reason, rejectionReason } = req.body;
+    const msgReason = reason || rejectionReason;
 
-    if (!reason || reason.trim().length === 0) {
+    if (!msgReason || msgReason.trim().length === 0) {
       return res.status(400).json({
-        message: "Rejection reason is required so the seller can know why verification failed."
+        message: "Rejection message/reason is required so the seller can know why verification failed."
       });
     }
 
@@ -122,7 +164,7 @@ export const rejectSeller = async (req, res) => {
     }
 
     seller.status = "rejected";
-    seller.rejectionReason = reason.trim();
+    seller.rejectionReason = msgReason.trim();
     await seller.save();
 
     if (seller.email || seller.phone) {
@@ -140,7 +182,7 @@ export const rejectSeller = async (req, res) => {
     }
 
     res.json({
-      message: `Seller '${seller.storeName}' has been REJECTED.`,
+      message: `Seller '${seller.storeName}' has been REJECTED with message: "${seller.rejectionReason}"`,
       seller: {
         id: seller._id,
         storeName: seller.storeName,
@@ -153,15 +195,23 @@ export const rejectSeller = async (req, res) => {
   }
 };
 
-// Toggle Suspend / Active Seller Account
+// Toggle or Set Any Seller Account Status (approved, pending, rejected, suspended)
 export const toggleSellerStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, reason, rejectionReason } = req.body;
+    const normalizedStatus = String(status || "").toLowerCase();
 
-    if (!["approved", "suspended"].includes(status)) {
+    if (!["approved", "pending", "rejected", "suspended"].includes(normalizedStatus)) {
       return res.status(400).json({
-        message: "Status must be either 'approved' or 'suspended'."
+        message: "Status must be one of: 'approved', 'pending', 'rejected', or 'suspended'."
+      });
+    }
+
+    const msgReason = reason || rejectionReason;
+    if (normalizedStatus === "rejected" && (!msgReason || msgReason.trim().length === 0)) {
+      return res.status(400).json({
+        message: "Rejection message/reason is required when rejecting a seller."
       });
     }
 
@@ -170,15 +220,44 @@ export const toggleSellerStatus = async (req, res) => {
       return res.status(404).json({ message: "Seller not found" });
     }
 
-    seller.status = status;
+    seller.status = normalizedStatus;
+    if (normalizedStatus === "rejected") {
+      seller.rejectionReason = msgReason.trim();
+    } else if (normalizedStatus === "approved" || normalizedStatus === "pending") {
+      seller.rejectionReason = "";
+    }
+    if (normalizedStatus === "approved") {
+      seller.approvedAt = new Date();
+      seller.approvedBy = req.user?.id || null;
+    }
+
     await seller.save();
 
+    if (seller.email || seller.phone) {
+      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
+      const userConditions = [];
+      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+      if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+
+      if (userConditions.length > 0) {
+        const userUpdates = { sellerStatus: normalizedStatus };
+        if (normalizedStatus === "approved") {
+          userUpdates.isSeller = true;
+          userUpdates.role = "Partner Merchant";
+        } else {
+          userUpdates.isSeller = false;
+        }
+        await User.updateMany({ $or: userConditions }, { $set: userUpdates });
+      }
+    }
+
     res.json({
-      message: `Seller account status changed to ${status}.`,
+      message: `Seller '${seller.storeName}' status updated to ${normalizedStatus.toUpperCase()}.`,
       seller: {
         id: seller._id,
         storeName: seller.storeName,
-        status: seller.status
+        status: seller.status,
+        rejectionReason: seller.rejectionReason
       }
     });
   } catch (error) {

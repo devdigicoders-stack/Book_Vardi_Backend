@@ -401,20 +401,19 @@ export const getSellerReviews = async (req, res) => {
     const validSellerObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
     const strSellerIds = rawIds.map(String);
 
-    let sellerProducts = [];
-    if (rawIds.length > 0) {
-      sellerProducts = await Product.find({
-        $or: [
-          ...(validSellerObjectIds.length > 0
-            ? [{ sellerId: { $in: validSellerObjectIds } }, { seller: { $in: validSellerObjectIds } }]
-            : []),
-          { sellerId: { $in: strSellerIds } },
-          { seller: { $in: strSellerIds } }
-        ]
-      }).select("_id id name title");
-    } else {
-      sellerProducts = await Product.find().select("_id id name title");
+    if (rawIds.length === 0) {
+      return res.json([]);
     }
+
+    const sellerProducts = await Product.find({
+      $or: [
+        ...(validSellerObjectIds.length > 0
+          ? [{ sellerId: { $in: validSellerObjectIds } }, { seller: { $in: validSellerObjectIds } }]
+          : []),
+        { sellerId: { $in: strSellerIds } },
+        { seller: { $in: strSellerIds } }
+      ]
+    }).select("_id id name title");
 
     const productIds = sellerProducts.map((p) => p._id);
     const strProductIds = productIds.map((id) => String(id));

@@ -32,6 +32,7 @@ import {
   getSellerById,
   approveSeller,
   rejectSeller,
+  setPendingSeller,
   toggleSellerStatus,
   updateSellerCommission
 } from "../controllers/adminSellerController.js";
@@ -103,6 +104,7 @@ router.get("/sellers", authenticateAdmin, getAllSellers);
 router.get("/sellers/:id", authenticateAdmin, getSellerById);
 router.put("/sellers/:id/approve", authenticateAdmin, approveSeller);
 router.put("/sellers/:id/reject", authenticateAdmin, rejectSeller);
+router.put("/sellers/:id/pending", authenticateAdmin, setPendingSeller);
 router.put("/sellers/:id/status", authenticateAdmin, toggleSellerStatus);
 router.put("/sellers/:id/commission", authenticateAdmin, updateSellerCommission);
 
