@@ -159,6 +159,19 @@ export const authenticateSeller = async (req, res, next) => {
   }
 };
 
+// Require Approved Seller Middleware (Strict check on seller status)
+export const requireApprovedSeller = (req, res, next) => {
+  authenticateSeller(req, res, () => {
+    if (req.seller && req.seller.status !== "approved") {
+      return res.status(403).json({
+        message: `Seller account status is '${req.seller.status}'. Only approved sellers can access this dashboard feature.`,
+        status: req.seller.status
+      });
+    }
+    next();
+  });
+};
+
 // Customer / User Authenticator (Strict)
 export const protectUser = (req, res, next) => {
   authenticateToken(req, res, () => {

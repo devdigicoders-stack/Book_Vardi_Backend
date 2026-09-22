@@ -772,14 +772,17 @@ export const verifySellerPhoneOtp = async (req, res) => {
       success: true,
       message: "Phone OTP verified successfully",
       token,
+      status: seller.status,
       sellerStatus: seller.status,
+      approvalStatus: seller.status,
       seller: {
         id: seller._id,
         name: seller.name,
         storeName: seller.storeName,
         email: seller.email,
         phone: seller.phone,
-        status: seller.status
+        status: seller.status,
+        approvalStatus: seller.status
       }
     });
   } catch (error) {

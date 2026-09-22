@@ -71,6 +71,7 @@ const getNormalizedCartItems = (cart) => {
       const rawId = it.id || it.productId || it._id;
       if (rawId === undefined || rawId === null) return null;
       return {
+        ...it,
         id: rawId,
         productId: it.productId || rawId,
         name: it.name || "Stationery Item",
@@ -78,6 +79,8 @@ const getNormalizedCartItems = (cart) => {
         image: it.image || (Array.isArray(it.images) && it.images[0]) || "",
         price: Number(it.price) || 0,
         originalPrice: Number(it.originalPrice) || 0,
+        paymentMethodAllowed: it.paymentMethodAllowed || it.payment_method_allowed || "Both",
+        paymentMethodsAllowed: Array.isArray(it.paymentMethodsAllowed) ? it.paymentMethodsAllowed : ["COD", "Online"],
         quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1
       };
     })

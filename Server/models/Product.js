@@ -61,6 +61,19 @@ const productSchema = new mongoose.Schema(
           type: String,
           trim: true
         },
+        measureScale: {
+          type: String,
+          default: "size",
+          trim: true // size, count, meter, kg, gram, box, piece, unit, pack, set, pair
+        },
+        measureValue: {
+          type: String,
+          trim: true
+        },
+        unit: {
+          type: String,
+          trim: true
+        },
         price: {
           type: Number,
           default: 0,
@@ -79,6 +92,10 @@ const productSchema = new mongoose.Schema(
         image: {
           type: String,
           default: ""
+        },
+        images: {
+          type: [String],
+          default: []
         },
         sku: {
           type: String,

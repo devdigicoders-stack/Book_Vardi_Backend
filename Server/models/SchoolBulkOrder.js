@@ -11,6 +11,30 @@ const requirementItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const quotationSchema = new mongoose.Schema(
+  {
+    sellerId: { type: mongoose.Schema.Types.ObjectId, ref: "Seller", required: true },
+    sellerName: { type: String, required: true },
+    sellerStoreName: { type: String, default: "" },
+    sellerPhone: { type: String, default: "" },
+    sellerCity: { type: String, default: "" },
+
+    quoteAmount: { type: Number, required: true },
+    unitPrice: { type: Number, default: 0 },
+    estimatedDeliveryDays: { type: Number, default: 7 },
+    proposedDeliveryDate: { type: String, default: "" },
+    notes: { type: String, default: "" },
+
+    status: {
+      type: String,
+      enum: ["submitted", "under_review", "approved", "rejected"],
+      default: "submitted"
+    },
+    submittedAt: { type: Date, default: Date.now }
+  },
+  { timestamps: true }
+);
+
 const schoolBulkOrderSchema = new mongoose.Schema(
   {
     referenceId: { type: String, required: true, unique: true },
@@ -36,8 +60,21 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     targetBudgetPerKit: { type: String, default: "" },
     additionalNotes: { type: String, default: "" },
 
-    sellerId: { type: mongoose.Schema.Types.ObjectId, ref: "Seller", index: true },
-    status: { type: String, default: "pending" } // pending, under_review, quoted, fulfilled, rejected
+    // Distribution & Assignment Options: unassigned, direct, selected, broadcast
+    assignmentMode: {
+      type: String,
+      enum: ["unassigned", "direct", "selected", "broadcast"],
+      default: "unassigned"
+    },
+    sellerId: { type: mongoose.Schema.Types.ObjectId, ref: "Seller", index: true }, // Assigned seller
+    invitedSellerIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Seller" }],
+
+    // Seller Quotations & Counter Offers
+    quotations: [quotationSchema],
+    acceptedQuoteId: { type: mongoose.Schema.Types.ObjectId },
+
+    // Status: pending, under_review, published, assigned, quoted, quote_accepted, in_production, fulfilled, rejected
+    status: { type: String, default: "pending" }
   },
   { timestamps: true }
 );

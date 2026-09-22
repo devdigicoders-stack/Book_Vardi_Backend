@@ -1,5 +1,16 @@
+import mongoose from "mongoose";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
+
+// Helper: Safely find seller by MongoDB ObjectId or fallback to email / phone / storeName
+const findSellerByIdOrQuery = async (id, selectFields = "") => {
+  const isObjId = mongoose.Types.ObjectId.isValid(id);
+  let query = Seller.find(isObjId ? { _id: id } : { $or: [{ email: id }, { phone: id }, { storeName: id }] });
+  if (selectFields) {
+    query = query.select(selectFields);
+  }
+  return await query.findOne();
+};
 
 // Get All Sellers (with optional status filter)
 export const getAllSellers = async (req, res) => {
@@ -46,7 +57,7 @@ export const getSellerById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const seller = await Seller.findById(id).select("-password");
+    const seller = await findSellerByIdOrQuery(id, "-password");
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -62,7 +73,7 @@ export const approveSeller = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const seller = await Seller.findById(id);
+    const seller = await findSellerByIdOrQuery(id);
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -70,29 +81,34 @@ export const approveSeller = async (req, res) => {
     seller.status = "approved";
     seller.rejectionReason = "";
     seller.approvedAt = new Date();
-    seller.approvedBy = req.user?.id || null;
+    if (req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
+      seller.approvedBy = req.user.id;
+    } else {
+      seller.approvedBy = null;
+    }
 
     await seller.save();
 
     // Also update corresponding User document in DB if exists
-    if (seller.email || seller.phone) {
-      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
-      const userConditions = [];
-      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    const userConditions = [{ _id: seller._id }];
+    if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    if (seller.phone) {
+      const cleanPhone = String(seller.phone).replace(/\D/g, "").slice(-10);
       if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+    }
 
-      if (userConditions.length > 0) {
-        await User.updateMany(
-          { $or: userConditions },
-          { $set: { isSeller: true, sellerStatus: "approved", role: "Partner Merchant" } }
-        );
-      }
+    if (userConditions.length > 0) {
+      await User.updateMany(
+        { $or: userConditions },
+        { $set: { isSeller: true, sellerStatus: "approved", role: "Partner Merchant" } }
+      );
     }
 
     res.json({
       message: `Seller '${seller.storeName}' has been APPROVED successfully. They can now log in and manage products.`,
       seller: {
         id: seller._id,
+        _id: seller._id,
         storeName: seller.storeName,
         email: seller.email,
         status: seller.status,
@@ -100,6 +116,7 @@ export const approveSeller = async (req, res) => {
       }
     });
   } catch (error) {
+    console.error("approveSeller error:", error);
     res.status(500).json({ message: "Failed to approve seller", error: error.message });
   }
 };
@@ -109,7 +126,7 @@ export const setPendingSeller = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const seller = await Seller.findById(id);
+    const seller = await findSellerByIdOrQuery(id);
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -118,29 +135,31 @@ export const setPendingSeller = async (req, res) => {
     seller.rejectionReason = "";
     await seller.save();
 
-    if (seller.email || seller.phone) {
-      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
-      const userConditions = [];
-      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    const userConditions = [{ _id: seller._id }];
+    if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    if (seller.phone) {
+      const cleanPhone = String(seller.phone).replace(/\D/g, "").slice(-10);
       if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+    }
 
-      if (userConditions.length > 0) {
-        await User.updateMany(
-          { $or: userConditions },
-          { $set: { isSeller: false, sellerStatus: "pending" } }
-        );
-      }
+    if (userConditions.length > 0) {
+      await User.updateMany(
+        { $or: userConditions },
+        { $set: { isSeller: false, sellerStatus: "pending" } }
+      );
     }
 
     res.json({
       message: `Seller '${seller.storeName}' status reset to PENDING approval.`,
       seller: {
         id: seller._id,
+        _id: seller._id,
         storeName: seller.storeName,
         status: seller.status
       }
     });
   } catch (error) {
+    console.error("setPendingSeller error:", error);
     res.status(500).json({ message: "Failed to set seller status to pending", error: error.message });
   }
 };
@@ -158,7 +177,7 @@ export const rejectSeller = async (req, res) => {
       });
     }
 
-    const seller = await Seller.findById(id);
+    const seller = await findSellerByIdOrQuery(id);
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -167,30 +186,32 @@ export const rejectSeller = async (req, res) => {
     seller.rejectionReason = msgReason.trim();
     await seller.save();
 
-    if (seller.email || seller.phone) {
-      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
-      const userConditions = [];
-      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    const userConditions = [{ _id: seller._id }];
+    if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    if (seller.phone) {
+      const cleanPhone = String(seller.phone).replace(/\D/g, "").slice(-10);
       if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
+    }
 
-      if (userConditions.length > 0) {
-        await User.updateMany(
-          { $or: userConditions },
-          { $set: { isSeller: false, sellerStatus: "rejected" } }
-        );
-      }
+    if (userConditions.length > 0) {
+      await User.updateMany(
+        { $or: userConditions },
+        { $set: { isSeller: false, sellerStatus: "rejected" } }
+      );
     }
 
     res.json({
       message: `Seller '${seller.storeName}' has been REJECTED with message: "${seller.rejectionReason}"`,
       seller: {
         id: seller._id,
+        _id: seller._id,
         storeName: seller.storeName,
         status: seller.status,
         rejectionReason: seller.rejectionReason
       }
     });
   } catch (error) {
+    console.error("rejectSeller error:", error);
     res.status(500).json({ message: "Failed to reject seller", error: error.message });
   }
 };
@@ -215,7 +236,7 @@ export const toggleSellerStatus = async (req, res) => {
       });
     }
 
-    const seller = await Seller.findById(id);
+    const seller = await findSellerByIdOrQuery(id);
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -228,39 +249,43 @@ export const toggleSellerStatus = async (req, res) => {
     }
     if (normalizedStatus === "approved") {
       seller.approvedAt = new Date();
-      seller.approvedBy = req.user?.id || null;
+      if (req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
+        seller.approvedBy = req.user.id;
+      } else {
+        seller.approvedBy = null;
+      }
     }
 
     await seller.save();
 
-    if (seller.email || seller.phone) {
-      const cleanPhone = seller.phone ? String(seller.phone).replace(/\D/g, "").slice(-10) : "";
-      const userConditions = [];
-      if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    const userConditions = [{ _id: seller._id }];
+    if (seller.email) userConditions.push({ email: seller.email.toLowerCase().trim() });
+    if (seller.phone) {
+      const cleanPhone = String(seller.phone).replace(/\D/g, "").slice(-10);
       if (cleanPhone) userConditions.push({ phone: { $regex: cleanPhone + "$" } });
-
-      if (userConditions.length > 0) {
-        const userUpdates = { sellerStatus: normalizedStatus };
-        if (normalizedStatus === "approved") {
-          userUpdates.isSeller = true;
-          userUpdates.role = "Partner Merchant";
-        } else {
-          userUpdates.isSeller = false;
-        }
-        await User.updateMany({ $or: userConditions }, { $set: userUpdates });
-      }
     }
+
+    const userUpdates = { sellerStatus: normalizedStatus };
+    if (normalizedStatus === "approved") {
+      userUpdates.isSeller = true;
+      userUpdates.role = "Partner Merchant";
+    } else {
+      userUpdates.isSeller = false;
+    }
+    await User.updateMany({ $or: userConditions }, { $set: userUpdates });
 
     res.json({
       message: `Seller '${seller.storeName}' status updated to ${normalizedStatus.toUpperCase()}.`,
       seller: {
         id: seller._id,
+        _id: seller._id,
         storeName: seller.storeName,
         status: seller.status,
         rejectionReason: seller.rejectionReason
       }
     });
   } catch (error) {
+    console.error("toggleSellerStatus error:", error);
     res.status(500).json({ message: "Failed to update seller status", error: error.message });
   }
 };
@@ -276,7 +301,7 @@ export const updateSellerCommission = async (req, res) => {
       return res.status(400).json({ message: "Invalid commission rate. Must be a percentage between 0 and 100." });
     }
 
-    const seller = await Seller.findById(id);
+    const seller = await findSellerByIdOrQuery(id);
     if (!seller) {
       return res.status(404).json({ message: "Seller not found" });
     }
@@ -289,13 +314,14 @@ export const updateSellerCommission = async (req, res) => {
       message: `Commission rate for '${seller.storeName}' updated to ${rate}%.`,
       seller: {
         id: seller._id,
+        _id: seller._id,
         storeName: seller.storeName,
         commissionRate: seller.commissionRate,
         commissionPercentage: seller.commissionPercentage
       }
     });
   } catch (error) {
+    console.error("updateSellerCommission error:", error);
     res.status(500).json({ message: "Failed to update seller commission", error: error.message });
   }
 };
-

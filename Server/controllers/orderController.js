@@ -30,6 +30,140 @@ const findUserByIdentifier = async (req) => {
   return await User.findOne({ $or: query });
 };
 
+// Helper to safely decrement stock and size variant stock for a product or kit on order placement
+const decrementItemStock = async (item) => {
+  const qty = Math.max(1, Number(item.quantity) || 1);
+  const searchId = item.productId || item.id || item._id;
+  const itemSize = String(item.size || item.selectedSize || "").trim();
+
+  let prod = null;
+  if (searchId) {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      prod = await Product.findById(searchId);
+    }
+    if (!prod) {
+      prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
+    }
+  }
+  if (!prod && item.name) {
+    const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+    prod = await Product.findOne({
+      name: { $regex: new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }
+    });
+  }
+
+  if (prod) {
+    // 1. Decrement top level stock floor at 0
+    prod.stock = Math.max(0, (Number(prod.stock) || 0) - qty);
+
+    // 2. Decrement sizeVariants stock if size specified
+    if (itemSize && Array.isArray(prod.sizeVariants) && prod.sizeVariants.length > 0) {
+      const variant = prod.sizeVariants.find(
+        (v) => String(v.size || "").trim().toLowerCase() === itemSize.toLowerCase()
+      );
+      if (variant) {
+        variant.stock = Math.max(0, (Number(variant.stock) || 0) - qty);
+      }
+    }
+
+    // 3. Update out-of-stock status if stock reaches 0
+    if (prod.stock <= 0) {
+      prod.status = "out-of-stock";
+    }
+
+    await prod.save();
+  }
+
+  // Also handle Kit document stock
+  let kit = null;
+  if (searchId) {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      kit = await Kit.findById(searchId);
+    }
+    if (!kit) {
+      kit = await Kit.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
+    }
+  }
+  if (!kit && item.name) {
+    const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+    kit = await Kit.findOne({
+      title: { $regex: new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }
+    });
+  }
+
+  if (kit) {
+    kit.stock = Math.max(0, (Number(kit.stock) || 0) - qty);
+    await kit.save();
+  }
+};
+
+// Helper to safely restore stock and size variant stock on order cancellation
+const incrementItemStock = async (item) => {
+  const qty = Math.max(1, Number(item.quantity) || 1);
+  const searchId = item.productId || item.id || item._id;
+  const itemSize = String(item.size || item.selectedSize || "").trim();
+
+  let prod = null;
+  if (searchId) {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      prod = await Product.findById(searchId);
+    }
+    if (!prod) {
+      prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
+    }
+  }
+  if (!prod && item.name) {
+    const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+    prod = await Product.findOne({
+      name: { $regex: new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }
+    });
+  }
+
+  if (prod) {
+    // 1. Restore top level stock
+    prod.stock = (Number(prod.stock) || 0) + qty;
+
+    // 2. Restore sizeVariants stock if size specified
+    if (itemSize && Array.isArray(prod.sizeVariants) && prod.sizeVariants.length > 0) {
+      const variant = prod.sizeVariants.find(
+        (v) => String(v.size || "").trim().toLowerCase() === itemSize.toLowerCase()
+      );
+      if (variant) {
+        variant.stock = (Number(variant.stock) || 0) + qty;
+      }
+    }
+
+    // 3. Reset status to active if stock > 0
+    if (prod.stock > 0 && prod.status === "out-of-stock") {
+      prod.status = "active";
+    }
+
+    await prod.save();
+  }
+
+  // Also handle Kit document stock
+  let kit = null;
+  if (searchId) {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      kit = await Kit.findById(searchId);
+    }
+    if (!kit) {
+      kit = await Kit.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
+    }
+  }
+  if (!kit && item.name) {
+    const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
+    kit = await Kit.findOne({
+      title: { $regex: new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") }
+    });
+  }
+
+  if (kit) {
+    kit.stock = (Number(kit.stock) || 0) + qty;
+    await kit.save();
+  }
+};
+
 // 1. Get all orders (Admin / General)
 export const getOrders = async (req, res) => {
   try {
@@ -238,23 +372,7 @@ export const createOrder = async (req, res) => {
     // Auto-decrease product and kit stock in MongoDB as order is placed
     try {
       for (const item of orderItems) {
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const searchId = item.productId || item.id || item._id;
-
-        if (searchId) {
-          if (mongoose.Types.ObjectId.isValid(searchId)) {
-            await Product.findByIdAndUpdate(searchId, { $inc: { stock: -qty } });
-            await Kit.findByIdAndUpdate(searchId, { $inc: { stock: -qty } });
-          } else {
-            await Product.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: -qty } });
-            await Kit.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: -qty } });
-          }
-        } else if (item.name) {
-          const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
-          const nameRegex = new RegExp(cleanItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-          await Product.findOneAndUpdate({ name: nameRegex }, { $inc: { stock: -qty } });
-          await Kit.findOneAndUpdate({ title: nameRegex }, { $inc: { stock: -qty } });
-        }
+        await decrementItemStock(item);
       }
     } catch (stockErr) {
       console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
@@ -375,17 +493,7 @@ export const updateOrder = async (req, res) => {
       // Restock if cancelled
       if (newStatus === "cancelled" && previousStatus !== "cancelled") {
         for (const item of existingOrder.items) {
-          const qty = Math.max(1, Number(item.quantity) || 1);
-          const searchId = item.productId || item.id || item._id;
-          if (searchId) {
-            if (mongoose.Types.ObjectId.isValid(searchId)) {
-              await Product.findByIdAndUpdate(searchId, { $inc: { stock: qty } });
-              await Kit.findByIdAndUpdate(searchId, { $inc: { stock: qty } });
-            } else {
-              await Product.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: qty } });
-              await Kit.findOneAndUpdate({ $or: [{ id: searchId }, { _id: searchId }] }, { $inc: { stock: qty } });
-            }
-          }
+          await incrementItemStock(item);
         }
         if (cancellationReason) existingOrder.cancellationReason = cancellationReason;
       }

@@ -1,58 +1,33 @@
-import express from 'express';
-import DeliveryBoy from '../models/DeliveryBoy.js';
-import authenticateToken from '../middlewares/auth.js';
+import express from "express";
+import {
+  getDeliveryPartnerOrder,
+  resendCustomerDeliveryOtp,
+  verifyDeliveryOtp,
+  updateDriverLocation
+} from "../controllers/deliveryController.js";
+import {
+  getDeliveryConfig,
+  updateDeliveryConfig,
+  checkServiceability,
+  createShipment,
+  trackAwb,
+  cancelShipment
+} from "../controllers/deliveryPartnerController.js";
 
 const router = express.Router();
 
-// Get all delivery boys
-router.get('/', authenticateToken, async (req, res) => {
-  try {
-    const deliveryBoys = await DeliveryBoy.find();
-    res.json(deliveryBoys);
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
+// Delivery Partner Integration & Courier Aggregator Endpoints
+router.get("/config", getDeliveryConfig);
+router.put("/config", updateDeliveryConfig);
+router.post("/serviceability", checkServiceability);
+router.post("/create-shipment", createShipment);
+router.get("/track/:awb", trackAwb);
+router.post("/cancel-shipment", cancelShipment);
 
-// Create delivery boy
-router.post('/', authenticateToken, async (req, res) => {
-  try {
-    const { name, phone, status } = req.body;
-    const deliveryBoy = new DeliveryBoy({ name, phone, status });
-    await deliveryBoy.save();
-    res.status(201).json({ message: 'Delivery boy created successfully', deliveryBoy });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Update delivery boy
-router.put('/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updates = req.body;
-    const deliveryBoy = await DeliveryBoy.findByIdAndUpdate(id, updates, { new: true });
-    if (!deliveryBoy) {
-      return res.status(404).json({ message: 'Delivery boy not found' });
-    }
-    res.json({ message: 'Delivery boy updated successfully', deliveryBoy });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Delete delivery boy
-router.delete('/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const deliveryBoy = await DeliveryBoy.findByIdAndDelete(id);
-    if (!deliveryBoy) {
-      return res.status(404).json({ message: 'Delivery boy not found' });
-    }
-    res.json({ message: 'Delivery boy deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
+// Delivery Partner Driver & OTP Endpoints
+router.get("/partner/:token", getDeliveryPartnerOrder);
+router.post("/partner/:token/resend-otp", resendCustomerDeliveryOtp);
+router.post("/partner/:token/verify-otp", verifyDeliveryOtp);
+router.post("/partner/:token/location", updateDriverLocation);
 
 export default router;

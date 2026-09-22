@@ -42,7 +42,15 @@ const orderItemSchema = new mongoose.Schema({
     deliveryPersonName: { type: String, default: "" },
     deliveryPersonPhone: { type: String, default: "" },
     vehicleNumber: { type: String, default: "" },
-    deliveryOtp: { type: String, default: () => Math.floor(1000 + Math.random() * 9000).toString() }
+    deliveryOtp: { type: String, default: () => Math.floor(1000 + Math.random() * 9000).toString() },
+    deliveryPartnerToken: { type: String, default: "" },
+    trackingUrl: { type: String, default: "" },
+    driverLocation: {
+      lat: { type: Number, default: null },
+      lng: { type: Number, default: null },
+      updatedAt: { type: Date, default: null }
+    },
+    otpLastSentAt: { type: Date, default: null }
   },
   status: {
     type: String,

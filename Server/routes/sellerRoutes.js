@@ -111,7 +111,9 @@ import {
   getSellerSchoolOrders,
   createSellerSchoolOrder,
   updateSellerSchoolOrder,
-  deleteSellerSchoolOrder
+  deleteSellerSchoolOrder,
+  acceptSchoolOrderDirect,
+  submitSellerQuotation
 } from "../controllers/schoolBulkOrderController.js";
 
 // ==========================================
@@ -133,6 +135,9 @@ router.get("/school-orders", authenticateSeller, getSellerSchoolOrders);
 router.post("/school-orders", authenticateSeller, createSellerSchoolOrder);
 router.patch("/school-orders/:id", authenticateSeller, updateSellerSchoolOrder);
 router.delete("/school-orders/:id", authenticateSeller, deleteSellerSchoolOrder);
+router.post("/school-orders/:id/accept", authenticateSeller, acceptSchoolOrderDirect);
+router.post("/school-orders/:id/quote", authenticateSeller, submitSellerQuotation);
+
 
 // ==========================================
 // 6. Seller Store-wide Coupons & Offers

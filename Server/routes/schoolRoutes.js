@@ -207,14 +207,15 @@ router.post("/bulk-order", async (req, res) => {
       logoEmbroideryRequired: Boolean(logoEmbroideryRequired),
       targetBudgetPerKit: targetBudgetPerKit || "",
       additionalNotes: additionalNotes || "",
-      status: "pending"
+      assignmentMode: req.body.assignmentMode || "broadcast",
+      status: "published"
     });
 
     await bulkOrder.save();
 
     return res.status(201).json({
       success: true,
-      message: "School Bulk Order inquiry submitted successfully!",
+      message: "School Bulk Order inquiry submitted successfully and broadcast to sellers!",
       referenceId: bulkOrder.referenceId,
       bulkOrder
     });
@@ -224,14 +225,21 @@ router.post("/bulk-order", async (req, res) => {
   }
 });
 
+import {
+  getAdminSchoolOrders,
+  distributeSchoolOrder,
+  approveSellerQuotation
+} from "../controllers/schoolBulkOrderController.js";
+
 // GET all School Bulk Orders (Admin view)
-router.get("/bulk-orders/list", async (req, res) => {
-  try {
-    const orders = await SchoolBulkOrder.find().sort({ createdAt: -1 });
-    res.json({ success: true, count: orders.length, orders });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+router.get("/bulk-orders/list", getAdminSchoolOrders);
+router.get("/bulk-orders/admin-list", getAdminSchoolOrders);
+
+// PATCH Admin Distribute Bulk Order (Direct, Selected, Broadcast)
+router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);
+
+// POST Admin Approve Specific Seller Quotation
+router.post("/bulk-orders/:id/approve-quote", approveSellerQuotation);
 
 export default router;
+

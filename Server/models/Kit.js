@@ -135,6 +135,15 @@ const kitSchema = new mongoose.Schema(
       type: String,
       enum: ["Approved", "Pending", "Rejected"],
       default: "Pending"
+    },
+    paymentMethodAllowed: {
+      type: String,
+      enum: ["Both", "Online_Only", "COD_Only"],
+      default: "Both"
+    },
+    paymentMethodsAllowed: {
+      type: [String],
+      default: ["COD", "Online"]
     }
   },
   {

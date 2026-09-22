@@ -2,6 +2,9 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 
+// Use the configured frontend app base URL so delivery links work on local and deployed hosts.
+const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL || "http://localhost:3000";
+
 // Helper to extract authenticated seller ID
 const resolveSellerId = (req) => {
   return req.user?.id || req.seller?._id || req.seller?.id || req.user?._id || req.user?.phone || req.headers["x-seller-id"] || req.query.sellerId || null;
@@ -391,12 +394,34 @@ export const updateSellerOrderStatus = async (req, res) => {
           };
         }
         if (selfDeliveryDetails) {
-          item.selfDeliveryDetails = {
+          const tokenVal = String(order.selfDeliveryDetails?.deliveryPartnerToken || item.selfDeliveryDetails?.deliveryPartnerToken || `DLV-${Math.floor(100000 + Math.random() * 900000)}`).trim();
+          const trackingLink = `${frontendBaseUrl.replace(/\/+$/, '')}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
+          const otpVal = selfDeliveryDetails.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+
+          const mergedSelf = {
             ...item.selfDeliveryDetails,
-            ...selfDeliveryDetails
+            ...selfDeliveryDetails,
+            deliveryPartnerToken: tokenVal,
+            trackingUrl: trackingLink,
+            deliveryOtp: otpVal
           };
+          item.selfDeliveryDetails = mergedSelf;
+          order.selfDeliveryDetails = mergedSelf;
         }
       });
+    }
+
+    if (selfDeliveryDetails && (!order.selfDeliveryDetails || !order.selfDeliveryDetails.deliveryPartnerToken)) {
+      const tokenVal = `DLV-${Math.floor(100000 + Math.random() * 900000)}`;
+      const trackingLink = `${frontendBaseUrl.replace(/\/+$/, '')}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
+      const otpVal = selfDeliveryDetails.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      order.selfDeliveryDetails = {
+        ...order.selfDeliveryDetails,
+        ...selfDeliveryDetails,
+        deliveryPartnerToken: tokenVal,
+        trackingUrl: trackingLink,
+        deliveryOtp: otpVal
+      };
     }
 
     if (status) {
