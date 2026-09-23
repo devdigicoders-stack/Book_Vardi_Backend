@@ -87,6 +87,27 @@ const getNormalizedCartItems = (cart) => {
     .filter(Boolean);
 };
 
+// Helper to save cart document safely handling VersionError (Optimistic Concurrency Control)
+const saveCartSafely = async (cart) => {
+  try {
+    cart.markModified('items');
+    await cart.save();
+    return cart;
+  } catch (err) {
+    if (err.name === 'VersionError' && cart && cart._id) {
+      // Re-fetch latest document from MongoDB to get updated __v and save
+      const latestCart = await Cart.findById(cart._id);
+      if (latestCart) {
+        latestCart.items = cart.items;
+        latestCart.markModified('items');
+        await latestCart.save();
+        return latestCart;
+      }
+    }
+    throw err;
+  }
+};
+
 // 1. Get User Cart
 export const getCart = async (req, res) => {
   try {
@@ -97,13 +118,12 @@ export const getCart = async (req, res) => {
       return res.json({ success: true, cart: { items: [], totalAmount: 0 } });
     }
 
-    const cart = await getOrCreateCart(userId, userPhone);
+    let cart = await getOrCreateCart(userId, userPhone);
     const normalizedItems = getNormalizedCartItems(cart);
 
     if (JSON.stringify(cart.items) !== JSON.stringify(normalizedItems)) {
       cart.items = normalizedItems;
-      cart.markModified('items');
-      await cart.save();
+      cart = await saveCartSafely(cart);
     }
 
     return res.json({ success: true, cart });
@@ -162,8 +182,7 @@ export const addToCart = async (req, res) => {
     }
 
     cart.items = items;
-    cart.markModified('items');
-    await cart.save();
+    cart = await saveCartSafely(cart);
 
     return res.status(200).json({ message: "Item added to cart", cart });
   } catch (error) {
@@ -209,8 +228,7 @@ export const updateCartItem = async (req, res) => {
     }
 
     cart.items = items;
-    cart.markModified('items');
-    await cart.save();
+    cart = await saveCartSafely(cart);
 
     return res.json({ message: "Cart updated", cart });
   } catch (error) {
@@ -234,8 +252,7 @@ export const removeFromCart = async (req, res) => {
       (it) => extractCartItemId(it) !== strId
     );
 
-    cart.markModified('items');
-    await cart.save();
+    cart = await saveCartSafely(cart);
 
     return res.json({ message: "Item removed from cart", cart });
   } catch (error) {
@@ -252,8 +269,7 @@ export const clearCart = async (req, res) => {
 
     let cart = await getOrCreateCart(userId, userPhone);
     cart.items = [];
-    cart.markModified('items');
-    await cart.save();
+    cart = await saveCartSafely(cart);
 
     return res.json({ message: "Cart cleared", cart });
   } catch (error) {
