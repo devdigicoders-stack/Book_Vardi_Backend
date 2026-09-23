@@ -81,9 +81,16 @@ export const requireAdminPermission = (tabId, requiredLevel = "viewer") => {
 // Seller-Only Authenticator (Resolves seller account for active user)
 export const authenticateSeller = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  const headerPhone = req.headers["x-user-phone"] || req.headers["x-seller-phone"] || req.query?.phone || req.body?.phone;
-  const headerSellerId = req.headers["x-seller-id"] || req.headers["x-user-id"] || req.query?.sellerId;
+  const rawToken = authHeader && authHeader.split(" ")[1];
+  const token = (rawToken && rawToken !== "undefined" && rawToken !== "null" && rawToken !== "Bearer") ? rawToken : null;
+
+  let rawPhone = req.headers["x-user-phone"] || req.headers["x-seller-phone"] || req.query?.phone || req.body?.phone;
+  if (rawPhone === "undefined" || rawPhone === "null" || rawPhone === "[object Object]") rawPhone = null;
+  const headerPhone = rawPhone;
+
+  let rawSellerId = req.headers["x-seller-id"] || req.headers["x-user-id"] || req.query?.sellerId;
+  if (rawSellerId === "undefined" || rawSellerId === "null" || rawSellerId === "[object Object]") rawSellerId = null;
+  const headerSellerId = rawSellerId;
 
   let authenticatedUser = null;
 
@@ -96,12 +103,12 @@ export const authenticateSeller = async (req, res, next) => {
   const userId = authenticatedUser?.id || headerSellerId;
   const userPhone = authenticatedUser?.phone || headerPhone;
 
-  const isValidObjectId = userId && mongoose.Types.ObjectId.isValid(userId);
+  const isValidObjectId = Boolean(userId && mongoose.Types.ObjectId.isValid(userId) && userId !== "undefined" && userId !== "null" && userId !== "[object Object]");
 
   try {
     let seller = null;
     if (isValidObjectId) {
-      seller = await Seller.findById(userId);
+      seller = await Seller.findById(userId).select("-password -documents");
     }
     if (!seller && userPhone) {
       const cleanPhone = String(userPhone).replace(/\D/g, "").slice(-10);
@@ -111,7 +118,7 @@ export const authenticateSeller = async (req, res, next) => {
           { phone: `+91${cleanPhone}` },
           { phone: `+91 ${cleanPhone}` }
         ]
-      });
+      }).select("-password -documents");
     }
 
     if (seller) {

@@ -48,9 +48,13 @@ dotenv.config();
 
 const app = express();
 
-// 1. Connect to MongoDB
-connectDB().catch(() => {});
-
+// 1. Connect to MongoDB and seed default accounts once connected
+connectDB()
+  .then(async () => {
+    await initDefaultAdmin();
+    await initDefaultSeller();
+  })
+  .catch(() => {});
 
 // 2. Create Default Admin & ensure Phone 1231231232 has admin role
 const initDefaultAdmin = async () => {
@@ -83,7 +87,6 @@ const initDefaultAdmin = async () => {
     console.error("Default admin creation error:", error.message);
   }
 };
-initDefaultAdmin();
 
 // Auto-seed default approved seller for seamless onboarding & testing
 const initDefaultSeller = async () => {
@@ -116,7 +119,6 @@ const initDefaultSeller = async () => {
     console.error("Default seller creation error:", err.message);
   }
 };
-initDefaultSeller();
 
 // 3. Security Middlewares (Helmet & Rate Limiting)
 app.use(helmet({ crossOriginResourcePolicy: false })); // Secure HTTP Headers

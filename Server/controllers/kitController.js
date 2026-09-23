@@ -4,7 +4,7 @@ import Kit from "../models/Kit.js";
 export const getKits = async (req, res) => {
   try {
     const { schoolName, gender, classGrade, badgeTag, search, sellerId } = req.query;
-    const filter = { status: "available" };
+    const filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true } };
 
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
     if (gender && gender !== "All") filter.gender = gender;
@@ -37,16 +37,16 @@ export const getKits = async (req, res) => {
 // Get single Kit Bundle details by ID
 export const getKitById = async (req, res) => {
   try {
-    const kit = await Kit.findById(req.params.id)
+    const kit = await Kit.findOne({ _id: req.params.id, isDeleted: { $ne: true }, status: { $nin: ["deleted"] } })
       .populate("sellerId", "storeName name city phone location")
       .populate("items.productId", "name price images category");
 
     if (!kit) {
-      return res.status(404).json({ message: "Kit bundle not found" });
+      return res.status(404).json({ message: "Kit bundle not found or has been deleted" });
     }
 
     res.json(kit);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch kit", error: error.message });
+    res.status(404).json({ message: "Kit bundle not found or has been deleted", error: error.message });
   }
 };

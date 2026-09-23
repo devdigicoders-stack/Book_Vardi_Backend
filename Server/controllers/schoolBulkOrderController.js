@@ -15,7 +15,7 @@ export const getAdminSchoolOrders = async (req, res) => {
   }
 };
 
-// PATCH Admin Distribute Order (Option A: Direct, Option B: Selected, Option C: Broadcast)
+// PATCH Admin Distribute Order (Option A: Direct, Option B: Selected, Option C: Broadcast, Option D: Admin Direct)
 export const distributeSchoolOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -26,8 +26,8 @@ export const distributeSchoolOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
-    if (!["direct", "selected", "broadcast"].includes(assignmentMode)) {
-      return res.status(400).json({ success: false, message: "Invalid assignment mode. Choose 'direct', 'selected', or 'broadcast'." });
+    if (!["direct", "selected", "broadcast", "admin_direct"].includes(assignmentMode)) {
+      return res.status(400).json({ success: false, message: "Invalid assignment mode. Choose 'direct', 'selected', 'broadcast', or 'admin_direct'." });
     }
 
     bulkOrder.assignmentMode = assignmentMode;
@@ -50,6 +50,11 @@ export const distributeSchoolOrder = async (req, res) => {
       bulkOrder.sellerId = null;
       bulkOrder.invitedSellerIds = [];
       bulkOrder.status = "published";
+    } else if (assignmentMode === "admin_direct") {
+      bulkOrder.sellerId = null;
+      bulkOrder.invitedSellerIds = [];
+      bulkOrder.status = "assigned_to_admin";
+      bulkOrder.fulfilledBy = "BookVardi HQ";
     }
 
     await bulkOrder.save();
@@ -71,23 +76,37 @@ export const distributeSchoolOrder = async (req, res) => {
 // GET all B2B School Bulk Orders visible to a Seller
 export const getSellerSchoolOrders = async (req, res) => {
   try {
-    const sellerId = req.user.id;
+    const rawSellerId = req.user?.id || req.seller?._id || req.headers["x-seller-id"];
+    const mongoose = (await import("mongoose")).default;
 
-    // A seller can see orders that are:
-    // 1. Directly assigned to them (sellerId = sellerId)
-    // 2. Invited specifically (invitedSellerIds contains sellerId)
-    // 3. Broadcast to all (assignmentMode = 'broadcast')
-    // 4. Legacy orders created by seller themselves
+    const possibleIds = [
+      rawSellerId,
+      req.user?._id,
+      req.seller?.id,
+      req.headers["x-seller-id"]
+    ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
+
+    const validObjectIds = possibleIds
+      .filter(id => mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    const queryConditions = [
+      { assignmentMode: "broadcast" },
+      { assignmentMode: "unassigned" },
+      { assignmentMode: { $exists: false } },
+      { status: "published" },
+      { status: "pending" }
+    ];
+
+    if (validObjectIds.length > 0) {
+      queryConditions.push(
+        { sellerId: { $in: validObjectIds } },
+        { invitedSellerIds: { $in: validObjectIds } }
+      );
+    }
+
     const orders = await SchoolBulkOrder.find({
-      $or: [
-        { sellerId: sellerId },
-        { invitedSellerIds: sellerId },
-        { assignmentMode: "broadcast" },
-        { assignmentMode: "unassigned" },
-        { assignmentMode: { $exists: false } },
-        { status: "published" },
-        { status: "pending" }
-      ]
+      $or: queryConditions
     }).sort({ createdAt: -1 });
 
     res.json(orders);

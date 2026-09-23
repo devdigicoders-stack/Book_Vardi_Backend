@@ -3,7 +3,7 @@ import Announcement from "../models/Announcement.js";
 // Seed default announcement items if DB is empty
 const defaultAnnouncements = [
   {
-    text: "Free Shipping on Orders Over ₹499",
+    text: "Free Delivery on Orders Over ₹99",
     badge: "FREE DELIVERY",
     link: "/offers",
     priority: 1,
@@ -21,7 +21,7 @@ const defaultAnnouncements = [
     textColor: "#ffffff"
   },
   {
-    text: "30-Day Easy Returns on Uniforms & Books",
+    text: "7 Days Return & Exchange Assurance",
     badge: "TRUST",
     link: "/about-us",
     priority: 3,

@@ -4,7 +4,9 @@ import Coupon from "../models/Coupon.js";
 
 // Helper to extract authenticated seller ID
 const resolveSellerId = (req) => {
-  return req.user?.id || req.seller?._id || req.headers["x-seller-id"] || req.query.sellerId || req.body.sellerId || null;
+  const id = req.user?.id || req.seller?._id || req.seller?.id || req.headers["x-seller-id"] || req.query?.sellerId || req.body?.sellerId || null;
+  if (!id || id === "undefined" || id === "null" || id === "[object Object]") return null;
+  return mongoose.Types.ObjectId.isValid(id) ? id : null;
 };
 
 // 1. Get All Offers for the Logged-in Seller

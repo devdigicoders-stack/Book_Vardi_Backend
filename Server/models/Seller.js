@@ -239,5 +239,8 @@ const sellerSchema = new mongoose.Schema(
 
 // 2dsphere index for nearby store location queries
 sellerSchema.index({ "location.geo": "2dsphere" });
+sellerSchema.index({ phone: 1 });
+sellerSchema.index({ email: 1 });
+sellerSchema.index({ status: 1 });
 
 export default mongoose.model("Seller", sellerSchema);

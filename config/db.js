@@ -4,9 +4,6 @@ export const connectDB = async () => {
   const primaryUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   const localUri = "mongodb://127.0.0.1:27017/bookvardi_db_final";
 
-  // Prevent Mongoose from buffering commands indefinitely when DB is connecting/offline
-  mongoose.set("bufferCommands", false);
-
   if (primaryUri) {
     try {
       await mongoose.connect(primaryUri, {

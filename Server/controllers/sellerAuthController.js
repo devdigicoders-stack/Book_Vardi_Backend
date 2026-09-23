@@ -26,7 +26,7 @@ export const saveBase64ToFile = (dataUrl, folder = "documents", fieldName = "doc
     else if (mime.includes("jpeg") || mime.includes("jpg")) ext = ".jpg";
     else if (mime.includes("webp")) ext = ".webp";
 
-    const targetSubfolder = folder === "avatars" ? "avatars" : "documents";
+    const targetSubfolder = folder === "avatars" ? "avatars" : (folder === "products" ? "products" : "documents");
     const uploadDir = path.join(process.cwd(), "uploads", targetSubfolder);
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
@@ -356,7 +356,7 @@ export const getSellerProfile = async (req, res) => {
               { phone: cleanPhone },
               { phone: `+91${cleanPhone}` },
               { phone: `+91 ${cleanPhone}` },
-              { phone: { $regex: cleanPhone + "$" } }
+              { phone: cleanPhone.slice(-10) }
             ]
           }).select("-password");
         }
@@ -364,22 +364,43 @@ export const getSellerProfile = async (req, res) => {
     }
 
     if (seller) {
-      return res.json(seller);
+      const sellerObj = seller.toObject ? seller.toObject() : { ...seller };
+      let modified = false;
+      if (sellerObj.documents) {
+        ["aadhaarDoc", "panDoc", "passbookDoc", "shopDoc", "addressProofDoc", "profilePhoto"].forEach((key) => {
+          if (sellerObj.documents[key] && typeof sellerObj.documents[key] === "string" && sellerObj.documents[key].startsWith("data:")) {
+            sellerObj.documents[key] = saveBase64ToFile(sellerObj.documents[key], "documents", key);
+            seller.documents[key] = sellerObj.documents[key];
+            modified = true;
+          }
+        });
+      }
+      if (sellerObj.avatar && typeof sellerObj.avatar === "string" && sellerObj.avatar.startsWith("data:")) {
+        sellerObj.avatar = saveBase64ToFile(sellerObj.avatar, "avatars", "avatar");
+        seller.avatar = sellerObj.avatar;
+        modified = true;
+      }
+      if (modified) {
+        seller.markModified("documents");
+        seller.save().catch(() => {});
+      }
+      return res.json(sellerObj);
     }
 
     if (req.seller) {
       return res.json(req.seller);
     }
 
-    // Fallback default merchant profile (prevents 404 console errors on frontend)
+    // Unauthenticated or unverified fallback: return status: pending (NEVER auto-approve as guest)
+    const requestPhone = req.headers["x-seller-phone"] || req.headers["x-user-phone"] || "";
     return res.status(200).json({
       _id: req.user?.id || "guest-seller",
-      name: "Rahul Enterprise",
-      storeName: "Rahul Enterprise",
-      email: "seller@bookvardi.in",
-      phone: req.headers["x-seller-phone"] || "+911231231232",
-      status: "approved",
-      address: "Commercial Market, Near Civil Hospital",
+      name: "Pending Applicant",
+      storeName: "Pending Vardi Store",
+      email: "applicant@bookvardi.in",
+      phone: requestPhone || "",
+      status: "pending",
+      address: "Registration Address",
       city: "Lucknow",
       state: "Uttar Pradesh",
       pincode: "226001",
@@ -584,7 +605,7 @@ export const getSellerSettings = async (req, res) => {
               { phone: cleanPhone },
               { phone: `+91${cleanPhone}` },
               { phone: `+91 ${cleanPhone}` },
-              { phone: { $regex: cleanPhone + "$" } }
+              { phone: cleanPhone.slice(-10) }
             ]
           }).select(
             "storeName name email phone address city state pincode gstNumber deliveryPreferences bankDetails storeDetails"
@@ -626,14 +647,15 @@ export const getSellerSettings = async (req, res) => {
       });
     }
 
-    // Default settings response to prevent 404 console errors
+    // Default settings response for unauthenticated / pending sellers
+    const reqPhone = req.headers["x-seller-phone"] || req.headers["x-user-phone"] || "";
     return res.json({
-      storeName: "Rahul Enterprise",
-      legalName: "Rahul Enterprise",
-      email: "seller@bookvardi.in",
-      phone: "+911231231232",
-      gstin: "09ABCDE1234F1Z5",
-      address: "Commercial Market, Near Civil Hospital",
+      storeName: "Pending Vardi Store",
+      legalName: "Pending Merchant",
+      email: "applicant@bookvardi.in",
+      phone: reqPhone || "",
+      gstin: "",
+      address: "Registration Address",
       city: "Lucknow",
       pincode: "226001",
       deliveryPreferences: { selfDelivery: true, maxDeliveryRadiusKm: 10, thirdPartyDelivery: true },
@@ -711,21 +733,46 @@ export const getNearbySellers = async (req, res) => {
   }
 };
 
-// Send Phone OTP for Seller Login & Onboarding
+// Send Phone OTP for Seller Login & Onboarding (Requires existing registered seller phone)
 export const sendSellerPhoneOtp = async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone) {
-      return res.status(400).json({ message: "Phone number is required." });
+      return res.status(400).json({ success: false, message: "Phone number is required." });
     }
-    // Return testing OTP 123456
+    const cleanPhone = String(phone).replace(/\D/g, "");
+    if (!cleanPhone || cleanPhone.length < 8) {
+      return res.status(400).json({ success: false, message: "Please enter a valid seller mobile phone number." });
+    }
+
+    const digits10 = cleanPhone.slice(-10);
+    const seller = await Seller.findOne({
+      $or: [
+        { phone: cleanPhone },
+        { phone: `+91${digits10}` },
+        { phone: `+91 ${digits10}` },
+        { phone: digits10 }
+      ]
+    }).select("status storeName name phone rejectionReason");
+
+    if (!seller) {
+      return res.status(404).json({
+        success: false,
+        exists: false,
+        message: `No seller account found with mobile number +91 ${digits10}. Please register as a new seller first.`
+      });
+    }
+
+    // Return testing OTP 123456 for registered phone numbers
     res.json({
       success: true,
-      message: `OTP code 123456 dispatched to +91 ${phone.replace(/\D/g, "")}`,
+      exists: true,
+      status: seller.status,
+      message: `OTP code 123456 dispatched to +91 ${digits10}`,
       otp: "123456"
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to send OTP", error: error.message });
+    res.status(500).json({ success: false, message: "Failed to send OTP", error: error.message });
   }
 };
 
@@ -743,23 +790,21 @@ export const verifySellerPhoneOtp = async (req, res) => {
       return res.status(400).json({ message: "Invalid OTP code. Please use testing code 123456." });
     }
 
-    let seller = await Seller.findOne({ phone: { $regex: cleanPhone } });
+    const digits10 = cleanPhone.slice(-10);
+    let seller = await Seller.findOne({
+      $or: [
+        { phone: cleanPhone },
+        { phone: `+91${digits10}` },
+        { phone: `+91 ${digits10}` },
+        { phone: digits10 }
+      ]
+    }).select("-password -documents");
 
     if (!seller) {
-      // Auto-create pending seller shell for new phone registration
-      seller = new Seller({
-        name: "Merchant " + cleanPhone.slice(-4),
-        storeName: "Book Vardi Partner Store",
-        email: `seller_${cleanPhone}@bookvardi.in`,
-        phone: `+91 ${cleanPhone}`,
-        password: await bcrypt.hash("123456", 10),
-        address: "Registered Merchant Address",
-        city: "Delhi",
-        state: "Delhi",
-        pincode: "110001",
-        status: "pending"
+      return res.status(404).json({
+        success: false,
+        message: `No seller account found with mobile number +91 ${digits10}. Please register as a new seller first.`
       });
-      await seller.save();
     }
 
     const token = jwt.sign(
@@ -799,7 +844,9 @@ export const getSellerApplicationStatus = async (req, res) => {
       seller = await Seller.findById(req.user.id).select("status storeName name phone rejectionReason");
     }
 
-    const phone = req.query?.phone || req.body?.phone || req.user?.phone || req.seller?.phone || req.headers["x-seller-phone"] || req.headers["x-user-phone"];
+    let rawPhone = req.query?.phone || req.body?.phone || req.user?.phone || req.seller?.phone || req.headers["x-seller-phone"] || req.headers["x-user-phone"];
+    if (rawPhone === "undefined" || rawPhone === "null" || rawPhone === "[object Object]") rawPhone = null;
+    const phone = rawPhone;
     if (!seller && phone) {
       const cleanPhone = String(phone).trim();
       const rawDigits = cleanPhone.replace(/\D/g, "");
@@ -1019,7 +1066,10 @@ export const updateSellerApplication = async (req, res) => {
 // Upload Base64 File directly to Physical Server Disk (uploads/avatars or uploads/documents)
 export const uploadBase64Document = async (req, res) => {
   try {
-    const { dataUrl, folder = "documents", fieldName = "doc" } = req.body;
+    const dataUrl = req.body.dataUrl || req.body.base64Data || req.body.fileData || req.body.file;
+    const fieldName = req.body.fieldName || req.body.fieldType || "doc";
+    const folder = req.body.folder || (fieldName.toLowerCase().includes("avatar") || fieldName.toLowerCase().includes("photo") || fieldName.toLowerCase().includes("logo") ? "avatars" : "documents");
+
     if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
       return res.status(400).json({ message: "Invalid base64 data URL provided" });
     }
@@ -1038,7 +1088,7 @@ export const uploadBase64Document = async (req, res) => {
     else if (mime.includes("jpeg") || mime.includes("jpg")) ext = ".jpg";
     else if (mime.includes("webp")) ext = ".webp";
 
-    const targetSubfolder = folder === "avatars" ? "avatars" : "documents";
+    const targetSubfolder = folder === "avatars" ? "avatars" : (folder === "products" ? "products" : "documents");
     const uploadDir = path.join(process.cwd(), "uploads", targetSubfolder);
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });

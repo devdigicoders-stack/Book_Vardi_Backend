@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Product from "../models/Product.js";
+import Seller from "../models/Seller.js";
 import { clearCache } from "../utils/cache.js";
 
 // Helper function to safely parse array inputs
@@ -22,8 +23,8 @@ const parseArray = (input) => {
   return [];
 };
 
-// Timeout race wrapper to ensure fast responses under 1.5 seconds
-const withTimeout = (promise, ms = 1500) => {
+// Timeout race wrapper to ensure responses under 15 seconds
+const withTimeout = (promise, ms = 15000) => {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
@@ -154,16 +155,21 @@ export const getProducts = async (req, res) => {
     }
 
     const filter = (req.query.all === "true" || req.query.includePending === "true")
-      ? {}
-      : { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
+      ? { isDeleted: { $ne: true } }
+      : { status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
 
     if (ids) {
       const parsedIds = parseArray(ids);
       const validObjectIds = parsedIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
       if (validObjectIds.length > 0) filter._id = { $in: validObjectIds };
     }
-    if (tag) filter.tags = { $in: [tag] };
-    if (category) filter.category = category;
+    if (category && category !== "all" && category !== "undefined" && category !== "null") {
+      if (category === "school_specific") {
+        filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
+      } else {
+        filter.category = category;
+      }
+    }
     if (subCategory) filter.subCategory = subCategory;
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
     if (gender && gender !== "All") filter.gender = gender;
@@ -231,44 +237,39 @@ export const getProducts = async (req, res) => {
     let products = [];
 
     try {
-      totalProducts = await withTimeout(Product.countDocuments(filter).maxTimeMS(1500), 1500);
-      products = await withTimeout(
-        Product.find(filter)
-          .populate("sellerId", "storeName name city phone")
-          .sort(sortOption)
-          .skip(skip)
-          .limit(limitNum)
-          .maxTimeMS(1500)
-          .lean(),
-        1500
-      );
+      totalProducts = await Product.countDocuments(filter);
+      products = await Product.find(filter).sort(sortOption).skip(skip).limit(limitNum).lean();
     } catch (e) {
-      products = FALLBACK_PRODUCTS;
-      totalProducts = FALLBACK_PRODUCTS.length;
+      console.warn("DB product query failed:", e.message);
     }
 
     if (!products || products.length === 0) {
-      products = FALLBACK_PRODUCTS;
-      totalProducts = FALLBACK_PRODUCTS.length;
+      try {
+        products = await Product.find({ isDeleted: { $ne: true } }).sort(sortOption).skip(skip).limit(limitNum).lean();
+        totalProducts = products.length;
+      } catch (err) {}
     }
 
     res.json({
-      total: totalProducts,
+      total: totalProducts || products.length,
       page: pageNum,
-      totalPages: Math.ceil(totalProducts / limitNum),
+      totalPages: Math.ceil((totalProducts || products.length) / limitNum) || 1,
       limit: limitNum,
       count: products.length,
       products
     });
   } catch (error) {
-    res.json({
-      total: FALLBACK_PRODUCTS.length,
-      page: 1,
-      totalPages: 1,
-      limit: 20,
-      count: FALLBACK_PRODUCTS.length,
-      products: FALLBACK_PRODUCTS
-    });
+    if (mongoose.connection.readyState !== 1) {
+      return res.json({
+        total: FALLBACK_PRODUCTS.length,
+        page: 1,
+        totalPages: 1,
+        limit: 20,
+        count: FALLBACK_PRODUCTS.length,
+        products: FALLBACK_PRODUCTS
+      });
+    }
+    res.status(500).json({ message: "Failed to fetch products", error: error.message });
   }
 };
 
@@ -284,18 +285,17 @@ export const getRecentlyViewedProducts = async (req, res) => {
 
     const parsedIds = parseArray(ids);
     const validObjectIds = parsedIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
-    let filter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category) filter.category = category;
+    let filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
+    if (category && category !== "all" && category !== "undefined" && category !== "null") {
+      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
+      else filter.category = category;
+    }
 
     let products = [];
     try {
       if (validObjectIds.length > 0) {
         filter._id = { $in: validObjectIds };
-        products = await withTimeout(
-          Product.find(filter).populate("sellerId", "storeName name city phone").maxTimeMS(1500).lean(),
-          1500
-        );
-
+        products = await Product.find(filter).lean();
         const productMap = new Map(products.map((p) => [p._id.toString(), p]));
         const orderedProducts = validObjectIds.map((id) => productMap.get(id.toString())).filter(Boolean);
         if (orderedProducts.length > 0) {
@@ -304,19 +304,23 @@ export const getRecentlyViewedProducts = async (req, res) => {
       }
 
       delete filter._id;
-      products = await withTimeout(
-        Product.find(filter).populate("sellerId", "storeName name city phone").sort({ createdAt: -1 }).limit(limitNum).maxTimeMS(1500).lean(),
-        1500
-      );
+      products = await Product.find(filter).sort({ createdAt: -1 }).limit(limitNum).lean();
     } catch (e) {
-      products = FALLBACK_PRODUCTS;
+      products = [];
     }
 
-    if (!products || products.length === 0) products = FALLBACK_PRODUCTS;
+    if (!products || products.length === 0) {
+      try {
+        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+      } catch (err) {}
+    }
 
     res.json({ total: products.length, count: products.length, products });
   } catch (error) {
-    res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    if (mongoose.connection.readyState !== 1) {
+      return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    }
+    res.status(500).json({ message: "Failed to fetch recently viewed products", error: error.message });
   }
 };
 
@@ -330,29 +334,31 @@ export const getFeaturedProducts = async (req, res) => {
       return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
     }
 
-    const filter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category) filter.category = category;
+    const filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
+    if (category && category !== "all" && category !== "undefined" && category !== "null") {
+      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
+      else filter.category = category;
+    }
 
     let products = [];
     try {
-      products = await withTimeout(
-        Product.find(filter)
-          .populate("sellerId", "storeName name city phone")
-          .sort({ averageRating: -1, numReviews: -1, createdAt: -1 })
-          .limit(limitNum)
-          .maxTimeMS(1500)
-          .lean(),
-        1500
-      );
+      products = await Product.find(filter).sort({ createdAt: -1 }).limit(limitNum).lean();
     } catch (e) {
-      products = FALLBACK_PRODUCTS;
+      products = [];
     }
 
-    if (!products || products.length === 0) products = FALLBACK_PRODUCTS;
+    if (!products || products.length === 0) {
+      try {
+        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+      } catch (err) {}
+    }
 
     res.json({ total: products.length, count: products.length, products });
   } catch (error) {
-    res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    if (mongoose.connection.readyState !== 1) {
+      return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    }
+    res.status(500).json({ message: "Failed to fetch featured products", error: error.message });
   }
 };
 
@@ -367,32 +373,34 @@ export const getSpecialOffers = async (req, res) => {
     }
 
     const filter = {
-      status: "available",
-      approvalStatus: { $nin: ["Pending", "Rejected"] },
-      $or: [{ "offer.hasOffer": true }, { discountPercentage: { $gt: 0 } }]
+      status: { $nin: ["deleted"] },
+      isDeleted: { $ne: true },
+      approvalStatus: { $nin: ["Pending", "Rejected"] }
     };
-    if (category) filter.category = category;
+    if (category && category !== "all" && category !== "undefined" && category !== "null") {
+      if (category === "school_specific") filter.category = "uniforms";
+      else filter.category = category;
+    }
 
     let products = [];
     try {
-      products = await withTimeout(
-        Product.find(filter)
-          .populate("sellerId", "storeName name city phone")
-          .sort({ discountPercentage: -1, "offer.discountValue": -1, createdAt: -1 })
-          .limit(limitNum)
-          .maxTimeMS(1500)
-          .lean(),
-        1500
-      );
+      products = await Product.find(filter).sort({ createdAt: -1 }).limit(limitNum).lean();
     } catch (e) {
-      products = FALLBACK_PRODUCTS;
+      products = [];
     }
 
-    if (!products || products.length === 0) products = FALLBACK_PRODUCTS;
+    if (!products || products.length === 0) {
+      try {
+        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+      } catch (err) {}
+    }
 
     res.json({ total: products.length, count: products.length, products });
   } catch (error) {
-    res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    if (mongoose.connection.readyState !== 1) {
+      return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    }
+    res.status(500).json({ message: "Failed to fetch special offers", error: error.message });
   }
 };
 
@@ -406,31 +414,33 @@ export const getRecommendedProducts = async (req, res) => {
       return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
     }
 
-    const filter = { status: "available", approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category) filter.category = category;
+    const filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
+    if (category && category !== "all" && category !== "undefined" && category !== "null") {
+      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
+      else filter.category = category;
+    }
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
     if (classGrade) filter.classGrade = { $regex: classGrade, $options: "i" };
 
     let products = [];
     try {
-      products = await withTimeout(
-        Product.find(filter)
-          .populate("sellerId", "storeName name city phone")
-          .sort({ numReviews: -1, averageRating: -1, createdAt: -1 })
-          .limit(limitNum)
-          .maxTimeMS(1500)
-          .lean(),
-        1500
-      );
+      products = await Product.find(filter).sort({ createdAt: -1 }).limit(limitNum).lean();
     } catch (e) {
-      products = FALLBACK_PRODUCTS;
+      products = [];
     }
 
-    if (!products || products.length === 0) products = FALLBACK_PRODUCTS;
+    if (!products || products.length === 0) {
+      try {
+        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+      } catch (err) {}
+    }
 
     res.json({ total: products.length, count: products.length, products });
   } catch (error) {
-    res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    if (mongoose.connection.readyState !== 1) {
+      return res.json({ total: FALLBACK_PRODUCTS.length, count: FALLBACK_PRODUCTS.length, products: FALLBACK_PRODUCTS });
+    }
+    res.status(500).json({ message: "Failed to fetch recommended products", error: error.message });
   }
 };
 
@@ -442,17 +452,19 @@ export const getProductById = async (req, res) => {
       return res.json(match);
     }
     const product = await withTimeout(
-      Product.findById(req.params.id).populate("sellerId", "storeName name city phone").lean(),
+      Product.findOne({ _id: req.params.id, isDeleted: { $ne: true }, status: { $ne: "deleted" } }).populate("sellerId", "storeName name city phone").lean(),
       1500
     );
     if (!product) {
-      const match = FALLBACK_PRODUCTS.find((p) => p._id === req.params.id) || FALLBACK_PRODUCTS[0];
-      return res.json(match);
+      return res.status(404).json({ message: "Product not found or has been deleted" });
     }
     res.json(product);
   } catch (error) {
-    const match = FALLBACK_PRODUCTS.find((p) => p._id === req.params.id) || FALLBACK_PRODUCTS[0];
-    res.json(match);
+    if (mongoose.connection.readyState !== 1) {
+      const match = FALLBACK_PRODUCTS.find((p) => p._id === req.params.id) || FALLBACK_PRODUCTS[0];
+      return res.json(match);
+    }
+    res.status(404).json({ message: "Product not found or has been deleted" });
   }
 };
 

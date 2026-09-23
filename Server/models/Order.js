@@ -178,4 +178,9 @@ orderSchema.pre("save", function (next) {
   next();
 });
 
+orderSchema.index({ sellerId: 1 });
+orderSchema.index({ seller: 1 });
+orderSchema.index({ "items.sellerId": 1 });
+orderSchema.index({ createdAt: -1 });
+
 export default mongoose.model("Order", orderSchema);

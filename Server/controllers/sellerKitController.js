@@ -1,9 +1,48 @@
+import mongoose from "mongoose";
 import Kit from "../models/Kit.js";
+
+const getExpandedSellerIds = async (req) => {
+  const rawIds = [
+    req.user?.id,
+    req.seller?._id,
+    req.seller?.id,
+    req.user?._id,
+    req.user?.phone,
+    req.seller?.phone,
+    req.headers["x-seller-id"],
+    req.headers["x-user-phone"],
+    req.query?.sellerId
+  ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
+
+  const sellerSet = new Set();
+  rawIds.forEach((id) => {
+    sellerSet.add(String(id));
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      sellerSet.add(new mongoose.Types.ObjectId(id));
+    }
+  });
+  return Array.from(sellerSet);
+};
 
 // Get all kits created by the logged-in Seller
 export const getSellerKits = async (req, res) => {
   try {
-    const kits = await Kit.find({ sellerId: req.user.id })
+    const sellerIds = await getExpandedSellerIds(req);
+    const validObjectIds = sellerIds
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const filter = {
+      isDeleted: { $ne: true },
+      status: { $nin: ["deleted"] },
+      $or: [
+        { sellerId: { $in: [...validObjectIds, ...sellerIds] } },
+        { seller: { $in: [...validObjectIds, ...sellerIds] } },
+        { createdBy: { $in: [...validObjectIds, ...sellerIds] } }
+      ]
+    };
+
+    const kits = await Kit.find(filter)
       .populate("items.productId", "name price images category")
       .sort({ createdAt: -1 });
     res.json(kits);
@@ -15,9 +54,20 @@ export const getSellerKits = async (req, res) => {
 // Get single seller kit by ID
 export const getSellerKitById = async (req, res) => {
   try {
+    const sellerIds = await getExpandedSellerIds(req);
+    const validObjectIds = sellerIds
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
     const kit = await Kit.findOne({
       _id: req.params.id,
-      sellerId: req.user.id
+      isDeleted: { $ne: true },
+      status: { $nin: ["deleted"] },
+      $or: [
+        { sellerId: { $in: [...validObjectIds, ...sellerIds] } },
+        { seller: { $in: [...validObjectIds, ...sellerIds] } },
+        { createdBy: { $in: [...validObjectIds, ...sellerIds] } }
+      ]
     }).populate("items.productId", "name price images category");
 
     if (!kit) {

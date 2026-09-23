@@ -142,7 +142,45 @@ const productSchema = new mongoose.Schema(
     unit: {
       type: String,
       default: "piece",
-      trim: true // piece, pair, set, pack, book
+      trim: true // piece, pair, set, pack, book, meter
+    },
+    isMeterBased: {
+      type: Boolean,
+      default: false
+    },
+    minMeter: {
+      type: Number,
+      default: 0.5
+    },
+    meterStep: {
+      type: Number,
+      default: 0.5
+    },
+    isReturnable: {
+      type: Boolean,
+      default: true
+    },
+    returnWindowDays: {
+      type: Number,
+      default: 7
+    },
+    sizeChart: {
+      chestInches: { type: String, default: "" },
+      lengthInches: { type: String, default: "" },
+      sleeveInches: { type: String, default: "" },
+      waistInches: { type: String, default: "" },
+      shoulderInches: { type: String, default: "" },
+      sizeGuideText: { type: String, default: "" },
+      rows: [
+        {
+          size: { type: String, default: "" },
+          chest: { type: String, default: "" },
+          length: { type: String, default: "" },
+          sleeve: { type: String, default: "" },
+          waist: { type: String, default: "" },
+          shoulder: { type: String, default: "" }
+        }
+      ]
     },
     description: {
       type: String,
@@ -270,5 +308,9 @@ productSchema.pre("save", function (next) {
   }
   next();
 });
+
+productSchema.index({ sellerId: 1 });
+productSchema.index({ seller: 1 });
+productSchema.index({ status: 1 });
 
 export default mongoose.model("Product", productSchema);

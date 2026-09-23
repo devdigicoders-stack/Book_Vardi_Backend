@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Product from "../models/Product.js";
+import { saveBase64ToFile } from "./sellerAuthController.js";
 
 // Helper function to safely parse array inputs from JSON or multipart form-data
 const parseArray = (input) => {
@@ -34,8 +35,8 @@ const getExpandedSellerIds = async (req) => {
     req.seller?.phone,
     req.headers["x-seller-id"],
     req.headers["x-user-phone"],
-    req.query.sellerId
-  ].filter(Boolean);
+    req.query?.sellerId
+  ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
   const sellerSet = new Set();
   rawIds.forEach((id) => {
@@ -47,13 +48,17 @@ const getExpandedSellerIds = async (req) => {
 
   const validObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
   const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
+  const phoneVariants = phoneList.flatMap((p) => {
+    const digits10 = p.slice(-10);
+    return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
+  });
 
   const Seller = (await import("../models/Seller.js")).default;
   const User = (await import("../models/User.js")).default;
 
   const orConditions = [
     ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
-    ...(phoneList.length > 0 ? phoneList.flatMap((p) => [{ phone: new RegExp(p.slice(-10) + "$") }]) : [])
+    ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
   ];
 
   if (orConditions.length > 0) {
@@ -207,6 +212,12 @@ export const createProduct = async (req, res) => {
       stock,
       stockQuantity,
       unit,
+      isMeterBased,
+      minMeter,
+      meterStep,
+      isReturnable,
+      returnWindowDays,
+      sizeChart,
       description,
       tags,
       status,
@@ -230,14 +241,38 @@ export const createProduct = async (req, res) => {
 
     // Process uploaded images & JSON payload images
     const imagePaths = [];
-    if (req.files && req.files.length > 0) {
+    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
       req.files.forEach((file) => {
         imagePaths.push(`/uploads/products/${file.filename}`);
       });
-    } else if (req.body.images && Array.isArray(req.body.images) && req.body.images.length > 0) {
-      req.body.images.forEach((img) => imagePaths.push(img));
-    } else if (req.body.image) {
-      imagePaths.push(req.body.image);
+    }
+
+    if (req.body && req.body.images) {
+      let rawImages = req.body.images;
+      if (typeof rawImages === "string") {
+        try {
+          rawImages = JSON.parse(rawImages);
+        } catch (e) {
+          rawImages = [rawImages];
+        }
+      }
+      if (Array.isArray(rawImages)) {
+        rawImages.forEach((img) => {
+          if (img && typeof img === "string") {
+            const savedPath = saveBase64ToFile(img, "products", "product");
+            if (savedPath && !imagePaths.includes(savedPath)) {
+              imagePaths.push(savedPath);
+            }
+          }
+        });
+      }
+    }
+
+    if (req.body && req.body.image && typeof req.body.image === "string") {
+      const savedPath = saveBase64ToFile(req.body.image, "products", "product");
+      if (savedPath && !imagePaths.includes(savedPath)) {
+        imagePaths.unshift(savedPath);
+      }
     }
 
     if (imagePaths.length === 0) {
@@ -276,6 +311,16 @@ export const createProduct = async (req, res) => {
       }
     }
 
+    // Parse sizeChart
+    let parsedSizeChart = {};
+    if (sizeChart) {
+      if (typeof sizeChart === "string") {
+        try { parsedSizeChart = JSON.parse(sizeChart); } catch (e) {}
+      } else if (typeof sizeChart === "object") {
+        parsedSizeChart = sizeChart;
+      }
+    }
+
     const formattedVariants = Array.isArray(parsedSizeVariants)
       ? parsedSizeVariants.map(v => ({
           size: String(v.size || "").trim(),
@@ -302,6 +347,8 @@ export const createProduct = async (req, res) => {
 
     const sellerId = req.user?.id || req.seller?._id || req.user?._id;
 
+    const isMeter = unit === "meter" || isMeterBased === true || isMeterBased === "true";
+
     const newProduct = new Product({
       sellerId,
       userId: sellerId,
@@ -324,7 +371,13 @@ export const createProduct = async (req, res) => {
       discountPercentage: discountPercentage !== undefined ? Number(discountPercentage) : 0,
       stock: Number(effectiveStock),
       stockQuantity: Number(effectiveStock),
-      unit: unit || "piece",
+      unit: isMeter ? "meter" : (unit || "piece"),
+      isMeterBased: isMeter,
+      minMeter: minMeter ? Number(minMeter) : 0.5,
+      meterStep: meterStep ? Number(meterStep) : 0.5,
+      isReturnable: isReturnable === undefined ? true : (isReturnable === true || isReturnable === "true"),
+      returnWindowDays: returnWindowDays ? Number(returnWindowDays) : 7,
+      sizeChart: parsedSizeChart,
       description: description || "",
       tags: parseArray(tags),
       images: imagePaths,
@@ -419,10 +472,36 @@ export const updateProduct = async (req, res) => {
         : ["COD", "Online"];
     }
 
-    // If new images were uploaded, append them
-    if (req.files && req.files.length > 0) {
-      const newImages = req.files.map((file) => `/uploads/products/${file.filename}`);
-      updates.images = [...(product.images || []), ...newImages];
+    // Process new images in req.files or req.body.images or req.body.image
+    const updatedImagePaths = [];
+    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
+      req.files.forEach((file) => {
+        updatedImagePaths.push(`/uploads/products/${file.filename}`);
+      });
+    }
+
+    if (updates.images) {
+      let rawImages = updates.images;
+      if (typeof rawImages === "string") {
+        try {
+          rawImages = JSON.parse(rawImages);
+        } catch (e) {
+          rawImages = [rawImages];
+        }
+      }
+      if (Array.isArray(rawImages)) {
+        rawImages.forEach((img) => {
+          if (img && typeof img === "string") {
+            const savedPath = saveBase64ToFile(img, "products", "product");
+            if (savedPath && !updatedImagePaths.includes(savedPath)) {
+              updatedImagePaths.push(savedPath);
+            }
+          }
+        });
+      }
+      updates.images = Array.from(new Set(updatedImagePaths)).filter(Boolean);
+    } else if (updatedImagePaths.length > 0) {
+      updates.images = Array.from(new Set([...(product.images || []), ...updatedImagePaths])).filter(Boolean);
     }
 
     // If product was previously rejected, editing it resubmits into Pending approval queue

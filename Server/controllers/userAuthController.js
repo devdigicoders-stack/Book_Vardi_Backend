@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import User from "../models/User.js";
 import Seller from "../models/Seller.js";
 import jwt from "jsonwebtoken";
+import { saveBase64ToFile } from "./sellerAuthController.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 
@@ -464,7 +465,7 @@ export const updateUserProfile = async (req, res) => {
       if (name !== undefined) user.name = name;
       if (email !== undefined && email.trim() !== "") user.email = email.toLowerCase().trim();
       if (phone !== undefined) user.phone = phone;
-      if (avatar !== undefined) user.avatar = avatar;
+      if (avatar !== undefined) user.avatar = saveBase64ToFile(avatar, "avatars", "avatar");
       if (institution !== undefined) user.institution = institution;
       if (studentId !== undefined) user.studentId = studentId;
       if (standard !== undefined) user.standard = standard;
