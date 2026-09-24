@@ -91,11 +91,7 @@ export const getSellerSchoolOrders = async (req, res) => {
       .map(id => new mongoose.Types.ObjectId(id));
 
     const queryConditions = [
-      { assignmentMode: "broadcast" },
-      { assignmentMode: "unassigned" },
-      { assignmentMode: { $exists: false } },
-      { status: "published" },
-      { status: "pending" }
+      { assignmentMode: "broadcast" }
     ];
 
     if (validObjectIds.length > 0) {

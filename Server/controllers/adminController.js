@@ -474,33 +474,49 @@ export const updateProductApproval = async (req, res) => {
       product = await Product.findById(id);
     }
     if (!product) {
+      product = await Product.findOne({ _id: id });
+    }
+    if (!product) {
       product = await Product.findOne({ sku: id });
     }
     if (!product) {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const { status, remark, reason } = req.body;
+    const { status, approvalStatus, remark, comment, reason } = req.body;
+    const targetStatus = status || approvalStatus;
 
-    if (status) product.approvalStatus = status;
-    const finalRemark = remark !== undefined ? remark : (reason !== undefined ? reason : undefined);
+    if (targetStatus && ["Approved", "Pending", "Rejected"].includes(targetStatus)) {
+      product.approvalStatus = targetStatus;
+    }
+
+    const finalRemark = remark !== undefined ? remark : (comment !== undefined ? comment : (reason !== undefined ? reason : undefined));
     if (finalRemark !== undefined) {
       product.approvalComment = finalRemark;
-      if (status === "Rejected") {
+      if (product.approvalStatus === "Rejected") {
         product.rejectionReason = finalRemark;
+      } else if (product.approvalStatus === "Approved") {
+        product.rejectionReason = "";
       }
     }
 
     await product.save();
+    clearCache("product");
+
+    console.log(`✅ Admin updated product ${product._id} approval status to: ${product.approvalStatus}`);
+
     res.json({
       success: true,
-      message: `Product approval status updated to ${status || product.approvalStatus}`,
+      message: `Product approval status updated to ${product.approvalStatus}`,
       product: {
         ...product.toObject(),
         id: product._id.toString(),
         _id: product._id.toString(),
         stock: product.stock,
-        stockQuantity: product.stock
+        stockQuantity: product.stock,
+        approvalStatus: product.approvalStatus,
+        approvalComment: product.approvalComment,
+        rejectionReason: product.rejectionReason
       }
     });
   } catch (error) {
@@ -1029,9 +1045,34 @@ export const getPlatformSettings = async (req, res) => {
   }
 };
 
+export const getPublicPlatformSettings = async (req, res) => {
+  try {
+    let settings = await PlatformSetting.findOne({ key: "global_settings" });
+    if (!settings) {
+      settings = await PlatformSetting.create({ key: "global_settings" });
+    }
+    const threshold = settings.minOrderFreeShipping !== undefined ? Number(settings.minOrderFreeShipping) : (settings.freeShippingThreshold !== undefined ? Number(settings.freeShippingThreshold) : 99);
+    res.json({
+      freeShippingThreshold: threshold,
+      minOrderFreeShipping: threshold,
+      shippingFee: Number(settings.shippingFee || 49),
+      supportEmail: settings.supportEmail || "support@bookvardi.in",
+      supportPhone: settings.supportPhone || "+91 98765 43210"
+    });
+  } catch (error) {
+    console.error("Error in getPublicPlatformSettings:", error);
+    res.json({ freeShippingThreshold: 99, minOrderFreeShipping: 99, shippingFee: 49 });
+  }
+};
+
 export const updatePlatformSettings = async (req, res) => {
   try {
     const updates = req.body;
+    if (updates.minOrderFreeShipping !== undefined) {
+      updates.freeShippingThreshold = Number(updates.minOrderFreeShipping);
+    } else if (updates.freeShippingThreshold !== undefined) {
+      updates.minOrderFreeShipping = Number(updates.freeShippingThreshold);
+    }
     let settings = await PlatformSetting.findOneAndUpdate(
       { key: "global_settings" },
       { $set: { ...updates, updatedAt: new Date() } },

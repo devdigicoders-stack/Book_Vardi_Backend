@@ -84,7 +84,17 @@ const productSchema = new mongoose.Schema(
           default: 0,
           min: 0
         },
+        originalPrice: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
         stock: {
+          type: Number,
+          default: 0,
+          min: 0
+        },
+        stockQuantity: {
           type: Number,
           default: 0,
           min: 0
@@ -116,6 +126,14 @@ const productSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "" // e.g. "SchoolKart", "Sharma Uniforms"
+    },
+    gst: {
+      type: Number, // e.g. 0, 5, 12, 18, 28
+      default: 5
+    },
+    gstPercentage: {
+      type: Number,
+      default: 5
     },
     price: {
       type: Number,
@@ -267,10 +285,102 @@ const productSchema = new mongoose.Schema(
     paymentMethodsAllowed: {
       type: [String],
       default: ["COD", "Online"]
+    },
+    // Top-level extra details saved during product addition
+    image: {
+      type: String,
+      default: ""
+    },
+    subtitle: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    stockQuantity: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    originalPrice: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    discountBadge: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    badgeTag: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    badge: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    bundleType: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    sku: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    kitItems: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: []
+    },
+    items: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: []
+    },
+    totalMrp: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    bundlePrice: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    sellerStoreName: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    sellerName: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    storeName: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    legalBusinessName: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    sellerAcceptsCod: {
+      type: Boolean,
+      default: true
+    },
+    sellerAcceptsOnline: {
+      type: Boolean,
+      default: true
     }
   },
   {
-    timestamps: true
+    timestamps: true,
+    strict: false
   }
 );
 

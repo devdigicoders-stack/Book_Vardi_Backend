@@ -1,10 +1,16 @@
 import Cart from "../models/Cart.js";
 
-// Helper to extract product ID as string
+// Helper to extract cart item ID or product ID + variant key as string
 const extractCartItemId = (item) => {
   if (item === null || item === undefined) return null;
   if (typeof item === 'object') {
-    return String(item.id || item.productId || item._id || '');
+    if (item.cartItemId) return String(item.cartItemId);
+    const prodId = item.productId !== undefined ? item.productId : (item.id !== undefined ? item.id : item._id);
+    const size = item.selectedSize || item.size || item.selectedVariant?.size || item.selectedVariant?.name || '';
+    const color = item.selectedColor || item.color || item.selectedVariant?.color || '';
+    const variantId = item.variantId || item.selectedVariant?.id || item.selectedVariant?._id || '';
+    const keyPart = [size, color, variantId].filter(Boolean).join('_');
+    return keyPart ? `${prodId}_${keyPart}` : String(prodId || '');
   }
   return String(item);
 };
@@ -60,6 +66,7 @@ const getNormalizedCartItems = (cart) => {
         return {
           id: String(it),
           productId: String(it),
+          cartItemId: String(it),
           name: "Stationery Item",
           subtitle: "",
           image: "",
@@ -70,15 +77,21 @@ const getNormalizedCartItems = (cart) => {
       }
       const rawId = it.id || it.productId || it._id;
       if (rawId === undefined || rawId === null) return null;
+      const computedCartItemId = it.cartItemId || extractCartItemId(it);
       return {
         ...it,
         id: rawId,
         productId: it.productId || rawId,
+        cartItemId: computedCartItemId,
         name: it.name || "Stationery Item",
         subtitle: it.subtitle || "",
         image: it.image || (Array.isArray(it.images) && it.images[0]) || "",
         price: Number(it.price) || 0,
-        originalPrice: Number(it.originalPrice) || 0,
+        originalPrice: Number(it.originalPrice || it.mrp) || 0,
+        selectedSize: it.selectedSize || undefined,
+        selectedColor: it.selectedColor || undefined,
+        selectedVariant: it.selectedVariant || undefined,
+        variantName: it.variantName || it.selectedVariant?.name || it.selectedSize || undefined,
         paymentMethodAllowed: it.paymentMethodAllowed || it.payment_method_allowed || "Both",
         paymentMethodsAllowed: Array.isArray(it.paymentMethodsAllowed) ? it.paymentMethodsAllowed : ["COD", "Online"],
         quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1
@@ -148,35 +161,39 @@ export const addToCart = async (req, res) => {
     }
 
     let cart = await getOrCreateCart(userId, userPhone);
-    const strId = String(itemNumId);
+    const cartItemId = itemProduct.cartItemId || extractCartItemId({ ...itemProduct, id: itemNumId });
 
     const items = getNormalizedCartItems(cart);
     const existingIndex = items.findIndex(
-      (it) => extractCartItemId(it) === strId
+      (it) => extractCartItemId(it) === cartItemId
     );
 
     const qtyToAdd = Number(quantity) > 0 ? Number(quantity) : 1;
 
     if (existingIndex > -1) {
       items[existingIndex].quantity += qtyToAdd;
-      if (!items[existingIndex].name && itemProduct.name) {
-        items[existingIndex].name = itemProduct.name;
-      }
-      if (!items[existingIndex].image) {
-        items[existingIndex].image = itemProduct.image || (Array.isArray(itemProduct.images) && itemProduct.images[0]) || "";
-      }
-      if (!items[existingIndex].price && itemProduct.price) {
-        items[existingIndex].price = Number(itemProduct.price) || 0;
-      }
+      if (itemProduct.name) items[existingIndex].name = itemProduct.name;
+      if (itemProduct.image) items[existingIndex].image = itemProduct.image || (Array.isArray(itemProduct.images) && itemProduct.images[0]) || "";
+      if (itemProduct.price) items[existingIndex].price = Number(itemProduct.price) || 0;
+      if (itemProduct.selectedSize) items[existingIndex].selectedSize = itemProduct.selectedSize;
+      if (itemProduct.selectedColor) items[existingIndex].selectedColor = itemProduct.selectedColor;
+      if (itemProduct.selectedVariant) items[existingIndex].selectedVariant = itemProduct.selectedVariant;
+      if (itemProduct.variantName) items[existingIndex].variantName = itemProduct.variantName;
     } else {
       items.push({
+        ...itemProduct,
         id: itemProduct.id || itemProduct._id || itemNumId,
         productId: itemProduct.productId || itemProduct.id || itemProduct._id || itemNumId,
+        cartItemId: cartItemId,
         name: itemProduct.name || "Stationery Item",
         subtitle: itemProduct.subtitle || itemProduct.category || "",
         image: itemProduct.image || (Array.isArray(itemProduct.images) && itemProduct.images[0]) || "",
         price: Number(itemProduct.price) || 0,
-        originalPrice: Number(itemProduct.originalPrice) || 0,
+        originalPrice: Number(itemProduct.originalPrice || itemProduct.mrp) || 0,
+        selectedSize: itemProduct.selectedSize || undefined,
+        selectedColor: itemProduct.selectedColor || undefined,
+        selectedVariant: itemProduct.selectedVariant || undefined,
+        variantName: itemProduct.variantName || itemProduct.selectedVariant?.name || itemProduct.selectedSize || undefined,
         quantity: qtyToAdd
       });
     }

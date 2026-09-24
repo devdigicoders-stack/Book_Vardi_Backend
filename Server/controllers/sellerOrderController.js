@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
+import Seller from "../models/Seller.js";
+import User from "../models/User.js";
 
 // Use the configured frontend app base URL so delivery links work on local and deployed hosts.
 const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL || "http://localhost:3000";
@@ -14,136 +16,142 @@ const resolveSellerId = (req) => {
 
 // Helper to expand seller scope across Seller/User collections, products, and regex names
 const getExpandedSellerScope = async (req) => {
-  const primaryId = resolveSellerId(req);
-  const rawIds = [
-    primaryId,
-    req.user?.id,
-    req.seller?._id,
-    req.seller?.id,
-    req.user?._id,
-    req.user?.phone,
-    req.seller?.phone,
-    req.headers["x-seller-id"],
-    req.headers["x-user-phone"],
-    req.query?.sellerId
-  ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
+  try {
+    const primaryId = resolveSellerId(req);
+    const rawIds = [
+      primaryId,
+      req.user?.id,
+      req.seller?._id,
+      req.seller?.id,
+      req.user?._id,
+      req.user?.phone,
+      req.seller?.phone,
+      req.headers["x-seller-id"],
+      req.headers["x-user-phone"],
+      req.query?.sellerId
+    ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
-  const sellerSet = new Set();
-  rawIds.forEach((id) => {
-    sellerSet.add(String(id));
-    if (mongoose.Types.ObjectId.isValid(id)) {
-      sellerSet.add(new mongoose.Types.ObjectId(id));
+    const sellerSet = new Set();
+    rawIds.forEach((id) => {
+      sellerSet.add(String(id));
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        sellerSet.add(new mongoose.Types.ObjectId(id));
+      }
+    });
+
+    const validObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
+    const phoneVariants = phoneList.flatMap((p) => {
+      const digits10 = p.slice(-10);
+      return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
+    });
+
+    const orConditions = [
+      ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+      ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
+    ];
+
+    if (orConditions.length > 0) {
+      const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email storeName legalName");
+      sellerDocs.forEach((doc) => {
+        if (doc._id) {
+          sellerSet.add(doc._id);
+          sellerSet.add(String(doc._id));
+        }
+        if (doc.storeName) sellerSet.add(doc.storeName);
+        if (doc.legalName) sellerSet.add(doc.legalName);
+        if (doc.phone) {
+          sellerSet.add(doc.phone);
+          const cleanP = String(doc.phone).replace(/\D/g, "");
+          if (cleanP) {
+            sellerSet.add(cleanP);
+            sellerSet.add(cleanP.slice(-10));
+            sellerSet.add(`+91${cleanP.slice(-10)}`);
+            sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+          }
+        }
+        if (doc.email) sellerSet.add(doc.email);
+      });
+
+      const userDocs = await User.find({ $or: orConditions }).select("_id phone email name");
+      userDocs.forEach((doc) => {
+        if (doc._id) {
+          sellerSet.add(doc._id);
+          sellerSet.add(String(doc._id));
+        }
+        if (doc.name) sellerSet.add(doc.name);
+        if (doc.phone) {
+          sellerSet.add(doc.phone);
+          const cleanP = String(doc.phone).replace(/\D/g, "");
+          if (cleanP) {
+            sellerSet.add(cleanP);
+            sellerSet.add(cleanP.slice(-10));
+            sellerSet.add(`+91${cleanP.slice(-10)}`);
+            sellerSet.add(`+91 ${cleanP.slice(-10)}`);
+          }
+        }
+        if (doc.email) sellerSet.add(doc.email);
+      });
     }
-  });
 
-  const validObjectIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
-  const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
-  const phoneVariants = phoneList.flatMap((p) => {
-    const digits10 = p.slice(-10);
-    return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
-  });
+    const expandedSellerIds = Array.from(sellerSet);
+    const strExpandedSellerIds = expandedSellerIds.map(String);
+    const validScopeObjectIds = expandedSellerIds
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map((id) => new mongoose.Types.ObjectId(id));
 
-  const Seller = (await import("../models/Seller.js")).default;
-  const User = (await import("../models/User.js")).default;
+    if (expandedSellerIds.length === 0) {
+      return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null } };
+    }
 
-  const orConditions = [
-    ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
-    ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
-  ];
+    const queryScope = [...validScopeObjectIds, ...strExpandedSellerIds];
 
-  if (orConditions.length > 0) {
-    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email storeName legalName");
-    sellerDocs.forEach((doc) => {
-      sellerSet.add(doc._id);
-      sellerSet.add(String(doc._id));
-      if (doc.storeName) sellerSet.add(doc.storeName);
-      if (doc.legalName) sellerSet.add(doc.legalName);
-      if (doc.phone) {
-        sellerSet.add(doc.phone);
-        const cleanP = String(doc.phone).replace(/\D/g, "");
-        if (cleanP) {
-          sellerSet.add(cleanP);
-          sellerSet.add(cleanP.slice(-10));
-          sellerSet.add(`+91${cleanP.slice(-10)}`);
-          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
-        }
-      }
-      if (doc.email) sellerSet.add(doc.email);
-    });
+    const sellerProducts = await Product.find({
+      $or: [
+        { sellerId: { $in: queryScope } },
+        { seller: { $in: queryScope } },
+        { userId: { $in: queryScope } },
+        { createdBy: { $in: queryScope } }
+      ]
+    }).select("_id id name title");
 
-    const userDocs = await User.find({ $or: orConditions }).select("_id phone email name");
-    userDocs.forEach((doc) => {
-      sellerSet.add(doc._id);
-      sellerSet.add(String(doc._id));
-      if (doc.name) sellerSet.add(doc.name);
-      if (doc.phone) {
-        sellerSet.add(doc.phone);
-        const cleanP = String(doc.phone).replace(/\D/g, "");
-        if (cleanP) {
-          sellerSet.add(cleanP);
-          sellerSet.add(cleanP.slice(-10));
-          sellerSet.add(`+91${cleanP.slice(-10)}`);
-          sellerSet.add(`+91 ${cleanP.slice(-10)}`);
-        }
-      }
-      if (doc.email) sellerSet.add(doc.email);
-    });
-  }
+    const productIds = sellerProducts.map((p) => p._id);
+    const strProductIds = productIds.map((id) => String(id));
+    const customProductIds = sellerProducts.map((p) => p.id).filter(Boolean);
+    const numericProductIds = customProductIds.map(Number).filter((n) => !isNaN(n));
+    const productNames = sellerProducts.map((p) => (p.name || p.title || "").trim()).filter(Boolean);
 
-  const expandedSellerIds = Array.from(sellerSet);
-  const strExpandedSellerIds = expandedSellerIds.map(String);
-  const validScopeObjectIds = expandedSellerIds
-    .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
-    .map((id) => new mongoose.Types.ObjectId(id));
+    const productNameRegexes = productNames
+      .map((name) => (name || "").replace(/\s*\([^)]*\)/g, "").trim())
+      .filter((cleanName) => cleanName.length > 0)
+      .map((cleanName) => new RegExp(cleanName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
 
-  if (expandedSellerIds.length === 0) {
+    const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
+
+    const filter = {
+      $or: [
+        { "items.sellerId": { $in: queryScope } },
+        { "items.seller": { $in: queryScope } },
+        { "items.sellerPhone": { $in: queryScope } },
+        { "items.sellerEmail": { $in: queryScope } },
+        { "items.storeName": { $in: queryScope } },
+        { sellerId: { $in: queryScope } },
+        { seller: { $in: queryScope } },
+        ...(allProductKeys.length > 0
+          ? [
+              { "items.productId": { $in: allProductKeys } },
+              { "items.id": { $in: allProductKeys } },
+              { "items._id": { $in: allProductKeys } }
+            ]
+          : [])
+      ]
+    };
+
+    return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter };
+  } catch (err) {
+    console.error("Error in getExpandedSellerScope:", err);
     return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null } };
   }
-
-  const queryScope = [...validScopeObjectIds, ...strExpandedSellerIds];
-
-  const sellerProducts = await Product.find({
-    $or: [
-      { sellerId: { $in: queryScope } },
-      { seller: { $in: queryScope } },
-      { userId: { $in: queryScope } },
-      { createdBy: { $in: queryScope } }
-    ]
-  }).select("_id id name title");
-
-  const productIds = sellerProducts.map((p) => p._id);
-  const strProductIds = productIds.map((id) => String(id));
-  const customProductIds = sellerProducts.map((p) => p.id).filter(Boolean);
-  const numericProductIds = customProductIds.map(Number).filter((n) => !isNaN(n));
-  const productNames = sellerProducts.map((p) => (p.name || p.title || "").trim()).filter(Boolean);
-
-  const productNameRegexes = productNames.map((name) => {
-    const cleanName = name.replace(/\s*\([^)]*\)/g, "").trim();
-    return new RegExp(cleanName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-  });
-
-  const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
-
-  const filter = {
-    $or: [
-      { "items.sellerId": { $in: queryScope } },
-      { "items.seller": { $in: queryScope } },
-      { "items.sellerPhone": { $in: queryScope } },
-      { "items.sellerEmail": { $in: queryScope } },
-      { "items.storeName": { $in: queryScope } },
-      { sellerId: { $in: queryScope } },
-      { seller: { $in: queryScope } },
-      ...(allProductKeys.length > 0
-        ? [
-            { "items.productId": { $in: allProductKeys } },
-            { "items.id": { $in: allProductKeys } },
-            { "items._id": { $in: allProductKeys } }
-          ]
-        : [])
-    ]
-  };
-
-  return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter };
 };
 
 // 1. Get All Orders for the Logged-in Seller
@@ -241,7 +249,8 @@ export const getSellerOrders = async (req, res) => {
 
     res.json(formattedOrders.filter(Boolean));
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch seller orders", error: error.message });
+    console.error("Error fetching seller orders:", error);
+    res.status(200).json([]);
   }
 };
 
@@ -306,7 +315,8 @@ export const getSellerCustomers = async (req, res) => {
 
     res.json(Array.from(customerMap.values()));
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch customer list", error: error.message });
+    console.error("Error fetching seller customers:", error);
+    res.status(200).json([]);
   }
 };
 

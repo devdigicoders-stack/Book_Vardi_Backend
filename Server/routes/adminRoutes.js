@@ -21,6 +21,7 @@ import {
   updateAdminInventoryStock,
   quickRestockAdminInventory,
   getPlatformSettings,
+  getPublicPlatformSettings,
   updatePlatformSettings,
   getAllSubadmins,
   createSubadmin,
@@ -117,6 +118,7 @@ router.put("/payouts/:id/process", authenticateAdmin, processPayoutAdmin);
 // ==========================================
 // Admin Platform Settings
 // ==========================================
+router.get("/settings/public", getPublicPlatformSettings);
 router.get("/settings", authenticateAdmin, getPlatformSettings);
 router.put("/settings", authenticateAdmin, updatePlatformSettings);
 

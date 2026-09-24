@@ -130,14 +130,43 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     );
   }
 
+  // Helper to determine Product-level GST Rate (High Priority)
+  const getProductGstRate = (item) => {
+    const explicitGst = item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? item.taxRate ?? item.productId?.gstPercent ?? item.productId?.gstRate ?? item.productId?.gst ?? item.productId?.gstPercentage ?? item.productId?.taxRate;
+    if (explicitGst !== undefined && explicitGst !== null && !isNaN(Number(explicitGst))) {
+      return Number(explicitGst);
+    }
+    const category = (item.category || item.productId?.category || '').toLowerCase();
+    if (category.includes('book')) return 0;
+    if (category.includes('uniform') || category.includes('clothing')) return 5;
+    if (category.includes('shoe')) return 12;
+    return 18;
+  };
+
   let y = tableTop + 26;
   let subtotal = 0;
+  let totalTaxableValue = 0;
+  let totalTaxAmount = 0;
 
   itemsToRender.forEach((item, index) => {
     const itemTotal = (item.finalPrice || item.price || 0) * (item.quantity || 1);
     subtotal += itemTotal;
+    const gstRate = getProductGstRate(item);
 
-    const variantDetails = [item.size ? `Size: ${item.size}` : "", item.age ? `Age: ${item.age}` : ""]
+    if (gstRate > 0) {
+      const itemTaxable = itemTotal / (1 + gstRate / 100);
+      const itemTax = itemTotal - itemTaxable;
+      totalTaxableValue += itemTaxable;
+      totalTaxAmount += itemTax;
+    } else {
+      totalTaxableValue += itemTotal;
+    }
+
+    const variantDetails = [
+      item.size ? `Size: ${item.size}` : "",
+      item.age ? `Age: ${item.age}` : "",
+      `GST: ${gstRate}%`
+    ]
       .filter(Boolean)
       .join(", ") || "Standard";
 
@@ -166,10 +195,8 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, y).lineTo(555, y).stroke();
   y += 10;
 
-  // Compute GST components (inclusive 18% GST estimate)
-  const gstInclusiveRate = 0.18;
-  const taxableValue = Math.round((subtotal / (1 + gstInclusiveRate)) * 100) / 100;
-  const totalTax = Math.round((subtotal - taxableValue) * 100) / 100;
+  const taxableValue = Math.round(totalTaxableValue * 100) / 100;
+  const totalTax = Math.round(totalTaxAmount * 100) / 100;
   const cgst = Math.round((totalTax / 2) * 100) / 100;
   const sgst = cgst;
 
@@ -178,12 +205,12 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .fontSize(8)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text("GST Tax Breakdown (Inclusive):", 45, y)
+    .text("GST Tax Breakdown (Product Priority):", 45, y)
     .font("Helvetica")
     .fillColor(mutedColor)
     .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
-    .text(`CGST (9%): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
-    .text(`SGST (9%): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
+    .text(`CGST (Split): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
+    .text(`SGST (Split): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
     .text(`Total Tax: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
 
   // Financial Summary (Right)

@@ -221,6 +221,8 @@ export const createProduct = async (req, res) => {
       description,
       tags,
       status,
+      gst,
+      gstPercentage,
       paymentMethodAllowed,
       paymentMethodsAllowed,
       offerDiscountType,
@@ -232,6 +234,7 @@ export const createProduct = async (req, res) => {
 
     const parsedPrice = price !== undefined ? Number(price) : (mrp !== undefined && discountPercentage !== undefined ? Number(mrp) - (Number(mrp) * Number(discountPercentage)) / 100 : undefined);
     const parsedStock = stock !== undefined ? Number(stock) : (stockQuantity !== undefined ? Number(stockQuantity) : 50);
+    const parsedGst = gst !== undefined ? Number(gst) : (gstPercentage !== undefined ? Number(gstPercentage) : 5);
 
     if (!name || !category || parsedPrice === undefined || parsedStock === undefined) {
       return res.status(400).json({
@@ -297,7 +300,7 @@ export const createProduct = async (req, res) => {
       ? ["Online"]
       : (paymentMethodsAllowed ? parseArray(paymentMethodsAllowed) : ["COD", "Online"]);
 
-    // Parse sizeVariants
+    // Parse sizeVariants safely with all metadata fields (size, measureScale, measureValue, unit, price, mrp, stock, image, images, sku)
     let parsedSizeVariants = [];
     if (req.body.sizeVariants) {
       if (typeof req.body.sizeVariants === "string") {
@@ -322,14 +325,24 @@ export const createProduct = async (req, res) => {
     }
 
     const formattedVariants = Array.isArray(parsedSizeVariants)
-      ? parsedSizeVariants.map(v => ({
-          size: String(v.size || "").trim(),
-          price: Number(v.price) || 0,
-          mrp: Number(v.mrp) || Number(v.price) || 0,
-          stock: Number(v.stock) || 0,
-          image: v.image || "",
-          sku: v.sku || ""
-        })).filter(v => v.size)
+      ? parsedSizeVariants.map(v => {
+          const sz = String(v.size || v.measureValue || "").trim();
+          const mv = String(v.measureValue || v.size || "").trim();
+          return {
+            size: sz || mv,
+            measureScale: String(v.measureScale || "size").trim(),
+            measureValue: mv || sz,
+            unit: String(v.unit || "Size").trim(),
+            price: Number(v.price) || 0,
+            mrp: Number(v.mrp) || Number(v.price) || 0,
+            originalPrice: Number(v.originalPrice || v.mrp) || Number(v.price) || 0,
+            stock: Number(v.stock) || 0,
+            stockQuantity: Number(v.stockQuantity || v.stock) || 0,
+            image: v.image || "",
+            images: Array.isArray(v.images) && v.images.length > 0 ? v.images : (v.image ? [v.image] : []),
+            sku: v.sku || ""
+          };
+        }).filter(v => v.size || v.measureValue)
       : [];
 
     let resolvedSizes = parseArray(sizes);
@@ -348,11 +361,13 @@ export const createProduct = async (req, res) => {
     const sellerId = req.user?.id || req.seller?._id || req.user?._id;
 
     const isMeter = unit === "meter" || isMeterBased === true || isMeterBased === "true";
+    const primaryImg = req.body.image || (imagePaths.length > 0 ? imagePaths[0] : "");
 
     const newProduct = new Product({
       sellerId,
       userId: sellerId,
       name,
+      subtitle: subtitle || req.body.subtitle || "",
       category,
       subCategory: subCategory || "",
       schoolName: schoolName || "",
@@ -366,9 +381,27 @@ export const createProduct = async (req, res) => {
       colors: parseArray(colors),
       material: material || "",
       brand: brand || "",
+      gst: parsedGst,
+      gstPercentage: parsedGst,
       mrp: mrp !== undefined ? Number(mrp) : Number(effectivePrice),
+      originalPrice: req.body.originalPrice !== undefined ? Number(req.body.originalPrice) : (mrp !== undefined ? Number(mrp) : Number(effectivePrice)),
       price: Number(effectivePrice),
       discountPercentage: discountPercentage !== undefined ? Number(discountPercentage) : 0,
+      discountBadge: req.body.discountBadge || req.body.badge || "",
+      badgeTag: req.body.badgeTag || req.body.badge || "",
+      badge: req.body.badge || req.body.discountBadge || "",
+      bundleType: req.body.bundleType || "single",
+      sku: req.body.sku || "",
+      kitItems: req.body.kitItems || req.body.items || [],
+      items: req.body.items || req.body.kitItems || [],
+      totalMrp: req.body.totalMrp ? Number(req.body.totalMrp) : 0,
+      bundlePrice: req.body.bundlePrice ? Number(req.body.bundlePrice) : 0,
+      sellerStoreName: req.seller?.storeName || req.seller?.name || req.body.sellerStoreName || req.body.storeName || "",
+      sellerName: req.seller?.name || req.body.sellerName || "",
+      storeName: req.seller?.storeName || req.body.storeName || "",
+      legalBusinessName: req.seller?.legalBusinessName || req.body.legalBusinessName || "",
+      sellerAcceptsCod: req.seller?.acceptsCod !== false,
+      sellerAcceptsOnline: req.seller?.acceptsOnline !== false,
       stock: Number(effectiveStock),
       stockQuantity: Number(effectiveStock),
       unit: isMeter ? "meter" : (unit || "piece"),
@@ -380,7 +413,8 @@ export const createProduct = async (req, res) => {
       sizeChart: parsedSizeChart,
       description: description || "",
       tags: parseArray(tags),
-      images: imagePaths,
+      image: primaryImg,
+      images: imagePaths.length > 0 ? imagePaths : (primaryImg ? [primaryImg] : []),
       status: status || "available",
       approvalStatus: "Pending",
       approvalComment: "Product submitted by seller. Awaiting admin review.",
@@ -425,6 +459,14 @@ export const updateProduct = async (req, res) => {
 
     const updates = { ...req.body };
 
+    if (updates.gst !== undefined) {
+      updates.gst = Number(updates.gst);
+      updates.gstPercentage = Number(updates.gst);
+    } else if (updates.gstPercentage !== undefined) {
+      updates.gst = Number(updates.gstPercentage);
+      updates.gstPercentage = Number(updates.gstPercentage);
+    }
+
     // Parse sizeVariants
     if (updates.sizeVariants !== undefined) {
       let parsedVariants = [];
@@ -438,14 +480,24 @@ export const updateProduct = async (req, res) => {
         parsedVariants = updates.sizeVariants;
       }
       const formattedVariants = Array.isArray(parsedVariants)
-        ? parsedVariants.map(v => ({
-            size: String(v.size || "").trim(),
-            price: Number(v.price) || 0,
-            mrp: Number(v.mrp) || Number(v.price) || 0,
-            stock: Number(v.stock) || 0,
-            image: v.image || "",
-            sku: v.sku || ""
-          })).filter(v => v.size)
+        ? parsedVariants.map(v => {
+            const sz = String(v.size || v.measureValue || "").trim();
+            const mv = String(v.measureValue || v.size || "").trim();
+            return {
+              size: sz || mv,
+              measureScale: String(v.measureScale || "size").trim(),
+              measureValue: mv || sz,
+              unit: String(v.unit || "Size").trim(),
+              price: Number(v.price) || 0,
+              mrp: Number(v.mrp) || Number(v.price) || 0,
+              originalPrice: Number(v.originalPrice || v.mrp) || Number(v.price) || 0,
+              stock: Number(v.stock) || 0,
+              stockQuantity: Number(v.stockQuantity || v.stock) || 0,
+              image: v.image || "",
+              images: Array.isArray(v.images) && v.images.length > 0 ? v.images : (v.image ? [v.image] : []),
+              sku: v.sku || ""
+            };
+          }).filter(v => v.size || v.measureValue)
         : [];
 
       updates.sizeVariants = formattedVariants;
