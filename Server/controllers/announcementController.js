@@ -12,7 +12,7 @@ const defaultAnnouncements = [
     textColor: "#ffffff"
   },
   {
-    text: "10% OFF First Order | Code: SCHOOL10",
+    text: "Exclusive Student & School Discounts Available",
     badge: "DISCOUNT",
     link: "/offers",
     priority: 2,

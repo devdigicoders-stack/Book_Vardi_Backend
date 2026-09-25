@@ -29,10 +29,20 @@ router.get('/tree', cacheMiddleware(120), async (req, res) => {
 // Create category
 router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { name, description } = req.body;
-    const category = new Category({ name, description });
+    const { name, description, gstPercentage, icon, accentColor, bgColor, subCategories, imageUrl } = req.body;
+    const category = new Category({
+      name,
+      description,
+      gstPercentage: gstPercentage !== undefined ? Number(gstPercentage) : 5,
+      icon,
+      accentColor,
+      bgColor,
+      subCategories,
+      imageUrl
+    });
     await category.save();
     clearCache('categor');
+    clearCache('product');
     res.status(201).json({ message: 'Category created successfully', category });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });

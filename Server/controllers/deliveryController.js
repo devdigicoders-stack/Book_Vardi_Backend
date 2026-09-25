@@ -5,24 +5,48 @@ import Order from "../models/Order.js";
 const findOrderByTokenOrId = async (tokenOrId) => {
   if (!tokenOrId) return null;
 
-  const normalizedToken = String(tokenOrId).trim();
+  let normalizedToken = String(tokenOrId).trim();
+  // Strip full URL prefix if whole link was passed as token
+  if (normalizedToken.includes('token=')) {
+    const parts = normalizedToken.split('token=');
+    normalizedToken = parts[parts.length - 1].split('&')[0];
+  }
+  normalizedToken = normalizedToken.trim();
+
   const tokenPattern = { $regex: `^${normalizedToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" };
 
   let order = null;
-  order = await Order.findOne({ "selfDeliveryDetails.deliveryPartnerToken": tokenPattern });
+  // 1. Direct match on root or item selfDeliveryDetails
+  order = await Order.findOne({
+    $or: [
+      { "selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
+      { "selfDeliveryDetails.deliveryPartnerToken": tokenPattern },
+      { "items.selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
+      { "items.selfDeliveryDetails.deliveryPartnerToken": tokenPattern }
+    ]
+  });
 
-  if (!order && mongoose.Types.ObjectId.isValid(normalizedToken)) {
-    order = await Order.findById(normalizedToken);
+  // 2. Lookup by ObjectId or orderId or id
+  if (!order) {
+    const query = [
+      { orderId: normalizedToken },
+      { id: normalizedToken },
+      { orderId: { $regex: `^${normalizedToken}$`, $options: "i" } }
+    ];
+    if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
+      query.push({ _id: normalizedToken });
+    }
+    order = await Order.findOne({ $or: query });
   }
 
+  // 3. Array elemMatch fallback
   if (!order) {
     order = await Order.findOne({
-      $or: [
-        { orderId: normalizedToken },
-        { id: normalizedToken },
-        { "selfDeliveryDetails.deliveryPartnerToken": tokenPattern },
-        { "items.selfDeliveryDetails.deliveryPartnerToken": tokenPattern }
-      ]
+      "items.selfDeliveryDetails": {
+        $elemMatch: {
+          deliveryPartnerToken: tokenPattern
+        }
+      }
     });
   }
 

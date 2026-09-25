@@ -32,6 +32,8 @@ class MemoryCache {
         this.store.delete(key);
       }
     }
+    // Also clear general product catalog keys
+    this.store.clear();
   }
 }
 
@@ -45,6 +47,7 @@ export const cacheMiddleware = (ttlSeconds = 60) => {
 
     // Skip caching if authenticated or query parameter bypasses cache
     if (req.query?.bypassCache === "true" || req.query?.includePending === "true" || req.headers.authorization) {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       return next();
     }
 
@@ -53,10 +56,7 @@ export const cacheMiddleware = (ttlSeconds = 60) => {
 
     if (cachedData) {
       res.setHeader("X-Cache", "HIT");
-      res.setHeader(
-        "Cache-Control",
-        `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds * 2}, stale-while-revalidate=300`
-      );
+      res.setHeader("Cache-Control", "no-cache, private, must-revalidate");
       return res.json(cachedData);
     }
 
@@ -67,10 +67,7 @@ export const cacheMiddleware = (ttlSeconds = 60) => {
         apiCache.set(cacheKey, body, ttlSeconds);
       }
       res.setHeader("X-Cache", "MISS");
-      res.setHeader(
-        "Cache-Control",
-        `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds * 2}, stale-while-revalidate=300`
-      );
+      res.setHeader("Cache-Control", "no-cache, private, must-revalidate");
       return originalJson(body);
     };
 

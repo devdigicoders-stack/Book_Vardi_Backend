@@ -405,7 +405,21 @@ productSchema.pre("save", function (next) {
     this.discountPercentage = 0;
   }
 
-  // 2. Calculate promotional offer price
+  // 2. Calculate discount percentage for sizeVariants
+  if (Array.isArray(this.sizeVariants)) {
+    this.sizeVariants.forEach((v) => {
+      const vMrp = Number(v.mrp || v.originalPrice || 0);
+      const vPrice = Number(v.price || 0);
+      if (vMrp > 0 && vPrice > 0 && vMrp >= vPrice) {
+        v.discountPercentage = Math.round(((vMrp - vPrice) / vMrp) * 100);
+      } else if (!vMrp || vMrp < vPrice) {
+        v.mrp = vPrice;
+        v.discountPercentage = 0;
+      }
+    });
+  }
+
+  // 3. Calculate promotional offer price
   if (this.offer && this.offer.hasOffer && this.offer.isActive && this.offer.discountValue > 0) {
     if (this.offer.discountType === "percentage") {
       const discount = (this.price * this.offer.discountValue) / 100;

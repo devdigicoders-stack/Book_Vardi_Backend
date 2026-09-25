@@ -7,8 +7,8 @@ export const connectDB = async () => {
   if (primaryUri) {
     try {
       await mongoose.connect(primaryUri, {
-        serverSelectionTimeoutMS: 5000,
-        connectTimeoutMS: 5000
+        serverSelectionTimeoutMS: 15000,
+        connectTimeoutMS: 15000
       });
       console.log("✅ MongoDB Connected successfully to Atlas:", primaryUri.split("@").pop().split("?")[0]);
       return;
@@ -21,8 +21,8 @@ export const connectDB = async () => {
 
   try {
     await mongoose.connect(localUri, {
-      serverSelectionTimeoutMS: 3000,
-      connectTimeoutMS: 3000
+      serverSelectionTimeoutMS: 13000,
+      connectTimeoutMS: 13000
     });
     console.log("✅ MongoDB Connected successfully to Local DB:", localUri);
   } catch (error) {

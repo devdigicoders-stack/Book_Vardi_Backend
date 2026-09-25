@@ -605,7 +605,8 @@ export const getSellerSettings = async (req, res) => {
               { phone: cleanPhone },
               { phone: `+91${cleanPhone}` },
               { phone: `+91 ${cleanPhone}` },
-              { phone: cleanPhone.slice(-10) }
+              { phone: cleanPhone.slice(-10) },
+              { phone: { $regex: cleanPhone } }
             ]
           }).select(
             "storeName name email phone address city state pincode gstNumber deliveryPreferences bankDetails storeDetails"
@@ -751,7 +752,8 @@ export const sendSellerPhoneOtp = async (req, res) => {
         { phone: cleanPhone },
         { phone: `+91${digits10}` },
         { phone: `+91 ${digits10}` },
-        { phone: digits10 }
+        { phone: digits10 },
+        { phone: { $regex: digits10 } }
       ]
     }).select("status storeName name phone rejectionReason");
 
@@ -796,7 +798,8 @@ export const verifySellerPhoneOtp = async (req, res) => {
         { phone: cleanPhone },
         { phone: `+91${digits10}` },
         { phone: `+91 ${digits10}` },
-        { phone: digits10 }
+        { phone: digits10 },
+        { phone: { $regex: digits10 } }
       ]
     }).select("-password -documents");
 

@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 import Product from "../models/Product.js";
+import Category from "../models/Category.js";
+import { clearCache } from "../utils/cache.js";
 import { saveBase64ToFile } from "./sellerAuthController.js";
 
 // Helper function to safely parse array inputs from JSON or multipart form-data
@@ -234,7 +236,17 @@ export const createProduct = async (req, res) => {
 
     const parsedPrice = price !== undefined ? Number(price) : (mrp !== undefined && discountPercentage !== undefined ? Number(mrp) - (Number(mrp) * Number(discountPercentage)) / 100 : undefined);
     const parsedStock = stock !== undefined ? Number(stock) : (stockQuantity !== undefined ? Number(stockQuantity) : 50);
-    const parsedGst = gst !== undefined ? Number(gst) : (gstPercentage !== undefined ? Number(gstPercentage) : 5);
+    let parsedGst = gst !== undefined ? Number(gst) : (gstPercentage !== undefined ? Number(gstPercentage) : undefined);
+
+    if (parsedGst === undefined && category) {
+      try {
+        const catDoc = await Category.findOne({ name: { $regex: new RegExp(`^${category.trim()}$`, "i") } });
+        if (catDoc && catDoc.gstPercentage !== undefined) {
+          parsedGst = catDoc.gstPercentage;
+        }
+      } catch (err) {}
+    }
+    if (parsedGst === undefined) parsedGst = 5;
 
     if (!name || !category || parsedPrice === undefined || parsedStock === undefined) {
       return res.status(400).json({
@@ -325,24 +337,35 @@ export const createProduct = async (req, res) => {
     }
 
     const formattedVariants = Array.isArray(parsedSizeVariants)
-      ? parsedSizeVariants.map(v => {
-          const sz = String(v.size || v.measureValue || "").trim();
-          const mv = String(v.measureValue || v.size || "").trim();
+      ? parsedSizeVariants.map((v, vIdx) => {
+          if (!v) return null;
+          const sz = String(v.size || v.measureValue || v.name || v.label || "").trim();
+          const mv = String(v.measureValue || v.size || sz).trim();
+          const p = Number(v.price) || 0;
+          const m = Number(v.mrp || v.originalPrice || v.regularPrice) || p;
+          const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
+          
+          const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
+          const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
+          
+          const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
+          const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`));
+
           return {
-            size: sz || mv,
+            size: sz || mv || `Variant #${vIdx + 1}`,
             measureScale: String(v.measureScale || "size").trim(),
-            measureValue: mv || sz,
+            measureValue: mv || sz || `Variant #${vIdx + 1}`,
             unit: String(v.unit || "Size").trim(),
-            price: Number(v.price) || 0,
-            mrp: Number(v.mrp) || Number(v.price) || 0,
-            originalPrice: Number(v.originalPrice || v.mrp) || Number(v.price) || 0,
-            stock: Number(v.stock) || 0,
-            stockQuantity: Number(v.stockQuantity || v.stock) || 0,
-            image: v.image || "",
-            images: Array.isArray(v.images) && v.images.length > 0 ? v.images : (v.image ? [v.image] : []),
-            sku: v.sku || ""
+            price: p,
+            mrp: m,
+            originalPrice: m,
+            stock: st,
+            stockQuantity: st,
+            image: savedVImg || (savedVImgs[0] || ""),
+            images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+            sku: v.sku || `SKU-VAR-${vIdx + 1}`
           };
-        }).filter(v => v.size || v.measureValue)
+        }).filter(Boolean)
       : [];
 
     let resolvedSizes = parseArray(sizes);
@@ -361,19 +384,26 @@ export const createProduct = async (req, res) => {
     const sellerId = req.user?.id || req.seller?._id || req.user?._id;
 
     const isMeter = unit === "meter" || isMeterBased === true || isMeterBased === "true";
-    const primaryImg = req.body.image || (imagePaths.length > 0 ? imagePaths[0] : "");
 
-    const newProduct = new Product({
-      sellerId,
-      userId: sellerId,
-      name,
-      subtitle: subtitle || req.body.subtitle || "",
-      category,
+    // 1. Sanitize sellerId / userId so invalid ObjectIds or "self" don't trigger Mongoose CastError
+    let validSellerId = undefined;
+    const rawSellerId = req.user?.id || req.seller?._id || req.user?._id || req.headers["x-seller-id"] || req.body?.sellerId;
+    if (rawSellerId && mongoose.Types.ObjectId.isValid(String(rawSellerId)) && String(rawSellerId) !== "self") {
+      validSellerId = new mongoose.Types.ObjectId(String(rawSellerId));
+    }
+
+    const primaryImg = imagePaths[0];
+
+    // 2. Construct explicit clean payload (omitting frontend temporary numeric IDs like 1790349222826)
+    const productPayload = {
+      name: String(name).trim(),
+      subtitle: req.body.subtitle || "",
+      category: String(category).trim(),
       subCategory: subCategory || "",
       schoolName: schoolName || "",
       schoolCode: schoolCode || "",
       classGrade: classGrade || "",
-      gender: gender || "Unisex",
+      gender: ["Boy", "Girl", "Boys", "Girls", "Unisex", "All"].includes(gender) ? gender : "Unisex",
       ageGroup: ageGroup || "",
       ages: parseArray(ages),
       sizes: resolvedSizes,
@@ -383,6 +413,7 @@ export const createProduct = async (req, res) => {
       brand: brand || "",
       gst: parsedGst,
       gstPercentage: parsedGst,
+      isGstInclusive: req.body.isGstInclusive !== undefined ? Boolean(req.body.isGstInclusive) : true,
       mrp: mrp !== undefined ? Number(mrp) : Number(effectivePrice),
       originalPrice: req.body.originalPrice !== undefined ? Number(req.body.originalPrice) : (mrp !== undefined ? Number(mrp) : Number(effectivePrice)),
       price: Number(effectivePrice),
@@ -396,9 +427,9 @@ export const createProduct = async (req, res) => {
       items: req.body.items || req.body.kitItems || [],
       totalMrp: req.body.totalMrp ? Number(req.body.totalMrp) : 0,
       bundlePrice: req.body.bundlePrice ? Number(req.body.bundlePrice) : 0,
-      sellerStoreName: req.seller?.storeName || req.seller?.name || req.body.sellerStoreName || req.body.storeName || "",
-      sellerName: req.seller?.name || req.body.sellerName || "",
-      storeName: req.seller?.storeName || req.body.storeName || "",
+      sellerStoreName: req.seller?.storeName || req.seller?.name || req.body.sellerStoreName || req.body.storeName || "Book Vardi Store",
+      sellerName: req.seller?.name || req.body.sellerName || "Book Vardi Store",
+      storeName: req.seller?.storeName || req.body.storeName || "Book Vardi Store",
       legalBusinessName: req.seller?.legalBusinessName || req.body.legalBusinessName || "",
       sellerAcceptsCod: req.seller?.acceptsCod !== false,
       sellerAcceptsOnline: req.seller?.acceptsOnline !== false,
@@ -414,16 +445,24 @@ export const createProduct = async (req, res) => {
       description: description || "",
       tags: parseArray(tags),
       image: primaryImg,
-      images: imagePaths.length > 0 ? imagePaths : (primaryImg ? [primaryImg] : []),
+      images: imagePaths,
       status: status || "available",
       approvalStatus: "Pending",
       approvalComment: "Product submitted by seller. Awaiting admin review.",
       paymentMethodAllowed: payMethod,
       paymentMethodsAllowed: payMethodsArr,
       offer: offerConfig
-    });
+    };
+
+    if (validSellerId) {
+      productPayload.sellerId = validSellerId;
+      productPayload.userId = validSellerId;
+    }
+
+    const newProduct = new Product(productPayload);
 
     await newProduct.save();
+    clearCache('product');
 
     console.log("🆕 New Product Added to DB! Product ID:", newProduct._id);
 
@@ -443,21 +482,35 @@ export const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Ensure product belongs to seller
+    if (!id || !mongoose.Types.ObjectId.isValid(String(id))) {
+      return res.status(400).json({ message: "Invalid product ID format" });
+    }
+
     const expandedSellerIds = await getExpandedSellerIds(req);
-    const validObjectIds = expandedSellerIds.filter(id => id && mongoose.Types.ObjectId.isValid(String(id)));
-    let product = await Product.findOne({
-      _id: id,
-      $or: [
-        { sellerId: { $in: validObjectIds } },
-        { userId: { $in: validObjectIds } }
-      ]
-    });
+    const validObjectIds = expandedSellerIds.filter(sid => sid && mongoose.Types.ObjectId.isValid(String(sid))).map(sid => String(sid));
+
+    let product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ message: "Product not found or unauthorized" });
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    // Authorization check: if product is linked to a seller, verify ownership
+    if (product.sellerId && validObjectIds.length > 0) {
+      const prodSellerIdStr = String(product.sellerId);
+      const isOwner = validObjectIds.some(sid => sid === prodSellerIdStr);
+      if (!isOwner && req.user?.role !== "admin") {
+        return res.status(403).json({ message: "Unauthorized to modify this product" });
+      }
     }
 
     const updates = { ...req.body };
+
+    // Strip immutable / internal fields to prevent Mongoose CastError / immutable field errors
+    delete updates._id;
+    delete updates.id;
+    delete updates.__v;
+    delete updates.createdAt;
+    delete updates.updatedAt;
 
     if (updates.gst !== undefined) {
       updates.gst = Number(updates.gst);
@@ -467,47 +520,68 @@ export const updateProduct = async (req, res) => {
       updates.gstPercentage = Number(updates.gstPercentage);
     }
 
-    // Parse sizeVariants
-    if (updates.sizeVariants !== undefined) {
+    // Parse sizeVariants / variants safely
+    const rawVariantsInput = updates.sizeVariants !== undefined ? updates.sizeVariants : updates.variants;
+    if (rawVariantsInput !== undefined) {
       let parsedVariants = [];
-      if (typeof updates.sizeVariants === "string") {
+      if (typeof rawVariantsInput === "string") {
         try {
-          parsedVariants = JSON.parse(updates.sizeVariants);
+          parsedVariants = JSON.parse(rawVariantsInput);
         } catch (e) {
           parsedVariants = [];
         }
-      } else if (Array.isArray(updates.sizeVariants)) {
-        parsedVariants = updates.sizeVariants;
+      } else if (Array.isArray(rawVariantsInput)) {
+        parsedVariants = rawVariantsInput;
       }
+
       const formattedVariants = Array.isArray(parsedVariants)
-        ? parsedVariants.map(v => {
-            const sz = String(v.size || v.measureValue || "").trim();
-            const mv = String(v.measureValue || v.size || "").trim();
+        ? parsedVariants.map((v, vIdx) => {
+            if (!v || typeof v !== "object") return null;
+            const sz = String(v.size || v.measureValue || v.name || v.label || "").trim();
+            const mv = String(v.measureValue || v.size || sz).trim();
+            const p = (v.price !== undefined && !isNaN(Number(v.price))) ? Number(v.price) : Number(product.price || 0);
+            const m = (v.mrp !== undefined && !isNaN(Number(v.mrp))) ? Number(v.mrp) : (v.originalPrice !== undefined && !isNaN(Number(v.originalPrice)) ? Number(v.originalPrice) : p);
+            const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
+
+            const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
+            const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
+            const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
+            const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`)).filter(Boolean);
+
             return {
-              size: sz || mv,
+              size: sz || mv || `Variant #${vIdx + 1}`,
               measureScale: String(v.measureScale || "size").trim(),
-              measureValue: mv || sz,
+              measureValue: mv || sz || `Variant #${vIdx + 1}`,
               unit: String(v.unit || "Size").trim(),
-              price: Number(v.price) || 0,
-              mrp: Number(v.mrp) || Number(v.price) || 0,
-              originalPrice: Number(v.originalPrice || v.mrp) || Number(v.price) || 0,
-              stock: Number(v.stock) || 0,
-              stockQuantity: Number(v.stockQuantity || v.stock) || 0,
-              image: v.image || "",
-              images: Array.isArray(v.images) && v.images.length > 0 ? v.images : (v.image ? [v.image] : []),
-              sku: v.sku || ""
+              price: p,
+              mrp: m,
+              originalPrice: m,
+              stock: st,
+              stockQuantity: st,
+              image: savedVImg || (savedVImgs[0] || ""),
+              images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+              sku: v.sku || `SKU-VAR-${vIdx + 1}`
             };
-          }).filter(v => v.size || v.measureValue)
+          }).filter(Boolean)
         : [];
 
       updates.sizeVariants = formattedVariants;
+      updates.variants = formattedVariants;
+
       if (formattedVariants.length > 0) {
         updates.sizes = Array.from(new Set([...(updates.sizes ? parseArray(updates.sizes) : (product.sizes || [])), ...formattedVariants.map(v => v.size)]));
+        const validPrices = formattedVariants.map(v => Number(v.price)).filter(p => !isNaN(p) && p > 0);
+        if (validPrices.length > 0) {
+          updates.price = Math.min(...validPrices);
+        }
+        const totalVariantStock = formattedVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+        updates.stock = totalVariantStock;
+        updates.stockQuantity = totalVariantStock;
       }
     }
 
-    // Parse array fields if present in update payload
-    if (updates.sizes !== undefined && !updates.sizeVariants) updates.sizes = parseArray(updates.sizes);
+    // Parse array fields safely
+    if (updates.sizes !== undefined && updates.sizeVariants === undefined) updates.sizes = parseArray(updates.sizes);
     if (updates.ages !== undefined) updates.ages = parseArray(updates.ages);
     if (updates.colors !== undefined) updates.colors = parseArray(updates.colors);
     if (updates.tags !== undefined) updates.tags = parseArray(updates.tags);
@@ -556,22 +630,25 @@ export const updateProduct = async (req, res) => {
       updates.images = Array.from(new Set([...(product.images || []), ...updatedImagePaths])).filter(Boolean);
     }
 
-    // If product was previously rejected, editing it resubmits into Pending approval queue
-    if (product.approvalStatus === "Rejected") {
-      product.approvalStatus = "Pending";
-      product.approvalComment = "Resubmitted with modifications for admin review";
-      product.rejectionReason = "";
-    }
+    // Whenever a product is updated by a seller, set approvalStatus to "Pending" for admin review
+    updates.approvalStatus = "Pending";
+    updates.approvalComment = "Product details updated by merchant. Awaiting administrative review.";
+    updates.rejectionReason = "";
 
-    // Apply updates
+    // Apply updates safely
     Object.assign(product, updates);
     await product.save();
+    clearCache('product');
+
+    console.log("✅ Product Updated Successfully! ID:", product._id);
 
     res.json({
+      success: true,
       message: "Product updated successfully!",
       product
     });
   } catch (error) {
+    console.error("Seller updateProduct error:", error);
     res.status(500).json({ message: "Failed to update product", error: error.message });
   }
 };
@@ -597,6 +674,7 @@ export const updateInventoryStock = async (req, res) => {
     }
 
     await product.save();
+    clearCache('product');
 
     res.json({
       message: "Inventory stock updated successfully!",
@@ -622,6 +700,8 @@ export const deleteProduct = async (req, res) => {
     if (!product) {
       return res.status(404).json({ message: "Product not found or unauthorized" });
     }
+
+    clearCache('product');
 
     res.json({ message: "Product deleted successfully!" });
   } catch (error) {

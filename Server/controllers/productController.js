@@ -33,86 +33,8 @@ const withTimeout = (promise, ms = 15000) => {
   ]);
 };
 
-// High quality fallback products returned if DB is connecting, buffering, or timing out
-const FALLBACK_PRODUCTS = [
-  {
-    _id: "66e8f1a1b2c3d4e5f6789001",
-    name: "DPS School Uniform Set (Shirt & Trousers)",
-    category: "Uniforms",
-    subCategory: "Boys Uniform",
-    price: 899,
-    mrp: 1200,
-    discountPercentage: 25,
-    stock: 50,
-    images: ["https://images.unsplash.com/photo-1593032465175-481ac7f401a0?w=900&auto=format&fit=crop&q=80"],
-    schoolName: "Delhi Public School",
-    schoolCode: "DPS",
-    gender: "Boys",
-    sizes: ["28", "30", "32", "34"],
-    status: "available",
-    approvalStatus: "Approved",
-    averageRating: 4.8,
-    numReviews: 42,
-    sellerId: { storeName: "Rahul Enterprise", name: "Rahul Enterprise", city: "Lucknow", phone: "+911231231232" }
-  },
-  {
-    _id: "66e8f1a1b2c3d4e5f6789002",
-    name: "Premium Cotton White School Shirt",
-    category: "Shirts",
-    subCategory: "School Shirt",
-    price: 399,
-    mrp: 599,
-    discountPercentage: 33,
-    stock: 100,
-    images: ["https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=900&auto=format&fit=crop&q=80"],
-    schoolName: "All Schools",
-    gender: "Unisex",
-    sizes: ["26", "28", "30", "32"],
-    status: "available",
-    approvalStatus: "Approved",
-    averageRating: 4.6,
-    numReviews: 28,
-    sellerId: { storeName: "Rahul Enterprise", name: "Rahul Enterprise", city: "Lucknow", phone: "+911231231232" }
-  },
-  {
-    _id: "66e8f1a1b2c3d4e5f6789003",
-    name: "Class 1-5 Complete Stationery & Notebook Pack",
-    category: "Stationery",
-    subCategory: "Notebook Sets",
-    price: 499,
-    mrp: 699,
-    discountPercentage: 28,
-    stock: 80,
-    images: ["https://images.unsplash.com/photo-1583485088034-697b5bc54ccd?w=900&auto=format&fit=crop&q=80"],
-    schoolName: "All Schools",
-    gender: "Unisex",
-    sizes: ["Standard"],
-    status: "available",
-    approvalStatus: "Approved",
-    averageRating: 4.9,
-    numReviews: 65,
-    sellerId: { storeName: "Aaditya Academic Hub", name: "Aaditya Gupta", city: "Lucknow", phone: "+919876543210" }
-  },
-  {
-    _id: "66e8f1a1b2c3d4e5f6789004",
-    name: "Ergonomic School Backpack (Waterproof)",
-    category: "Bags",
-    subCategory: "School Bags",
-    price: 749,
-    mrp: 1299,
-    discountPercentage: 42,
-    stock: 35,
-    images: ["https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=900&auto=format&fit=crop&q=80"],
-    schoolName: "All Schools",
-    gender: "Unisex",
-    sizes: ["One Size"],
-    status: "available",
-    approvalStatus: "Approved",
-    averageRating: 4.7,
-    numReviews: 31,
-    sellerId: { storeName: "Rahul Enterprise", name: "Rahul Enterprise", city: "Lucknow", phone: "+911231231232" }
-  }
-];
+// Clean fallback (no dummy products)
+const FALLBACK_PRODUCTS = [];
 
 // Get all products (with optional filtering by category, search, school, size, age, discount, offer, ids, tag)
 export const getProducts = async (req, res) => {
@@ -245,7 +167,10 @@ export const getProducts = async (req, res) => {
 
     if (!products || products.length === 0) {
       try {
-        products = await Product.find({ isDeleted: { $ne: true } }).sort(sortOption).skip(skip).limit(limitNum).lean();
+        const fallbackFilter = (req.query.all === "true" || req.query.includePending === "true")
+          ? { isDeleted: { $ne: true } }
+          : { status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
+        products = await Product.find(fallbackFilter).sort(sortOption).skip(skip).limit(limitNum).lean();
         totalProducts = products.length;
       } catch (err) {}
     }
@@ -311,7 +236,7 @@ export const getRecentlyViewedProducts = async (req, res) => {
 
     if (!products || products.length === 0) {
       try {
-        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+        products = await Product.find({ status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } }).sort({ createdAt: -1 }).limit(limitNum).lean();
       } catch (err) {}
     }
 
@@ -349,7 +274,7 @@ export const getFeaturedProducts = async (req, res) => {
 
     if (!products || products.length === 0) {
       try {
-        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+        products = await Product.find({ status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } }).sort({ createdAt: -1 }).limit(limitNum).lean();
       } catch (err) {}
     }
 
@@ -391,7 +316,7 @@ export const getSpecialOffers = async (req, res) => {
 
     if (!products || products.length === 0) {
       try {
-        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+        products = await Product.find({ status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } }).sort({ createdAt: -1 }).limit(limitNum).lean();
       } catch (err) {}
     }
 
@@ -431,7 +356,7 @@ export const getRecommendedProducts = async (req, res) => {
 
     if (!products || products.length === 0) {
       try {
-        products = await Product.find({ status: { $nin: ["deleted"] }, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(limitNum).lean();
+        products = await Product.find({ status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } }).sort({ createdAt: -1 }).limit(limitNum).lean();
       } catch (err) {}
     }
 
@@ -451,8 +376,14 @@ export const getProductById = async (req, res) => {
       const match = FALLBACK_PRODUCTS.find((p) => p._id === req.params.id) || FALLBACK_PRODUCTS[0];
       return res.json(match);
     }
+
+    const allowPending = req.query.all === "true" || req.query.includePending === "true";
+    const productQuery = allowPending
+      ? { _id: req.params.id, isDeleted: { $ne: true }, status: { $ne: "deleted" } }
+      : { _id: req.params.id, isDeleted: { $ne: true }, status: { $ne: "deleted" }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
+
     const product = await withTimeout(
-      Product.findOne({ _id: req.params.id, isDeleted: { $ne: true }, status: { $ne: "deleted" } }).populate("sellerId", "storeName name city phone").lean(),
+      Product.findOne(productQuery).populate("sellerId", "storeName name city phone").lean(),
       1500
     );
     if (!product) {
@@ -472,6 +403,12 @@ export const getProductById = async (req, res) => {
 export const createProduct = async (req, res) => {
   try {
     const payload = { ...req.body };
+    if (payload.id && !mongoose.Types.ObjectId.isValid(String(payload.id))) {
+      delete payload.id;
+    }
+    if (payload._id && !mongoose.Types.ObjectId.isValid(String(payload._id))) {
+      delete payload._id;
+    }
     if (typeof payload.sizeVariants === "string") {
       try { payload.sizeVariants = JSON.parse(payload.sizeVariants); } catch (e) { payload.sizeVariants = []; }
     }
@@ -489,6 +426,36 @@ export const createProduct = async (req, res) => {
     }
 
     if (Array.isArray(payload.sizeVariants) && payload.sizeVariants.length > 0) {
+      payload.sizeVariants = payload.sizeVariants.map((v, vIdx) => {
+        if (!v) return null;
+        const sz = String(v.size || v.measureValue || v.name || v.label || "").trim();
+        const mv = String(v.measureValue || v.size || sz).trim();
+        const p = Number(v.price) || 0;
+        const m = Number(v.mrp || v.originalPrice || v.regularPrice) || p;
+        const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
+        
+        const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
+        const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
+        
+        const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
+        const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`));
+
+        return {
+          size: sz || mv || `Variant #${vIdx + 1}`,
+          measureScale: String(v.measureScale || "size").trim(),
+          measureValue: mv || sz || `Variant #${vIdx + 1}`,
+          unit: String(v.unit || "Size").trim(),
+          price: p,
+          mrp: m,
+          originalPrice: m,
+          stock: st,
+          stockQuantity: st,
+          image: savedVImg || (savedVImgs[0] || ""),
+          images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+          sku: v.sku || `SKU-VAR-${vIdx + 1}`
+        };
+      }).filter(Boolean);
+
       if (!payload.sizes || payload.sizes.length === 0) {
         payload.sizes = payload.sizeVariants.map(v => v.size).filter(Boolean);
       }
@@ -503,6 +470,10 @@ export const createProduct = async (req, res) => {
       if (payload.stock === undefined || Number(payload.stock) === 0) {
         payload.stock = payload.sizeVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
       }
+    }
+
+    if (!payload.approvalStatus) {
+      payload.approvalStatus = "Pending";
     }
 
     const product = new Product(payload);

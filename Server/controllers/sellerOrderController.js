@@ -104,16 +104,27 @@ const getExpandedSellerScope = async (req) => {
       return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null } };
     }
 
-    const queryScope = [...validScopeObjectIds, ...strExpandedSellerIds];
+    const productOrConditions = [];
+    if (validScopeObjectIds.length > 0) {
+      productOrConditions.push(
+        { sellerId: { $in: validScopeObjectIds } },
+        { seller: { $in: validScopeObjectIds } },
+        { userId: { $in: validScopeObjectIds } },
+        { user: { $in: validScopeObjectIds } },
+        { createdBy: { $in: validScopeObjectIds } }
+      );
+    }
+    if (strExpandedSellerIds.length > 0) {
+      productOrConditions.push(
+        { sellerStoreName: { $in: strExpandedSellerIds } },
+        { storeName: { $in: strExpandedSellerIds } },
+        { sellerName: { $in: strExpandedSellerIds } }
+      );
+    }
 
-    const sellerProducts = await Product.find({
-      $or: [
-        { sellerId: { $in: queryScope } },
-        { seller: { $in: queryScope } },
-        { userId: { $in: queryScope } },
-        { createdBy: { $in: queryScope } }
-      ]
-    }).select("_id id name title");
+    const sellerProducts = productOrConditions.length > 0
+      ? await Product.find({ $or: productOrConditions }).select("_id id name title")
+      : [];
 
     const productIds = sellerProducts.map((p) => p._id);
     const strProductIds = productIds.map((id) => String(id));
@@ -128,24 +139,33 @@ const getExpandedSellerScope = async (req) => {
 
     const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
 
-    const filter = {
-      $or: [
-        { "items.sellerId": { $in: queryScope } },
-        { "items.seller": { $in: queryScope } },
-        { "items.sellerPhone": { $in: queryScope } },
-        { "items.sellerEmail": { $in: queryScope } },
-        { "items.storeName": { $in: queryScope } },
-        { sellerId: { $in: queryScope } },
-        { seller: { $in: queryScope } },
-        ...(allProductKeys.length > 0
-          ? [
-              { "items.productId": { $in: allProductKeys } },
-              { "items.id": { $in: allProductKeys } },
-              { "items._id": { $in: allProductKeys } }
-            ]
-          : [])
-      ]
-    };
+    const orderOrConditions = [];
+    if (validScopeObjectIds.length > 0) {
+      orderOrConditions.push(
+        { sellerId: { $in: validScopeObjectIds } },
+        { seller: { $in: validScopeObjectIds } },
+        { "items.sellerId": { $in: validScopeObjectIds } },
+        { "items.seller": { $in: validScopeObjectIds } }
+      );
+    }
+    if (strExpandedSellerIds.length > 0) {
+      orderOrConditions.push(
+        { "items.sellerPhone": { $in: strExpandedSellerIds } },
+        { "items.sellerEmail": { $in: strExpandedSellerIds } },
+        { "items.storeName": { $in: strExpandedSellerIds } },
+        { storeName: { $in: strExpandedSellerIds } },
+        { sellerStoreName: { $in: strExpandedSellerIds } }
+      );
+    }
+    if (allProductKeys.length > 0) {
+      orderOrConditions.push(
+        { "items.productId": { $in: allProductKeys } },
+        { "items.id": { $in: allProductKeys } },
+        { "items._id": { $in: allProductKeys } }
+      );
+    }
+
+    const filter = orderOrConditions.length > 0 ? { $or: orderOrConditions } : { _id: null };
 
     return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter };
   } catch (err) {
@@ -429,16 +449,38 @@ export const updateSellerOrderStatus = async (req, res) => {
           };
         }
         if (selfDeliveryDetails) {
-          const tokenVal = String(order.selfDeliveryDetails?.deliveryPartnerToken || item.selfDeliveryDetails?.deliveryPartnerToken || `DLV-${Math.floor(100000 + Math.random() * 900000)}`).trim();
-          const trackingLink = `${frontendBaseUrl.replace(/\/+$/, '')}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
+          const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
+          const tokenVal = String(
+            selfDeliveryDetails.deliveryPartnerToken ||
+            order.selfDeliveryDetails?.deliveryPartnerToken ||
+            item.selfDeliveryDetails?.deliveryPartnerToken ||
+            `DLV-${Math.floor(100000 + Math.random() * 900000)}`
+          ).trim();
+          const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
           const otpVal = selfDeliveryDetails.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
 
+          const sanitizeDriverLocation = (rawLoc) => {
+            if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
+            return {
+              lat: typeof rawLoc.lat === 'number' ? rawLoc.lat : (rawLoc.lat ? Number(rawLoc.lat) || null : null),
+              lng: typeof rawLoc.lng === 'number' ? rawLoc.lng : (rawLoc.lng ? Number(rawLoc.lng) || null : null),
+              updatedAt: rawLoc.updatedAt ? new Date(rawLoc.updatedAt) : null
+            };
+          };
+
+          const existingDriverLoc = item.selfDeliveryDetails?.driverLocation;
+          const inputDriverLoc = selfDeliveryDetails.driverLocation !== undefined
+            ? sanitizeDriverLocation(selfDeliveryDetails.driverLocation)
+            : sanitizeDriverLocation(existingDriverLoc);
+
           const mergedSelf = {
-            ...item.selfDeliveryDetails,
-            ...selfDeliveryDetails,
+            deliveryPersonName: selfDeliveryDetails.deliveryPersonName || item.selfDeliveryDetails?.deliveryPersonName || "",
+            deliveryPersonPhone: selfDeliveryDetails.deliveryPersonPhone || item.selfDeliveryDetails?.deliveryPersonPhone || "",
+            vehicleNumber: selfDeliveryDetails.vehicleNumber || item.selfDeliveryDetails?.vehicleNumber || "",
             deliveryPartnerToken: tokenVal,
             trackingUrl: trackingLink,
-            deliveryOtp: otpVal
+            deliveryOtp: otpVal,
+            driverLocation: inputDriverLoc
           };
           item.selfDeliveryDetails = mergedSelf;
           order.selfDeliveryDetails = mergedSelf;
@@ -446,17 +488,40 @@ export const updateSellerOrderStatus = async (req, res) => {
       });
     }
 
-    if (selfDeliveryDetails && (!order.selfDeliveryDetails || !order.selfDeliveryDetails.deliveryPartnerToken)) {
-      const tokenVal = `DLV-${Math.floor(100000 + Math.random() * 900000)}`;
-      const trackingLink = `${frontendBaseUrl.replace(/\/+$/, '')}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
-      order.selfDeliveryDetails = {
-        ...order.selfDeliveryDetails,
-        ...selfDeliveryDetails,
+    if (selfDeliveryDetails) {
+      const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
+      const tokenVal = String(
+        selfDeliveryDetails.deliveryPartnerToken ||
+        order.selfDeliveryDetails?.deliveryPartnerToken ||
+        `DLV-${Math.floor(100000 + Math.random() * 900000)}`
+      ).trim();
+      const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
+      const otpVal = selfDeliveryDetails.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      
+      const sanitizeDriverLocation = (rawLoc) => {
+        if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
+        return {
+          lat: typeof rawLoc.lat === 'number' ? rawLoc.lat : (rawLoc.lat ? Number(rawLoc.lat) || null : null),
+          lng: typeof rawLoc.lng === 'number' ? rawLoc.lng : (rawLoc.lng ? Number(rawLoc.lng) || null : null),
+          updatedAt: rawLoc.updatedAt ? new Date(rawLoc.updatedAt) : null
+        };
+      };
+
+      const existingDriverLoc = order.selfDeliveryDetails?.driverLocation;
+      const inputDriverLoc = selfDeliveryDetails.driverLocation !== undefined
+        ? sanitizeDriverLocation(selfDeliveryDetails.driverLocation)
+        : sanitizeDriverLocation(existingDriverLoc);
+
+      const mergedSelf = {
+        deliveryPersonName: selfDeliveryDetails.deliveryPersonName || order.selfDeliveryDetails?.deliveryPersonName || "",
+        deliveryPersonPhone: selfDeliveryDetails.deliveryPersonPhone || order.selfDeliveryDetails?.deliveryPersonPhone || "",
+        vehicleNumber: selfDeliveryDetails.vehicleNumber || order.selfDeliveryDetails?.vehicleNumber || "",
         deliveryPartnerToken: tokenVal,
         trackingUrl: trackingLink,
-        deliveryOtp: otpVal
+        deliveryOtp: otpVal,
+        driverLocation: inputDriverLoc
       };
+      order.selfDeliveryDetails = mergedSelf;
     }
 
     if (status) {

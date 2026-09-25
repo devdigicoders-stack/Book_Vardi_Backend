@@ -116,7 +116,8 @@ export const authenticateSeller = async (req, res, next) => {
         $or: [
           { phone: cleanPhone },
           { phone: `+91${cleanPhone}` },
-          { phone: `+91 ${cleanPhone}` }
+          { phone: `+91 ${cleanPhone}` },
+          { phone: { $regex: cleanPhone } }
         ]
       }).select("-password -documents");
     }
@@ -138,7 +139,8 @@ export const authenticateSeller = async (req, res, next) => {
         $or: [
           { phone: cleanPhone },
           { phone: `+91${cleanPhone}` },
-          { phone: `+91 ${cleanPhone}` }
+          { phone: `+91 ${cleanPhone}` },
+          { phone: { $regex: cleanPhone } }
         ]
       });
     }
