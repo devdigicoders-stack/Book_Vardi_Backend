@@ -180,11 +180,16 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
-    // Mark order as Delivered
+    // Mark order as Delivered and update paymentStatus to paid upon OTP verification
     const previousStatus = order.overallStatus;
+    const isCodOrder = String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid";
+    const deliveryExecName = order.selfDeliveryDetails?.deliveryPersonName || "Delivery Executive";
+
     order.overallStatus = "Delivered";
     order.status = "Delivered";
     order.paymentStatus = "paid";
+    order.codCollectedAt = new Date();
+    order.codCollectedBy = deliveryExecName;
 
     if (Array.isArray(order.items)) {
       order.items.forEach((it) => {
@@ -196,8 +201,10 @@ export const verifyDeliveryOtp = async (req, res) => {
     order.timeline = order.timeline || [];
     order.timeline.push({
       status: "delivered",
-      title: "Order Delivered via Self-Delivery",
-      description: `Order successfully delivered by ${order.selfDeliveryDetails?.deliveryPersonName || "Delivery Executive"} and customer OTP verified.`,
+      title: isCodOrder ? "COD Payment Collected & Order Delivered" : "Order Delivered via OTP Verification",
+      description: isCodOrder
+        ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
+        : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`,
       timestamp: new Date(),
       updatedBy: "Delivery Executive"
     });

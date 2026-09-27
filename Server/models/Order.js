@@ -8,6 +8,12 @@ const orderItemSchema = new mongoose.Schema({
   sellerId: {
     type: mongoose.Schema.Types.Mixed
   },
+  sellerName: { type: String, default: "" },
+  storeName: { type: String, default: "" },
+  gst: { type: Number, default: 5 },
+  gstPercent: { type: Number, default: 5 },
+  gstPercentage: { type: Number, default: 5 },
+  gstRate: { type: Number, default: 5 },
   name: { type: String, required: true },
   price: { type: Number, required: true },
   image: { type: String, default: "" },
@@ -147,6 +153,49 @@ const orderSchema = new mongoose.Schema(
     cancellationReason: {
       type: String,
       default: ""
+    },
+    cancelledBy: {
+      type: String,
+      default: ""
+    },
+    refundStatus: {
+      type: String,
+      default: ""
+    },
+    cancelledAt: {
+      type: Date,
+      default: null
+    },
+    deliveredAt: {
+      type: Date,
+      default: null
+    },
+    codCollectedAt: {
+      type: Date,
+      default: null
+    },
+    codCollectedBy: {
+      type: String,
+      default: ""
+    },
+    returnRequest: {
+      type: {
+        type: String,
+        enum: ["return", "exchange", null],
+        default: null
+      },
+      reason: { type: String, default: "" },
+      comment: { type: String, default: "" },
+      exchangeSize: { type: String, default: "" },
+      exchangeColor: { type: String, default: "" },
+      refundMethod: { type: String, default: "Original Payment Method" },
+      requestedAt: { type: Date, default: null },
+      status: {
+        type: String,
+        enum: ["requested", "approved", "rejected", "pickup_scheduled", "refund_processed", "exchanged"],
+        default: "requested"
+      },
+      returnEligibleUntil: { type: Date, default: null }
     },
     timeline: [timelineEventSchema],
     address: { type: String },

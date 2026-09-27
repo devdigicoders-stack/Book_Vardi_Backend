@@ -248,6 +248,11 @@ export const getSellerOrders = async (req, res) => {
         status: formattedStatus,
         paymentMethod: o.paymentMethod || "UPI",
         paymentStatus: o.paymentStatus || "Paid",
+        cancellationReason: o.cancellationReason || "",
+        cancelledBy: o.cancelledBy || (o.cancellationReason ? "Customer" : ""),
+        cancelledAt: o.cancelledAt || null,
+        refundStatus: o.refundStatus || "",
+        timeline: o.timeline || [],
         shippingAddress: typeof o.shippingAddress === "string"
           ? o.shippingAddress
           : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
@@ -569,6 +574,24 @@ export const downloadSellerInvoice = async (req, res) => {
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
+    }
+
+    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed
+    const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const confirmedStatuses = [
+      "confirmed",
+      "packed",
+      "shipped",
+      "out_for_delivery",
+      "out for delivery",
+      "delivered",
+      "completed"
+    ];
+
+    if (!confirmedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: "Tax Invoice & Certificate can only be generated strictly after the order is confirmed."
+      });
     }
 
     const { generateTaxInvoicePDF } = await import("../services/invoiceService.js");

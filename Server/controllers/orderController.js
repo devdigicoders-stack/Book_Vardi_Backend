@@ -214,6 +214,7 @@ export const getMyOrders = async (req, res) => {
       id: ord.id || ord.orderId || ord._id,
       date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
       status: ord.overallStatus || ord.status || 'Processing',
+      overallStatus: ord.overallStatus || ord.status || 'Processing',
       trackingNumber: ord.trackingNumber || `BLUEDART-${Math.floor(10000000 + Math.random() * 90000000)}`,
       itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
       items: ord.items || [],
@@ -224,7 +225,12 @@ export const getMyOrders = async (req, res) => {
       total: ord.total || ord.totalAmount || 0,
       shippingAddress: ord.shippingAddress || { street: ord.address || '' },
       paymentMethod: ord.paymentMethod || 'UPI',
-      estimatedDelivery: ord.estimatedDelivery || '3-5 Business Days'
+      paymentStatus: ord.paymentStatus || 'paid',
+      estimatedDelivery: ord.estimatedDelivery || '3-5 Business Days',
+      cancellationReason: ord.cancellationReason || '',
+      cancelledBy: ord.cancelledBy || '',
+      cancelledAt: ord.cancelledAt || null,
+      refundStatus: ord.refundStatus || ''
     }));
 
     return res.json(formattedOrders);
@@ -308,7 +314,7 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ message: "Cannot place order with empty items" });
     }
 
-    // Auto-populate productId, sellerId, and image on order items from Product collection
+    // Auto-populate productId, sellerId, sellerName, storeName, and GST on order items from Product & User collections
     for (const item of orderItems) {
       let prod = null;
       const searchId = item.productId || item.id || item._id;
@@ -327,45 +333,132 @@ export const createOrder = async (req, res) => {
         });
       }
 
+      let sellerStoreName = item.sellerName || item.storeName || item.sellerStoreName || "";
+
+      const isPlaceholder = (str) => {
+        if (!str || typeof str !== "string") return true;
+        const s = str.trim().toLowerCase();
+        return (
+          s === "" ||
+          s === "bookvardimerchant" ||
+          s === "bookvardi merchant" ||
+          s === "book vardi partner merchant" ||
+          s === "partner merchant" ||
+          s === "unknown seller" ||
+          s === "new merchant" ||
+          s === "merchant store" ||
+          s === "n/a"
+        );
+      };
+
+      if (isPlaceholder(sellerStoreName)) {
+        sellerStoreName = "";
+      }
+
       if (prod) {
         if (!item.productId) item.productId = prod._id;
         if (!item.id) item.id = prod._id;
         if (!item.sellerId && prod.sellerId) item.sellerId = prod.sellerId;
         if (!item.image && prod.images && prod.images.length > 0) item.image = prod.images[0];
+        if (!sellerStoreName && prod.sellerStoreName && !isPlaceholder(prod.sellerStoreName)) sellerStoreName = prod.sellerStoreName;
+        if (!sellerStoreName && prod.storeName && !isPlaceholder(prod.storeName)) sellerStoreName = prod.storeName;
+        if (!sellerStoreName && prod.sellerName && !isPlaceholder(prod.sellerName)) sellerStoreName = prod.sellerName;
+        if (!sellerStoreName && prod.legalBusinessName && !isPlaceholder(prod.legalBusinessName)) sellerStoreName = prod.legalBusinessName;
       }
+
+      if (!sellerStoreName && item.sellerId) {
+        try {
+          let sellerUser = null;
+          if (mongoose.Types.ObjectId.isValid(item.sellerId)) {
+            sellerUser = await User.findById(item.sellerId);
+          }
+          if (!sellerUser && typeof item.sellerId === "string") {
+            sellerUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] });
+          }
+          if (sellerUser) {
+            const fetchedName = sellerUser.storeName || sellerUser.name || sellerUser.legalName || sellerUser.ownerFullName || "";
+            if (!isPlaceholder(fetchedName)) {
+              sellerStoreName = fetchedName;
+            }
+          }
+        } catch (e) {}
+      }
+
+      if (!sellerStoreName) {
+        sellerStoreName = "BookVardi Verified Seller";
+      }
+
+      item.sellerName = sellerStoreName;
+      item.storeName = sellerStoreName;
+
+      // Attach dynamic seller commission rate
+      let itemCommRate = item.commissionRate ?? item.sellerCommissionRate ?? item.commissionPercentage;
+      if (itemCommRate === undefined || itemCommRate === null || isNaN(Number(itemCommRate))) {
+        if (prod && (prod.commissionRate !== undefined || prod.sellerCommissionRate !== undefined)) {
+          itemCommRate = prod.commissionRate ?? prod.sellerCommissionRate;
+        }
+      }
+      if ((itemCommRate === undefined || itemCommRate === null || isNaN(Number(itemCommRate))) && item.sellerId) {
+        try {
+          let sUser = await User.findById(item.sellerId).catch(() => null);
+          if (!sUser && typeof item.sellerId === "string") {
+            sUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
+          }
+          if (sUser && (sUser.commissionRate !== undefined || sUser.commissionPercentage !== undefined)) {
+            itemCommRate = sUser.commissionRate ?? sUser.commissionPercentage;
+          }
+        } catch (e) {}
+      }
+      const resolvedCommRate = (itemCommRate !== undefined && itemCommRate !== null && !isNaN(Number(itemCommRate))) ? Number(itemCommRate) : 8;
+      item.commissionRate = resolvedCommRate;
+      item.sellerCommissionRate = resolvedCommRate;
+
+      // Ensure explicit product-level GST rate set by seller is strictly preserved
+      const explicitGst = item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? item.taxRate ?? prod?.gstPercent ?? prod?.gstRate ?? prod?.gst ?? prod?.gstPercentage ?? prod?.taxRate;
+      let resolvedGst = 5;
+      if (explicitGst !== undefined && explicitGst !== null && String(explicitGst).trim() !== "" && !isNaN(Number(explicitGst))) {
+        resolvedGst = Number(explicitGst);
+      }
+      item.gst = resolvedGst;
+      item.gstPercent = resolvedGst;
+      item.gstPercentage = resolvedGst;
+      item.gstRate = resolvedGst;
     }
 
     const orderIdVal = id || orderId || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    const newOrder = new Order({
-      orderId: orderIdVal,
-      id: orderIdVal,
-      userId: resolvedUserId,
-      customer: customer || {
-        name: resolvedName,
-        email: resolvedEmail,
-        phone: resolvedPhone
-      },
-      items: orderItems,
-      subtotal: subtotal || 0,
-      shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
-      shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
-      discount: discount || discountAmount || 0,
-      discountAmount: discountAmount || discount || 0,
-      totalAmount: calculatedTotal,
-      total: calculatedTotal,
-      date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-      shippingAddress: shippingAddress || { street: address || "" },
-      paymentMethod: paymentMethod || "UPI",
-      paymentStatus: "paid",
-      overallStatus: "Processing",
-      status: "Processing",
-      trackingNumber: trackingNumber || `BLUEDART-${Math.floor(10000000 + Math.random() * 90000000)}`,
-      address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
-      product: product || (orderItems[0]?.name || ""),
-      quantity: quantity || (orderItems[0]?.quantity || 1),
-      amount: calculatedTotal
-    });
+      const isCodOrder = paymentMethod && String(paymentMethod).toUpperCase().includes("COD");
+      const initialPaymentStatus = isCodOrder ? "pending" : "paid";
+
+      const newOrder = new Order({
+        orderId: orderIdVal,
+        id: orderIdVal,
+        userId: resolvedUserId,
+        customer: customer || {
+          name: resolvedName,
+          email: resolvedEmail,
+          phone: resolvedPhone
+        },
+        items: orderItems,
+        subtotal: subtotal || 0,
+        shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
+        shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
+        discount: discount || discountAmount || 0,
+        discountAmount: discountAmount || discount || 0,
+        totalAmount: calculatedTotal,
+        total: calculatedTotal,
+        date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+        shippingAddress: shippingAddress || { street: address || "" },
+        paymentMethod: paymentMethod || "UPI",
+        paymentStatus: initialPaymentStatus,
+        overallStatus: "Processing",
+        status: "Processing",
+        trackingNumber: trackingNumber || `BLUEDART-${Math.floor(10000000 + Math.random() * 90000000)}`,
+        address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
+        product: product || (orderItems[0]?.name || ""),
+        quantity: quantity || (orderItems[0]?.quantity || 1),
+        amount: calculatedTotal
+      });
 
     await newOrder.save();
 
@@ -414,23 +507,31 @@ export const trackOrder = async (req, res) => {
     const currentStatus = order.overallStatus;
     const currentStepIndex = standardSteps.findIndex((s) => s.key === currentStatus);
 
+    const isCancelled = order.overallStatus === "cancelled" || order.status === "cancelled";
+
     const trackingSummary = {
       orderId: order.orderId,
       orderDbId: order._id,
       createdAt: order.createdAt,
       estimatedDeliveryDate: order.estimatedDeliveryDate,
-      currentStatus: order.overallStatus,
+      currentStatus: order.overallStatus || order.status,
       paymentStatus: order.paymentStatus,
       paymentMethod: order.paymentMethod,
       shippingAddress: order.shippingAddress || { street: order.address },
       totalAmount: order.totalAmount,
-      isCancelled: order.overallStatus === "cancelled",
+      isCancelled,
+      trackingStatus: isCancelled ? "terminated" : "active",
+      cancellationReason: order.cancellationReason || "",
+      cancelledBy: order.cancelledBy || "",
+      cancelledAt: order.cancelledAt || null,
+      refundStatus: order.refundStatus || "",
+      message: isCancelled ? "Fulfillment and shipping tracking closed due to order cancellation." : "Tracking active",
       isDelivered: order.overallStatus === "delivered",
-      currentStepIndex: currentStepIndex > -1 ? currentStepIndex : (currentStatus === "processing" ? 1 : 0),
+      currentStepIndex: isCancelled ? -1 : (currentStepIndex > -1 ? currentStepIndex : (currentStatus === "processing" ? 1 : 0)),
       steps: standardSteps.map((step, idx) => ({
         ...step,
-        isCompleted: currentStepIndex >= idx,
-        isCurrent: currentStepIndex === idx
+        isCompleted: isCancelled ? false : currentStepIndex >= idx,
+        isCurrent: isCancelled ? false : currentStepIndex === idx
       })),
       timeline: order.timeline.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)),
       items: order.items.map((item) => ({
@@ -573,6 +674,24 @@ export const downloadInvoice = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed
+    const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const confirmedStatuses = [
+      "confirmed",
+      "packed",
+      "shipped",
+      "out_for_delivery",
+      "out for delivery",
+      "delivered",
+      "completed"
+    ];
+
+    if (!confirmedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: "Tax Invoice & Certificate can only be generated strictly after the order is confirmed by the seller or admin."
+      });
+    }
+
     // Access control: User who placed order, Admin, or Seller involved in order
     if (req.user) {
       const isOwner = order.userId && order.userId.toString() === req.user.id;
@@ -588,6 +707,11 @@ export const downloadInvoice = async (req, res) => {
       }
     }
 
+    const orderStatusVal = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    if (orderStatusVal === "cancelled") {
+      return res.status(400).json({ message: "Tax Invoice is unavailable for cancelled orders." });
+    }
+
     const { generateTaxInvoicePDF } = await import("../services/invoiceService.js");
 
     const filename = `Invoice_${order.orderId || order._id}.pdf`;
@@ -600,5 +724,164 @@ export const downloadInvoice = async (req, res) => {
   } catch (error) {
     console.error("Download invoice error:", error);
     res.status(500).json({ message: "Failed to generate invoice", error: error.message });
+  }
+};
+
+// 8. Cancel Order Endpoint (Customer / User initiated before shipment)
+export const cancelOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, comment } = req.body;
+
+    const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
+    const query = isMongoId ? { _id: id } : { $or: [{ orderId: id }, { id: id }] };
+    const order = await Order.findOne(query);
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const currentStatus = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const cancellableStatuses = ["placed", "pending", "confirmed", "processing", "packed"];
+
+    if (!cancellableStatuses.includes(currentStatus)) {
+      return res.status(400).json({
+        message: `Order cannot be cancelled because it is currently in '${order.overallStatus || order.status}' state.`
+      });
+    }
+
+    const cancelledByName = req.user?.name || req.body?.cancelledBy || order.customer?.name || "Customer";
+
+    order.overallStatus = "cancelled";
+    order.status = "cancelled";
+    order.cancellationReason = reason || comment || "Cancelled by customer";
+    order.cancelledBy = cancelledByName;
+    order.cancelledAt = new Date();
+
+    const isPaidOnline = order.paymentStatus === "paid" || (order.paymentMethod && String(order.paymentMethod).toUpperCase() !== "COD");
+    if (isPaidOnline) {
+      order.refundStatus = "Refund Initiated (48 Working Hours)";
+    } else {
+      order.refundStatus = "N/A (COD Order)";
+    }
+
+    // Restock item inventory in DB
+    try {
+      for (const item of order.items) {
+        await incrementItemStock(item);
+      }
+    } catch (stockErr) {
+      console.warn("⚠️ Stock auto-increment warning on cancel:", stockErr.message);
+    }
+
+    // Append timeline checkpoint
+    order.timeline.push({
+      status: "cancelled",
+      title: "Order Cancelled",
+      description: `Order cancelled by customer (${cancelledByName}). Reason: ${order.cancellationReason}${isPaidOnline ? ' • Online refund initiated (within 48 working hours).' : ''}`,
+      timestamp: new Date(),
+      updatedBy: "Customer"
+    });
+
+    await order.save();
+    return res.json({ success: true, message: "Order cancelled successfully", order });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to cancel order", error: error.message });
+  }
+};
+
+// 9. Request Return or Exchange Endpoint (Customer / User initiated within return window)
+export const requestReturnExchange = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      type, // "return" | "exchange"
+      reason,
+      comment,
+      exchangeSize,
+      exchangeColor,
+      refundMethod
+    } = req.body;
+
+    if (!type || !["return", "exchange"].includes(type)) {
+      return res.status(400).json({ message: "Request type must be either 'return' or 'exchange'" });
+    }
+
+    const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
+    const query = isMongoId ? { _id: id } : { $or: [{ orderId: id }, { id: id }] };
+    const order = await Order.findOne(query);
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const currentStatus = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    if (currentStatus !== "delivered" && currentStatus !== "completed") {
+      return res.status(400).json({ message: "Return or Exchange is only available for delivered orders." });
+    }
+
+    // Check product return window days & returnability
+    let returnWindowDays = 7;
+    let isReturnable = true;
+
+    if (order.items && order.items.length > 0) {
+      const firstItem = order.items[0];
+      const searchId = firstItem.productId || firstItem.id;
+      if (searchId) {
+        const prod = await Product.findOne({ $or: [{ _id: searchId }, { id: searchId }] });
+        if (prod) {
+          if (prod.isReturnable === false) isReturnable = false;
+          if (prod.returnWindowDays && Number(prod.returnWindowDays) > 0) {
+            returnWindowDays = Number(prod.returnWindowDays);
+          }
+        }
+      }
+    }
+
+    if (!isReturnable) {
+      return res.status(400).json({ message: "This product is marked as non-returnable." });
+    }
+
+    const deliveredDate = order.deliveredAt || new Date(order.updatedAt || order.createdAt);
+    const returnEligibleUntil = new Date(deliveredDate.getTime() + returnWindowDays * 24 * 60 * 60 * 1000);
+
+    if (new Date() > returnEligibleUntil) {
+      return res.status(400).json({
+        message: `Return/Exchange window of ${returnWindowDays} days expired on ${returnEligibleUntil.toLocaleDateString('en-IN')}.`
+      });
+    }
+
+    const newOverallStatus = type === "exchange" ? "exchange_requested" : "return_requested";
+    order.overallStatus = newOverallStatus;
+    order.status = newOverallStatus;
+
+    order.returnRequest = {
+      type,
+      reason: reason || "Customer request",
+      comment: comment || "",
+      exchangeSize: exchangeSize || "",
+      exchangeColor: exchangeColor || "",
+      refundMethod: refundMethod || "Original Payment Method",
+      requestedAt: new Date(),
+      status: "requested",
+      returnEligibleUntil
+    };
+
+    order.timeline.push({
+      status: newOverallStatus,
+      title: type === "exchange" ? "Exchange Requested" : "Return Requested",
+      description: `Customer requested ${type}. Reason: ${reason || 'N/A'}${exchangeSize ? ` (Requested Size: ${exchangeSize})` : ''}`,
+      timestamp: new Date(),
+      updatedBy: "Customer"
+    });
+
+    await order.save();
+    return res.json({
+      success: true,
+      message: `${type === 'exchange' ? 'Exchange' : 'Return'} request submitted successfully`,
+      order
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to submit return/exchange request", error: error.message });
   }
 };

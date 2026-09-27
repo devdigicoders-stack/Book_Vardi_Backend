@@ -130,17 +130,13 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     );
   }
 
-  // Helper to determine Product-level GST Rate (High Priority)
+  // Helper to determine Product-level GST Rate set by seller
   const getProductGstRate = (item) => {
     const explicitGst = item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? item.taxRate ?? item.productId?.gstPercent ?? item.productId?.gstRate ?? item.productId?.gst ?? item.productId?.gstPercentage ?? item.productId?.taxRate;
-    if (explicitGst !== undefined && explicitGst !== null && !isNaN(Number(explicitGst))) {
+    if (explicitGst !== undefined && explicitGst !== null && String(explicitGst).trim() !== '' && !isNaN(Number(explicitGst))) {
       return Number(explicitGst);
     }
-    const category = (item.category || item.productId?.category || '').toLowerCase();
-    if (category.includes('book')) return 0;
-    if (category.includes('uniform') || category.includes('clothing')) return 5;
-    if (category.includes('shoe')) return 12;
-    return 18;
+    return 5;
   };
 
   let y = tableTop + 26;
@@ -148,43 +144,60 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   let totalTaxableValue = 0;
   let totalTaxAmount = 0;
 
+  // Helper to resolve seller name per product item
+  const getItemSellerName = (item) => {
+    if (item.sellerId && typeof item.sellerId === "object") {
+      const sName = item.sellerId.storeName || item.sellerId.name || item.sellerId.sellerName || item.sellerId.legalName;
+      if (sName) return sName;
+    }
+    if (item.sellerName) return item.sellerName;
+    if (item.storeName) return item.storeName;
+    if (item.seller) return typeof item.seller === "string" ? item.seller : (item.seller.storeName || item.seller.name);
+    return sellerName;
+  };
+
   itemsToRender.forEach((item, index) => {
     const itemTotal = (item.finalPrice || item.price || 0) * (item.quantity || 1);
     subtotal += itemTotal;
     const gstRate = getProductGstRate(item);
+    let itemTax = 0;
 
     if (gstRate > 0) {
       const itemTaxable = itemTotal / (1 + gstRate / 100);
-      const itemTax = itemTotal - itemTaxable;
+      itemTax = itemTotal - itemTaxable;
       totalTaxableValue += itemTaxable;
       totalTaxAmount += itemTax;
     } else {
       totalTaxableValue += itemTotal;
     }
 
+    const itemSeller = getItemSellerName(item);
+    const itemDescText = `${item.name || "Product Item"}\nSold by: ${itemSeller}`;
     const variantDetails = [
       item.size ? `Size: ${item.size}` : "",
       item.age ? `Age: ${item.age}` : "",
-      `GST: ${gstRate}%`
+      `GST: ${gstRate}% (₹${itemTax.toFixed(2)})`
     ]
       .filter(Boolean)
-      .join(", ") || "Standard";
+      .join("\n");
 
     doc
       .fontSize(9)
       .font("Helvetica")
       .fillColor(primaryColor)
       .text(`${index + 1}`, 45, y)
-      .text(item.name || "Product Item", 65, y, { width: 180 })
+      .text(itemDescText, 65, y, { width: 175 })
       .fillColor(mutedColor)
-      .text(variantDetails, 250, y, { width: 90 })
+      .fontSize(8)
+      .text(variantDetails, 250, y, { width: 95 })
       .fillColor(primaryColor)
+      .fontSize(9)
       .text(`${item.quantity || 1}`, 345, y, { align: "center" })
       .text(`₹${(item.finalPrice || item.price || 0).toLocaleString("en-IN")}`, 390, y, { align: "right" })
       .font("Helvetica-Bold")
       .text(`₹${itemTotal.toLocaleString("en-IN")}`, 480, y, { align: "right" });
 
-    y += 24;
+    y += 32;
 
     // Row separator
     doc.strokeColor("#f1f5f9").lineWidth(0.5).moveTo(40, y - 4).lineTo(555, y - 4).stroke();
@@ -195,43 +208,127 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, y).lineTo(555, y).stroke();
   y += 10;
 
+  // Zero-Hardcode Dynamic State Parser
+  const parseStateKeyFromText = (text) => {
+    if (!text) return '';
+    const str = String(text).toLowerCase();
+    const states = [
+      { key: 'uttarpradesh', aliases: ['uttar pradesh', 'uttarpradesh', 'up', 'noida', 'lucknow', 'kanpur', 'ghaziabad', 'agra', 'varanasi', 'prayagraj'] },
+      { key: 'delhi', aliases: ['delhi', 'new delhi', 'nct of delhi', 'nct', 'dl'] },
+      { key: 'maharashtra', aliases: ['maharashtra', 'mumbai', 'pune', 'nagpur', 'thane', 'mh'] },
+      { key: 'karnataka', aliases: ['karnataka', 'bangalore', 'bengaluru', 'mysore', 'ka'] },
+      { key: 'tamilnadu', aliases: ['tamil nadu', 'tamilnadu', 'chennai', 'coimbatore', 'tn'] },
+      { key: 'haryana', aliases: ['haryana', 'gurugram', 'gurgaon', 'faridabad', 'hr'] },
+      { key: 'rajasthan', aliases: ['rajasthan', 'jaipur', 'jodhpur', 'udaipur', 'rj'] },
+      { key: 'westbengal', aliases: ['west bengal', 'westbengal', 'kolkata', 'wb'] },
+      { key: 'gujarat', aliases: ['gujarat', 'ahmedabad', 'surat', 'vadodara', 'gj'] },
+      { key: 'punjab', aliases: ['punjab', 'ludhiana', 'amritsar', 'pb'] },
+      { key: 'madhyapradesh', aliases: ['madhya pradesh', 'madhyapradesh', 'bhopal', 'indore', 'mp'] },
+      { key: 'bihar', aliases: ['bihar', 'patna', 'br'] },
+      { key: 'telangana', aliases: ['telangana', 'hyderabad', 'tg', 'ts'] },
+      { key: 'andhrapradesh', aliases: ['andhra pradesh', 'andhrapradesh', 'visakhapatnam', 'ap'] },
+      { key: 'kerala', aliases: ['kerala', 'kochi', 'thiruvananthapuram', 'kl'] },
+      { key: 'uttarakhand', aliases: ['uttarakhand', 'dehradun', 'uk'] }
+    ];
+
+    for (const st of states) {
+      for (const alias of st.aliases) {
+        if (new RegExp(`\\b${alias}\\b`, 'i').test(str)) {
+          return st.key;
+        }
+      }
+    }
+    return str.trim();
+  };
+
+  const getDynamicState = (obj, fallbackText) => {
+    if (obj && typeof obj === 'object') {
+      if (obj.state && String(obj.state).trim()) return parseStateKeyFromText(obj.state);
+      const combined = `${obj.street || ''} ${obj.addressLine || ''} ${obj.city || ''} ${obj.address || ''}`;
+      if (combined.trim()) return parseStateKeyFromText(combined);
+    }
+    return parseStateKeyFromText(fallbackText || '');
+  };
+
+  const sellerStateKey = getDynamicState(sellerInfo, `${sellerInfo?.city || ''} ${sellerInfo?.address || ''}`);
+  const customerStateKey = getDynamicState(address, `${street} ${cityState}`);
+
+  const isSameState = !sellerStateKey || !customerStateKey || sellerStateKey === customerStateKey;
+  const sellerStateStr = sellerInfo?.state || sellerInfo?.city || sellerStateKey || "Seller Location";
+  const customerStateStr = address?.state || address?.city || customerStateKey || "Customer Location";
+
   const taxableValue = Math.round(totalTaxableValue * 100) / 100;
   const totalTax = Math.round(totalTaxAmount * 100) / 100;
   const cgst = Math.round((totalTax / 2) * 100) / 100;
   const sgst = cgst;
 
   // Tax Breakdown (Left)
-  doc
-    .fontSize(8)
-    .font("Helvetica-Bold")
-    .fillColor(primaryColor)
-    .text("GST Tax Breakdown (Product Priority):", 45, y)
-    .font("Helvetica")
-    .fillColor(mutedColor)
-    .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
-    .text(`CGST (Split): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
-    .text(`SGST (Split): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
-    .text(`Total Tax: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+  if (isSameState) {
+    doc
+      .fontSize(8)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text("GST Tax Breakdown (Intra-State):", 45, y)
+      .font("Helvetica")
+      .fillColor(mutedColor)
+      .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
+      .text(`CGST (Central 50%): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
+      .text(`SGST (State 50%): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
+      .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+  } else {
+    doc
+      .fontSize(8)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text("GST Tax Breakdown (Inter-State):", 45, y)
+      .font("Helvetica")
+      .fillColor(mutedColor)
+      .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
+      .text(`IGST (Integrated 100%): ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 26)
+      .text(`Supply: ${sellerStateStr} -> ${customerStateStr}`, 45, y + 38)
+      .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+  }
 
   // Financial Summary (Right)
+  const shippingCost = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
+  const discountAmount = Number(order.discount ?? order.discountAmount ?? 0);
+  const calculatedGrandTotal = Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount));
+
+  let rightY = y;
   doc
     .fontSize(9)
     .font("Helvetica")
     .fillColor(mutedColor)
-    .text("Subtotal:", 380, y, { align: "right" })
-    .text(`₹${subtotal.toLocaleString("en-IN")}`, 480, y, { align: "right" })
-    .text("Delivery Charges:", 380, y + 16, { align: "right" })
-    .text("FREE", 480, y + 16, { align: "right" });
+    .text("Subtotal:", 350, rightY, { align: "right", width: 120 })
+    .text(`₹${subtotal.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+
+  rightY += 14;
+  if (discountAmount > 0) {
+    doc
+      .text("Offer / Coupon:", 350, rightY, { align: "right", width: 120 })
+      .fillColor("#047857") // Emerald green
+      .text(`-₹${discountAmount.toLocaleString("en-IN")}`, 480, rightY, { align: "right" })
+      .fillColor(mutedColor);
+  } else {
+    doc
+      .text("Offer / Coupon:", 350, rightY, { align: "right", width: 120 })
+      .text("Not Applied (₹0.00)", 480, rightY, { align: "right" });
+  }
+
+  rightY += 14;
+  doc
+    .text("Delivery Charges:", 350, rightY, { align: "right", width: 120 })
+    .text(shippingCost === 0 ? "Not Applied (FREE)" : `₹${shippingCost.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
 
   // Grand Total Banner
-  y += 36;
+  y += 45;
   doc.rect(360, y, 195, 26).fill("#e0f2fe"); // Light sky blue
   doc
     .fontSize(11)
     .font("Helvetica-Bold")
     .fillColor(accentColor)
     .text("Grand Total:", 370, y + 7)
-    .text(`₹${subtotal.toLocaleString("en-IN")}`, 480, y + 7, { align: "right" });
+    .text(`₹${calculatedGrandTotal.toLocaleString("en-IN")}`, 480, y + 7, { align: "right" });
 
   // 7. FOOTER & DECLARATION
   const footerY = 730;

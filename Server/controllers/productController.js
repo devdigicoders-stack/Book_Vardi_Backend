@@ -415,14 +415,13 @@ export const createProduct = async (req, res) => {
     if (payload.sizes) payload.sizes = parseArray(payload.sizes);
     if (payload.ages) payload.ages = parseArray(payload.ages);
     if (payload.colors) payload.colors = parseArray(payload.colors);
-    if (payload.tags) payload.tags = parseArray(payload.tags);
-    if (payload.paymentMethodAllowed) {
-      const pMethod = payload.paymentMethodAllowed;
-      payload.paymentMethodsAllowed = pMethod === "COD_Only"
-        ? ["COD"]
-        : pMethod === "Online_Only"
-        ? ["Online"]
-        : ["COD", "Online"];
+    const explicitGstVal = payload.gst ?? payload.gstPercentage ?? payload.gstPercent ?? payload.gstRate;
+    if (explicitGstVal !== undefined && explicitGstVal !== null && String(explicitGstVal).trim() !== "" && !isNaN(Number(explicitGstVal))) {
+      const parsedGstVal = Number(explicitGstVal);
+      payload.gst = parsedGstVal;
+      payload.gstPercent = parsedGstVal;
+      payload.gstPercentage = parsedGstVal;
+      payload.gstRate = parsedGstVal;
     }
 
     if (Array.isArray(payload.sizeVariants) && payload.sizeVariants.length > 0) {
