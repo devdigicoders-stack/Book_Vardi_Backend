@@ -179,14 +179,19 @@ router.post("/bulk-order", async (req, res) => {
     const sanitizedRequirements = Array.isArray(requirements)
       ? requirements.map((reqItem) => ({
           category: reqItem.category || "General Bulk Procurement",
-          itemName: reqItem.itemName || "Bulk Item Demand",
+          itemName: reqItem.itemName || reqItem.name || "Bulk Item Demand",
           quantity: Number(reqItem.quantity) || 100,
-          sampleImage: reqItem.sampleImage || "",
+          budgetPerUnit: Number(reqItem.budgetPerUnit || reqItem.budgetUnit) || 0,
+          sellerPricePerUnit: Number(reqItem.sellerPricePerUnit || reqItem.sellerPrice) || 0,
+          sampleImage: reqItem.sampleImage || (Array.isArray(reqItem.sampleImages) ? reqItem.sampleImages[0] : ""),
+          sampleImages: Array.isArray(reqItem.sampleImages) ? reqItem.sampleImages : (reqItem.sampleImage ? [reqItem.sampleImage] : []),
+          customizations: reqItem.customizations || "",
           notes: reqItem.notes || ""
         }))
       : [];
 
     const totalQty = Number(totalQuantity) || sanitizedRequirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
+    const calculatedOverallBudget = Number(req.body.overallBudget) || sanitizedRequirements.reduce((sum, r) => sum + (r.quantity * r.budgetPerUnit), 0) || Number(targetBudgetPerKit) || 0;
 
     const bulkOrder = new SchoolBulkOrder({
       referenceId: refCode,
@@ -203,9 +208,10 @@ router.post("/bulk-order", async (req, res) => {
       pincode: pincode || "",
       requirements: sanitizedRequirements,
       totalQuantity: totalQty,
+      overallBudget: calculatedOverallBudget,
       targetDeliveryDate: targetDeliveryDate || "",
       logoEmbroideryRequired: Boolean(logoEmbroideryRequired),
-      targetBudgetPerKit: targetBudgetPerKit || "",
+      targetBudgetPerKit: String(calculatedOverallBudget || targetBudgetPerKit || ""),
       additionalNotes: additionalNotes || "",
       assignmentMode: req.body.assignmentMode || "broadcast",
       status: "published"
@@ -228,7 +234,8 @@ router.post("/bulk-order", async (req, res) => {
 import {
   getAdminSchoolOrders,
   distributeSchoolOrder,
-  approveSellerQuotation
+  approveSellerQuotation,
+  updateItemSellerPrices
 } from "../controllers/schoolBulkOrderController.js";
 
 // GET all School Bulk Orders (Admin view)
@@ -240,6 +247,9 @@ router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);
 
 // POST Admin Approve Specific Seller Quotation
 router.post("/bulk-orders/:id/approve-quote", approveSellerQuotation);
+
+// PATCH Update Item-Level Seller Offered Prices
+router.patch("/bulk-orders/:id/item-prices", updateItemSellerPrices);
 
 export default router;
 

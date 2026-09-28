@@ -217,13 +217,24 @@ export const getSellerOrders = async (req, res) => {
         0
       );
 
-      const rawStatus = (o.overallStatus || o.status || "Pending").toLowerCase();
+      const rawStatus = (o.overallStatus || o.status || "Pending").toLowerCase().trim();
       const formattedStatus =
         rawStatus === "delivered" || rawStatus === "completed" ? "Delivered" :
         rawStatus === "shipped" ? "Shipped" :
         rawStatus === "packed" ? "Packed" :
         rawStatus === "confirmed" ? "Confirmed" :
         rawStatus === "cancelled" ? "Cancelled" :
+        rawStatus === "return_requested" ? "Return Requested" :
+        rawStatus === "exchange_requested" ? "Exchange Requested" :
+        rawStatus === "return_approved" ? "Return Approved" :
+        rawStatus === "exchange_approved" ? "Exchange Approved" :
+        rawStatus === "return_rejected" ? "Return Rejected" :
+        rawStatus === "exchange_rejected" ? "Exchange Rejected" :
+        rawStatus === "pickup_scheduled" ? "Pickup Scheduled" :
+        rawStatus === "product_received" ? "Product Received" :
+        rawStatus === "refund_completed" || rawStatus === "refund_processed" ? "Refunded" :
+        rawStatus === "exchange_dispatched" ? "Exchange Dispatched" :
+        rawStatus === "exchanged" ? "Exchanged" :
         "Pending";
 
       return {
@@ -246,18 +257,26 @@ export const getSellerOrders = async (req, res) => {
         sellerSubtotal: computedTotal > 0 ? computedTotal : Number(o.totalAmount || o.subtotal || o.total || 0),
         itemsCount: orderItems.length,
         status: formattedStatus,
+        rawStatus: o.overallStatus || o.status || "Pending",
         paymentMethod: o.paymentMethod || "UPI",
         paymentStatus: o.paymentStatus || "Paid",
         cancellationReason: o.cancellationReason || "",
         cancelledBy: o.cancelledBy || (o.cancellationReason ? "Customer" : ""),
         cancelledAt: o.cancelledAt || null,
         refundStatus: o.refundStatus || "",
+        returnRequest: o.returnRequest || null,
+        refundDetails: o.refundDetails || o.returnRequest?.refundDetails || null,
         timeline: o.timeline || [],
         shippingAddress: typeof o.shippingAddress === "string"
           ? o.shippingAddress
           : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
-        trackingNumber: o.trackingNumber || `TRACK-${Math.floor(100000 + Math.random() * 900000)}`,
-        courierName: o.courierName || "Delhivery",
+        deliveryMode: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
+        deliveryType: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
+        trackingNumber: o.trackingNumber || orderItems[0]?.thirdPartyDetails?.trackingNumber || "",
+        courierName: o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || "",
+        trackingUrl: o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || "",
+        sellerDetails: o.sellerDetails || orderItems[0]?.sellerDetails || null,
+        selfDeliveryDetails: o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails || null,
         items: orderItems.map((item) => ({
           id: item._id || item.id,
           _id: item._id || item.id,
@@ -267,7 +286,12 @@ export const getSellerOrders = async (req, res) => {
           total: Number(item.total || (item.price * item.quantity) || 0),
           size: item.size || "",
           color: item.color || "",
-          image: item.image || ""
+          image: item.image || "",
+          status: item.status || formattedStatus,
+          deliveryType: item.deliveryType || o.deliveryMode || "",
+          selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
+          thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
+          sellerDetails: item.sellerDetails || o.sellerDetails || null
         }))
       };
     });
@@ -345,6 +369,57 @@ export const getSellerCustomers = async (req, res) => {
   }
 };
 
+const resolveCarrierTrackingUrl = (courier, tracking) => {
+  if (!tracking) return "";
+  const c = String(courier || "").toLowerCase().trim();
+  const cleanAwb = String(tracking).trim();
+  if (c.includes("delhivery")) {
+    return `https://www.delhivery.com/track/package/${cleanAwb}`;
+  }
+  if (c.includes("bluedart") || c.includes("blue dart")) {
+    return `https://www.bluedart.com/tracking?awb=${cleanAwb}`;
+  }
+  if (c.includes("dtdc")) {
+    return `https://www.dtdc.in/tracking/shipment-tracking.asp?awb=${cleanAwb}`;
+  }
+  if (c.includes("ekart")) {
+    return `https://ekartlogistics.com/shipmenttrack/${cleanAwb}`;
+  }
+  if (c.includes("indiapost") || c.includes("speedpost") || c.includes("india post")) {
+    return `https://www.indiapost.gov.in/_layouts/15/dpt.cept.tracking/trackconsignment.aspx`;
+  }
+  return `https://track.shiprocket.in/tracking/${cleanAwb}`;
+};
+
+const resolveSellerProfileDetails = async (req, fallbackOrder) => {
+  const sellerId = resolveSellerId(req);
+  let sellerProfile = null;
+  if (sellerId) {
+    if (mongoose.Types.ObjectId.isValid(sellerId)) {
+      sellerProfile = await Seller.findById(sellerId).select("name storeName phone email address city");
+      if (!sellerProfile) {
+        sellerProfile = await User.findById(sellerId).select("name storeName phone email address city");
+      }
+    } else {
+      sellerProfile = await Seller.findOne({ $or: [{ phone: sellerId }, { email: sellerId }] }).select("name storeName phone email address city");
+      if (!sellerProfile) {
+        sellerProfile = await User.findOne({ $or: [{ phone: sellerId }, { email: sellerId }] }).select("name storeName phone email address city");
+      }
+    }
+  }
+
+  const existingSeller = fallbackOrder?.sellerDetails || {};
+  return {
+    sellerId: sellerId || existingSeller.sellerId || req.user?.id || null,
+    storeName: req.body.sellerDetails?.storeName || req.user?.storeName || sellerProfile?.storeName || sellerProfile?.name || existingSeller.storeName || "Partner Merchant",
+    sellerName: req.body.sellerDetails?.sellerName || req.user?.name || sellerProfile?.name || sellerProfile?.storeName || existingSeller.sellerName || "Partner Merchant",
+    phone: req.body.sellerDetails?.phone || req.user?.phone || sellerProfile?.phone || existingSeller.phone || "",
+    email: req.body.sellerDetails?.email || req.user?.email || sellerProfile?.email || existingSeller.email || "",
+    address: req.body.sellerDetails?.address || sellerProfile?.address || existingSeller.address || "",
+    city: req.body.sellerDetails?.city || sellerProfile?.city || existingSeller.city || ""
+  };
+};
+
 // 3. Update Order Item Status & Delivery Method by Seller
 export const updateSellerOrderItemStatus = async (req, res) => {
   try {
@@ -352,8 +427,10 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     const {
       status,
       deliveryType,
+      deliveryMode,
       selfDeliveryDetails,
-      thirdPartyDetails
+      thirdPartyDetails,
+      sellerDetails
     } = req.body;
 
     let order = null;
@@ -382,21 +459,42 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     }
 
     const formattedStatus = status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : item.status;
+    const resolvedMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
 
     if (status) item.status = formattedStatus;
-    if (deliveryType) item.deliveryType = deliveryType;
+    if (deliveryType || deliveryMode) item.deliveryType = resolvedMode;
+
+    const sellerInfo = await resolveSellerProfileDetails(req, order);
+    item.sellerDetails = sellerInfo;
+    item.storeName = sellerInfo.storeName;
+    item.sellerName = sellerInfo.sellerName;
+    item.sellerPhone = sellerInfo.phone;
 
     if (selfDeliveryDetails) {
+      const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
+      const tokenVal = String(
+        selfDeliveryDetails.deliveryPartnerToken ||
+        item.selfDeliveryDetails?.deliveryPartnerToken ||
+        `DLV-${Math.floor(100000 + Math.random() * 900000)}`
+      ).trim();
+      const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
+      const otpVal = selfDeliveryDetails.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+
       item.selfDeliveryDetails = {
         ...item.selfDeliveryDetails,
-        ...selfDeliveryDetails
+        ...selfDeliveryDetails,
+        deliveryPartnerToken: tokenVal,
+        trackingUrl: trackingLink,
+        deliveryOtp: otpVal
       };
     }
 
     if (thirdPartyDetails) {
+      const carrierUrl = thirdPartyDetails.trackingUrl || resolveCarrierTrackingUrl(thirdPartyDetails.courierName, thirdPartyDetails.trackingNumber);
       item.thirdPartyDetails = {
         ...item.thirdPartyDetails,
-        ...thirdPartyDetails
+        ...thirdPartyDetails,
+        trackingUrl: carrierUrl
       };
     }
 
@@ -404,9 +502,9 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     order.timeline.push({
       status: formattedStatus.toLowerCase(),
       title: `Item '${item.name}' ${formattedStatus}`,
-      description: `Item status updated to ${formattedStatus} by seller.`,
+      description: `Item status updated to ${formattedStatus} by seller (${sellerInfo.storeName}).`,
       timestamp: new Date(),
-      updatedBy: "Seller"
+      updatedBy: sellerInfo.storeName || "Seller"
     });
 
     await order.save();
@@ -424,7 +522,17 @@ export const updateSellerOrderItemStatus = async (req, res) => {
 export const updateSellerOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { status, trackingNumber, courierName, trackingUrl, estimatedDeliveryDate, deliveryType, selfDeliveryDetails } = req.body;
+    const {
+      status,
+      trackingNumber,
+      courierName,
+      trackingUrl,
+      estimatedDeliveryDate,
+      deliveryType,
+      deliveryMode,
+      selfDeliveryDetails,
+      sellerDetails
+    } = req.body;
 
     let order = null;
     if (mongoose.Types.ObjectId.isValid(orderId)) {
@@ -440,69 +548,31 @@ export const updateSellerOrderStatus = async (req, res) => {
       ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()
       : (order.status || "Pending");
 
-    if (order.items && Array.isArray(order.items)) {
-      order.items.forEach(item => {
-        if (status) item.status = formattedStatus;
-        if (deliveryType) item.deliveryType = deliveryType;
-        if (trackingNumber || courierName || trackingUrl || estimatedDeliveryDate) {
-          item.thirdPartyDetails = {
-            ...item.thirdPartyDetails,
-            courierName: courierName || item.thirdPartyDetails?.courierName,
-            trackingNumber: trackingNumber || item.thirdPartyDetails?.trackingNumber,
-            trackingUrl: trackingUrl || item.thirdPartyDetails?.trackingUrl,
-            estimatedDeliveryDate: estimatedDeliveryDate || item.thirdPartyDetails?.estimatedDeliveryDate
-          };
-        }
-        if (selfDeliveryDetails) {
-          const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
-          const tokenVal = String(
-            selfDeliveryDetails.deliveryPartnerToken ||
-            order.selfDeliveryDetails?.deliveryPartnerToken ||
-            item.selfDeliveryDetails?.deliveryPartnerToken ||
-            `DLV-${Math.floor(100000 + Math.random() * 900000)}`
-          ).trim();
-          const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-          const otpVal = selfDeliveryDetails.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+    const sellerInfo = await resolveSellerProfileDetails(req, order);
+    order.sellerDetails = sellerInfo;
 
-          const sanitizeDriverLocation = (rawLoc) => {
-            if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
-            return {
-              lat: typeof rawLoc.lat === 'number' ? rawLoc.lat : (rawLoc.lat ? Number(rawLoc.lat) || null : null),
-              lng: typeof rawLoc.lng === 'number' ? rawLoc.lng : (rawLoc.lng ? Number(rawLoc.lng) || null : null),
-              updatedAt: rawLoc.updatedAt ? new Date(rawLoc.updatedAt) : null
-            };
-          };
+    const resolvedMode = deliveryMode || deliveryType || (selfDeliveryDetails ? "self_delivery" : (courierName || trackingNumber ? "third_party" : (order.deliveryMode || "")));
+    order.deliveryMode = resolvedMode;
 
-          const existingDriverLoc = item.selfDeliveryDetails?.driverLocation;
-          const inputDriverLoc = selfDeliveryDetails.driverLocation !== undefined
-            ? sanitizeDriverLocation(selfDeliveryDetails.driverLocation)
-            : sanitizeDriverLocation(existingDriverLoc);
-
-          const mergedSelf = {
-            deliveryPersonName: selfDeliveryDetails.deliveryPersonName || item.selfDeliveryDetails?.deliveryPersonName || "",
-            deliveryPersonPhone: selfDeliveryDetails.deliveryPersonPhone || item.selfDeliveryDetails?.deliveryPersonPhone || "",
-            vehicleNumber: selfDeliveryDetails.vehicleNumber || item.selfDeliveryDetails?.vehicleNumber || "",
-            deliveryPartnerToken: tokenVal,
-            trackingUrl: trackingLink,
-            deliveryOtp: otpVal,
-            driverLocation: inputDriverLoc
-          };
-          item.selfDeliveryDetails = mergedSelf;
-          order.selfDeliveryDetails = mergedSelf;
-        }
-      });
+    let computedTrackingUrl = trackingUrl || "";
+    if (resolvedMode === "third_party") {
+      computedTrackingUrl = trackingUrl || resolveCarrierTrackingUrl(courierName || order.courierName, trackingNumber || order.trackingNumber);
+      if (trackingNumber) order.trackingNumber = trackingNumber;
+      if (courierName) order.courierName = courierName;
+      if (computedTrackingUrl) order.trackingUrl = computedTrackingUrl;
     }
 
-    if (selfDeliveryDetails) {
+    let mergedSelf = null;
+    if (resolvedMode === "self_delivery" || selfDeliveryDetails) {
       const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
       const tokenVal = String(
-        selfDeliveryDetails.deliveryPartnerToken ||
+        selfDeliveryDetails?.deliveryPartnerToken ||
         order.selfDeliveryDetails?.deliveryPartnerToken ||
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
-      
+      const otpVal = selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+
       const sanitizeDriverLocation = (rawLoc) => {
         if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
         return {
@@ -513,37 +583,65 @@ export const updateSellerOrderStatus = async (req, res) => {
       };
 
       const existingDriverLoc = order.selfDeliveryDetails?.driverLocation;
-      const inputDriverLoc = selfDeliveryDetails.driverLocation !== undefined
+      const inputDriverLoc = selfDeliveryDetails?.driverLocation !== undefined
         ? sanitizeDriverLocation(selfDeliveryDetails.driverLocation)
         : sanitizeDriverLocation(existingDriverLoc);
 
-      const mergedSelf = {
-        deliveryPersonName: selfDeliveryDetails.deliveryPersonName || order.selfDeliveryDetails?.deliveryPersonName || "",
-        deliveryPersonPhone: selfDeliveryDetails.deliveryPersonPhone || order.selfDeliveryDetails?.deliveryPersonPhone || "",
-        vehicleNumber: selfDeliveryDetails.vehicleNumber || order.selfDeliveryDetails?.vehicleNumber || "",
+      mergedSelf = {
+        deliveryPersonName: selfDeliveryDetails?.deliveryPersonName || order.selfDeliveryDetails?.deliveryPersonName || "",
+        deliveryPersonPhone: selfDeliveryDetails?.deliveryPersonPhone || order.selfDeliveryDetails?.deliveryPersonPhone || "",
+        vehicleNumber: selfDeliveryDetails?.vehicleNumber || order.selfDeliveryDetails?.vehicleNumber || "",
         deliveryPartnerToken: tokenVal,
         trackingUrl: trackingLink,
         deliveryOtp: otpVal,
         driverLocation: inputDriverLoc
       };
+
       order.selfDeliveryDetails = mergedSelf;
+      order.trackingUrl = trackingLink;
+      order.trackingNumber = tokenVal;
+    }
+
+    if (order.items && Array.isArray(order.items)) {
+      order.items.forEach(item => {
+        if (status) item.status = formattedStatus;
+        item.deliveryType = resolvedMode;
+        item.sellerDetails = sellerInfo;
+        item.sellerName = sellerInfo.sellerName;
+        item.storeName = sellerInfo.storeName;
+        item.sellerPhone = sellerInfo.phone;
+
+        if (resolvedMode === "third_party") {
+          item.thirdPartyDetails = {
+            ...item.thirdPartyDetails,
+            courierName: courierName || item.thirdPartyDetails?.courierName || order.courierName,
+            trackingNumber: trackingNumber || item.thirdPartyDetails?.trackingNumber || order.trackingNumber,
+            trackingUrl: computedTrackingUrl || item.thirdPartyDetails?.trackingUrl,
+            estimatedDeliveryDate: estimatedDeliveryDate || item.thirdPartyDetails?.estimatedDeliveryDate
+          };
+        } else if (resolvedMode === "self_delivery" && mergedSelf) {
+          item.selfDeliveryDetails = mergedSelf;
+        }
+      });
     }
 
     if (status) {
       order.status = formattedStatus;
       order.overallStatus = formattedStatus.toLowerCase();
     }
-    if (trackingNumber) order.trackingNumber = trackingNumber;
-    if (courierName) order.courierName = courierName;
 
     if (status) {
       order.timeline = order.timeline || [];
+      const deliveryDesc = resolvedMode === "self_delivery"
+        ? `Direct Self-Delivery by ${sellerInfo.storeName} ${mergedSelf?.deliveryPersonName ? `(Rider: ${mergedSelf.deliveryPersonName})` : ''}`
+        : (trackingNumber ? `Courier: ${courierName || order.courierName || 'Express'} (AWB: ${trackingNumber})` : 'Dispatched via Courier');
+
       order.timeline.push({
         status: formattedStatus.toLowerCase(),
         title: `Order ${formattedStatus}`,
-        description: `Status updated to ${formattedStatus} by seller. ${trackingNumber ? `Courier: ${courierName || 'Express'} (AWB: ${trackingNumber})` : ''}`,
+        description: `Status updated to ${formattedStatus} by seller (${sellerInfo.storeName}). ${deliveryDesc}`,
         timestamp: new Date(),
-        updatedBy: "Seller"
+        updatedBy: sellerInfo.storeName || "Seller"
       });
     }
 

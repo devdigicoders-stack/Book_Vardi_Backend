@@ -10,6 +10,19 @@ const orderItemSchema = new mongoose.Schema({
   },
   sellerName: { type: String, default: "" },
   storeName: { type: String, default: "" },
+  sellerPhone: { type: String, default: "" },
+  sellerEmail: { type: String, default: "" },
+  sellerAddress: { type: String, default: "" },
+  sellerCity: { type: String, default: "" },
+  sellerDetails: {
+    sellerId: { type: mongoose.Schema.Types.Mixed },
+    storeName: { type: String, default: "" },
+    sellerName: { type: String, default: "" },
+    phone: { type: String, default: "" },
+    email: { type: String, default: "" },
+    address: { type: String, default: "" },
+    city: { type: String, default: "" }
+  },
   gst: { type: Number, default: 5 },
   gstPercent: { type: Number, default: 5 },
   gstPercentage: { type: Number, default: 5 },
@@ -144,7 +157,38 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: "Processing"
     },
+    deliveryMode: {
+      type: String,
+      enum: ["third_party", "self_delivery", "pending_choice", ""],
+      default: ""
+    },
+    courierName: { type: String, default: "" },
+    carrier: { type: String, default: "" },
     trackingNumber: { type: String, default: "" },
+    trackingUrl: { type: String, default: "" },
+    sellerDetails: {
+      sellerId: { type: mongoose.Schema.Types.Mixed },
+      storeName: { type: String, default: "" },
+      sellerName: { type: String, default: "" },
+      phone: { type: String, default: "" },
+      email: { type: String, default: "" },
+      address: { type: String, default: "" },
+      city: { type: String, default: "" }
+    },
+    selfDeliveryDetails: {
+      deliveryPersonName: { type: String, default: "" },
+      deliveryPersonPhone: { type: String, default: "" },
+      vehicleNumber: { type: String, default: "" },
+      deliveryOtp: { type: String, default: "" },
+      deliveryPartnerToken: { type: String, default: "" },
+      trackingUrl: { type: String, default: "" },
+      driverLocation: {
+        lat: { type: Number, default: null },
+        lng: { type: Number, default: null },
+        updatedAt: { type: Date, default: null }
+      },
+      otpLastSentAt: { type: Date, default: null }
+    },
     estimatedDeliveryDate: {
       type: Date,
       default: () => new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
@@ -161,6 +205,15 @@ const orderSchema = new mongoose.Schema(
     refundStatus: {
       type: String,
       default: ""
+    },
+    refundDetails: {
+      method: { type: String, enum: ["UPI", "BANK", ""], default: "" },
+      upiId: { type: String, default: "" },
+      bankName: { type: String, default: "" },
+      accountNumber: { type: String, default: "" },
+      ifscCode: { type: String, default: "" },
+      accountHolderName: { type: String, default: "" },
+      submittedAt: { type: Date, default: null }
     },
     cancelledAt: {
       type: Date,
@@ -189,10 +242,24 @@ const orderSchema = new mongoose.Schema(
       exchangeSize: { type: String, default: "" },
       exchangeColor: { type: String, default: "" },
       refundMethod: { type: String, default: "Original Payment Method" },
+      refundDetails: {
+        method: { type: String, enum: ["UPI", "BANK", ""], default: "" },
+        upiId: { type: String, default: "" },
+        bankName: { type: String, default: "" },
+        accountNumber: { type: String, default: "" },
+        ifscCode: { type: String, default: "" },
+        accountHolderName: { type: String, default: "" }
+      },
       requestedAt: { type: Date, default: null },
+      updatedAt: { type: Date, default: null },
+      pickupDate: { type: Date, default: null },
+      rejectionReason: { type: String, default: "" },
+      refundTxnId: { type: String, default: "" },
+      exchangeAwb: { type: String, default: "" },
+      exchangeCourier: { type: String, default: "" },
       status: {
         type: String,
-        enum: ["requested", "approved", "rejected", "pickup_scheduled", "refund_processed", "exchanged"],
+        enum: ["requested", "approved", "rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"],
         default: "requested"
       },
       returnEligibleUntil: { type: Date, default: null }

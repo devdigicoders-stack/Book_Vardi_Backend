@@ -135,6 +135,10 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 5
     },
+    isGstInclusive: {
+      type: Boolean,
+      default: true
+    },
     price: {
       type: Number,
       required: [true, "Selling Price is required"],
@@ -175,6 +179,14 @@ const productSchema = new mongoose.Schema(
       default: 0.5
     },
     isReturnable: {
+      type: Boolean,
+      default: true
+    },
+    isRefundable: {
+      type: Boolean,
+      default: true
+    },
+    isExchangeable: {
       type: Boolean,
       default: true
     },

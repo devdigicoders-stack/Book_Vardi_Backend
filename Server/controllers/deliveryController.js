@@ -97,8 +97,19 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         quantity: it.quantity || 1,
         size: it.size || "",
         category: it.category || "Stationery",
-        image: it.image || ""
+        image: it.image || "",
+        sellerName: it.sellerName || it.storeName || order.sellerDetails?.storeName || "",
+        storeName: it.storeName || it.sellerName || order.sellerDetails?.storeName || "",
+        sellerPhone: it.sellerPhone || order.sellerDetails?.phone || "",
+        sellerDetails: it.sellerDetails || order.sellerDetails || null
       })),
+      sellerDetails: order.sellerDetails || order.items?.[0]?.sellerDetails || {
+        storeName: order.items?.[0]?.storeName || order.items?.[0]?.sellerName || "Partner Merchant",
+        sellerName: order.items?.[0]?.sellerName || order.items?.[0]?.storeName || "Partner Merchant",
+        phone: order.items?.[0]?.sellerPhone || "",
+        email: order.items?.[0]?.sellerEmail || "",
+        address: order.items?.[0]?.sellerAddress || ""
+      },
       selfDeliveryDetails: sanitizedSelfDetails
     };
 

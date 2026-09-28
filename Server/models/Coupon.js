@@ -1,14 +1,20 @@
 import mongoose from 'mongoose';
 
 const couponSchema = new mongoose.Schema({
-  code: { type: String, required: true, unique: true },
+  code: { type: String, required: true, unique: true, uppercase: true, trim: true },
+  title: { type: String, default: '' },
+  description: { type: String, default: '' },
   discount: { type: Number, required: true },
   type: { 
     type: String, 
-    enum: ['percentage', 'fixed'], 
+    enum: ['percentage', 'fixed', 'flat'], 
+    default: 'percentage',
     required: true 
   },
-  minAmount: { type: Number, required: true },
+  minAmount: { type: Number, default: 0 },
+  maxDiscount: { type: Number, default: 0 },
+  usageLimit: { type: Number, default: 0 },
+  usageCount: { type: Number, default: 0 },
   status: { 
     type: String, 
     enum: ['active', 'inactive', 'expired'], 

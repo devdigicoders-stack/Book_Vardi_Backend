@@ -9,7 +9,8 @@ import {
   deleteOrder,
   downloadInvoice,
   cancelOrder,
-  requestReturnExchange
+  requestReturnExchange,
+  updateReturnExchangeStatus
 } from "../controllers/orderController.js";
 import { authenticateToken, protectUser, optionalUserAuth } from "../middlewares/auth.js";
 
@@ -25,6 +26,8 @@ router.get("/:id", authenticateToken, getOrderById);
 router.post("/", optionalUserAuth, createOrder);
 router.post("/:id/cancel", optionalUserAuth, cancelOrder);
 router.post("/:id/return-exchange", optionalUserAuth, requestReturnExchange);
+router.patch("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
+router.put("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
 router.put("/:id/status", optionalUserAuth, updateOrder);
 router.put("/:id", authenticateToken, updateOrder);
 router.delete("/:id", authenticateToken, deleteOrder);

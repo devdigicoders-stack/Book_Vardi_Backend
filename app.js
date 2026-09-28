@@ -131,10 +131,14 @@ app.use(cors({
   credentials: true
 }));
 
-// Global Rate Limiter: 500 requests per 15 mins
+// Global Rate Limiter: 1000 requests per 15 mins (bypassed in development/local)
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 1000,
+  max: process.env.NODE_ENV === "production" ? 2000 : 100000,
+  skip: (req) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip.includes('127.0.0.1') || ip === '::1' || ip.includes('::ffff:127.0.0.1') || process.env.NODE_ENV !== "production";
+  },
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests from this IP, please try again after 15 minutes." }

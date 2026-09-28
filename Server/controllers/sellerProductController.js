@@ -26,6 +26,19 @@ const parseArray = (input) => {
   return [];
 };
 
+// Helper function to safely parse boolean inputs from JSON or multipart form-data
+const parseBool = (val, defaultVal = true) => {
+  if (val === undefined || val === null || val === "") return defaultVal;
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const s = val.trim().toLowerCase();
+    if (s === "false" || s === "0" || s === "off" || s === "no") return false;
+    if (s === "true" || s === "1" || s === "on" || s === "yes") return true;
+  }
+  if (typeof val === "number") return val !== 0;
+  return Boolean(val);
+};
+
 // Helper function to resolve expanded seller IDs across Seller and User collections
 const getExpandedSellerIds = async (req) => {
   const rawIds = [
@@ -218,6 +231,7 @@ export const createProduct = async (req, res) => {
       minMeter,
       meterStep,
       isReturnable,
+      isRefundable,
       returnWindowDays,
       sizeChart,
       description,
@@ -413,7 +427,7 @@ export const createProduct = async (req, res) => {
       brand: brand || "",
       gst: parsedGst,
       gstPercentage: parsedGst,
-      isGstInclusive: req.body.isGstInclusive !== undefined ? Boolean(req.body.isGstInclusive) : true,
+      isGstInclusive: parseBool(req.body.isGstInclusive, true),
       mrp: mrp !== undefined ? Number(mrp) : Number(effectivePrice),
       originalPrice: req.body.originalPrice !== undefined ? Number(req.body.originalPrice) : (mrp !== undefined ? Number(mrp) : Number(effectivePrice)),
       price: Number(effectivePrice),
@@ -440,6 +454,7 @@ export const createProduct = async (req, res) => {
       minMeter: minMeter ? Number(minMeter) : 0.5,
       meterStep: meterStep ? Number(meterStep) : 0.5,
       isReturnable: isReturnable === undefined ? true : (isReturnable === true || isReturnable === "true"),
+      isRefundable: isRefundable === undefined ? true : (isRefundable === true || isRefundable === "true"),
       returnWindowDays: returnWindowDays ? Number(returnWindowDays) : 7,
       sizeChart: parsedSizeChart,
       description: description || "",
@@ -477,6 +492,26 @@ export const createProduct = async (req, res) => {
   }
 };
 
+// Helper to verify if the requesting seller or admin owns the given product
+const checkProductOwnership = async (req, product) => {
+  if (!product) return false;
+  if (req.user?.role === "admin" || req.user?.role === "super_admin") return true;
+
+  const expandedSellerIds = await getExpandedSellerIds(req);
+  const expandedStrSet = new Set(expandedSellerIds.map(s => String(s)));
+
+  const productOwnerIds = [
+    product.sellerId,
+    product.userId,
+    product.seller,
+    product.user,
+    product.createdBy
+  ].filter(Boolean).map(s => String(s));
+
+  if (productOwnerIds.length === 0) return true;
+  return productOwnerIds.some(ownerId => expandedStrSet.has(ownerId));
+};
+
 // Update Product
 export const updateProduct = async (req, res) => {
   try {
@@ -486,21 +521,15 @@ export const updateProduct = async (req, res) => {
       return res.status(400).json({ message: "Invalid product ID format" });
     }
 
-    const expandedSellerIds = await getExpandedSellerIds(req);
-    const validObjectIds = expandedSellerIds.filter(sid => sid && mongoose.Types.ObjectId.isValid(String(sid))).map(sid => String(sid));
-
     let product = await Product.findById(id);
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // Authorization check: if product is linked to a seller, verify ownership
-    if (product.sellerId && validObjectIds.length > 0) {
-      const prodSellerIdStr = String(product.sellerId);
-      const isOwner = validObjectIds.some(sid => sid === prodSellerIdStr);
-      if (!isOwner && req.user?.role !== "admin") {
-        return res.status(403).json({ message: "Unauthorized to modify this product" });
-      }
+    // Authorization check: verify seller ownership across all seller reference fields
+    const isOwner = await checkProductOwnership(req, product);
+    if (!isOwner) {
+      return res.status(403).json({ message: "Unauthorized to modify this product" });
     }
 
     const updates = { ...req.body };
@@ -518,6 +547,10 @@ export const updateProduct = async (req, res) => {
     } else if (updates.gstPercentage !== undefined) {
       updates.gst = Number(updates.gstPercentage);
       updates.gstPercentage = Number(updates.gstPercentage);
+    }
+
+    if (updates.isGstInclusive !== undefined) {
+      updates.isGstInclusive = parseBool(updates.isGstInclusive, true);
     }
 
     // Parse sizeVariants / variants safely
@@ -588,6 +621,8 @@ export const updateProduct = async (req, res) => {
     if (updates.price !== undefined) updates.price = Number(updates.price);
     if (updates.mrp !== undefined) updates.mrp = Number(updates.mrp);
     if (updates.discountPercentage !== undefined) updates.discountPercentage = Number(updates.discountPercentage);
+    if (updates.isReturnable !== undefined) updates.isReturnable = parseBool(updates.isReturnable, true);
+    if (updates.isRefundable !== undefined) updates.isRefundable = parseBool(updates.isRefundable, true);
     if (updates.stock !== undefined) updates.stock = Number(updates.stock);
     if (updates.paymentMethodAllowed !== undefined) {
       const pMethod = updates.paymentMethodAllowed;
@@ -659,9 +694,14 @@ export const updateInventoryStock = async (req, res) => {
     const { id } = req.params;
     const { stockQuantity, inStock, stock } = req.body;
 
-    const product = await Product.findOne({ _id: id, sellerId: req.user.id });
+    const product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ message: "Product not found or unauthorized" });
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const isOwner = await checkProductOwnership(req, product);
+    if (!isOwner) {
+      return res.status(403).json({ message: "Unauthorized to modify this product" });
     }
 
     const nextStock = stockQuantity !== undefined ? Number(stockQuantity) : (stock !== undefined ? Number(stock) : product.stock);
@@ -692,15 +732,17 @@ export const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const product = await Product.findOneAndDelete({
-      _id: id,
-      sellerId: req.user.id
-    });
-
+    const product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ message: "Product not found or unauthorized" });
+      return res.status(404).json({ message: "Product not found" });
     }
 
+    const isOwner = await checkProductOwnership(req, product);
+    if (!isOwner) {
+      return res.status(403).json({ message: "Unauthorized to delete this product" });
+    }
+
+    await Product.findByIdAndDelete(id);
     clearCache('product');
 
     res.json({ message: "Product deleted successfully!" });
@@ -715,9 +757,14 @@ export const setProductOffer = async (req, res) => {
     const { id } = req.params;
     const { discountType, discountValue, startDate, endDate, isActive } = req.body;
 
-    const product = await Product.findOne({ _id: id, sellerId: req.user.id });
+    const product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ message: "Product not found or unauthorized" });
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const isOwner = await checkProductOwnership(req, product);
+    if (!isOwner) {
+      return res.status(403).json({ message: "Unauthorized to modify this product" });
     }
 
     if (discountValue === undefined || discountValue <= 0) {
@@ -749,9 +796,14 @@ export const removeProductOffer = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const product = await Product.findOne({ _id: id, sellerId: req.user.id });
+    const product = await Product.findById(id);
     if (!product) {
-      return res.status(404).json({ message: "Product not found or unauthorized" });
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const isOwner = await checkProductOwnership(req, product);
+    if (!isOwner) {
+      return res.status(403).json({ message: "Unauthorized to modify this product" });
     }
 
     product.offer = {

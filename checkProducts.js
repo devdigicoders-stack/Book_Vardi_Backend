@@ -15,8 +15,16 @@ async function check() {
     
     console.log('Product Statistics:', { total, nonDeleted, notDeletedStatus, approvedOrNoStatus });
     
-    const sample = await Product.find().limit(5).select('name status approvalStatus isDeleted category price');
-    console.log('Sample Products:', sample);
+    const prods = await Product.find().select('name image images variants');
+    console.log('All Products Images:');
+    prods.forEach(p => {
+      console.log(`\nID: ${p._id}, Name: ${p.name}`);
+      console.log('  image:', p.image);
+      console.log('  images:', p.images);
+      if (p.variants && p.variants.length > 0) {
+        console.log('  variants:', p.variants.map(v => ({ name: v.name, image: v.image, images: v.images })));
+      }
+    });
     process.exit(0);
   } catch (err) {
     console.error('Error:', err);

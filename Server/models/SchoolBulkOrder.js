@@ -5,10 +5,14 @@ const requirementItemSchema = new mongoose.Schema(
     category: { type: String, default: "General Bulk Procurement" },
     itemName: { type: String, default: "Bulk Stationery / Uniform" },
     quantity: { type: Number, default: 100 },
+    budgetPerUnit: { type: Number, default: 0 },
+    sellerPricePerUnit: { type: Number, default: 0 },
     sampleImage: { type: String, default: "" },
+    sampleImages: [{ type: String }],
+    customizations: { type: String, default: "" },
     notes: { type: String, default: "" }
   },
-  { _id: false }
+  { _id: true }
 );
 
 const quotationSchema = new mongoose.Schema(
@@ -21,6 +25,19 @@ const quotationSchema = new mongoose.Schema(
 
     quoteAmount: { type: Number, required: true },
     unitPrice: { type: Number, default: 0 },
+    itemPrices: [
+      {
+        itemId: { type: String },
+        itemName: { type: String },
+        category: { type: String, default: "" },
+        quantity: { type: Number, default: 1 },
+        customerBudget: { type: Number, default: 0 },
+        pricePerUnit: { type: Number, default: 0 },
+        totalPrice: { type: Number, default: 0 },
+        discountTierNote: { type: String, default: "" }
+      }
+    ],
+    volumeDiscountNote: { type: String, default: "" },
     estimatedDeliveryDays: { type: Number, default: 7 },
     proposedDeliveryDate: { type: String, default: "" },
     notes: { type: String, default: "" },
@@ -55,6 +72,7 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     requirements: [requirementItemSchema],
 
     totalQuantity: { type: Number, default: 0 },
+    overallBudget: { type: Number, default: 0 },
     targetDeliveryDate: { type: String, default: "" },
     logoEmbroideryRequired: { type: Boolean, default: false },
     targetBudgetPerKit: { type: String, default: "" },

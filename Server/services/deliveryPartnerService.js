@@ -1,4 +1,5 @@
 import DeliveryPartnerConfig from "../models/DeliveryPartnerConfig.js";
+import Order from "../models/Order.js";
 
 // Helper to get or initialize logistics configuration
 export const getOrInitDeliveryConfig = async () => {
@@ -175,19 +176,90 @@ export const getLiveAwbTrackingService = async (awbNumber) => {
     return { success: false, message: "AWB number is required for tracking." };
   }
 
-  const cleanAwb = String(awbNumber).trim().toUpperCase();
-  const courierPrefix = cleanAwb.split("-")[0] || "SHIP";
+  const cleanAwb = String(awbNumber).trim();
+  const upperAwb = cleanAwb.toUpperCase();
 
+  // Try to find matching Order in MongoDB
+  let matchedOrder = null;
+  try {
+    matchedOrder = await Order.findOne({
+      $or: [
+        { trackingNumber: cleanAwb },
+        { trackingNumber: upperAwb },
+        { orderId: cleanAwb },
+        { id: cleanAwb },
+        { "selfDeliveryDetails.deliveryPartnerToken": cleanAwb },
+        { "items.thirdPartyDetails.trackingNumber": cleanAwb },
+        { "items.selfDeliveryDetails.deliveryPartnerToken": cleanAwb }
+      ]
+    }).populate("items.sellerId", "storeName name phone email address city");
+  } catch (err) {}
+
+  if (matchedOrder) {
+    const isSelf = matchedOrder.deliveryMode === "self_delivery" || Boolean(matchedOrder.selfDeliveryDetails?.deliveryPartnerToken);
+    const courier = matchedOrder.courierName || "Courier Partner";
+    let realTrackingUrl = matchedOrder.trackingUrl || "";
+
+    if (!realTrackingUrl) {
+      if (isSelf) {
+        realTrackingUrl = matchedOrder.selfDeliveryDetails?.trackingUrl || `/#delivery-partner?token=${encodeURIComponent(matchedOrder.selfDeliveryDetails?.deliveryPartnerToken || cleanAwb)}`;
+      } else {
+        const cLower = courier.toLowerCase();
+        if (cLower.includes("delhivery")) realTrackingUrl = `https://www.delhivery.com/track/package/${cleanAwb}`;
+        else if (cLower.includes("bluedart") || cLower.includes("blue dart")) realTrackingUrl = `https://www.bluedart.com/tracking?awb=${cleanAwb}`;
+        else if (cLower.includes("dtdc")) realTrackingUrl = `https://www.dtdc.in/tracking/shipment-tracking.asp?awb=${cleanAwb}`;
+        else if (cLower.includes("ekart")) realTrackingUrl = `https://ekartlogistics.com/shipmenttrack/${cleanAwb}`;
+        else if (cLower.includes("indiapost") || cLower.includes("speedpost")) realTrackingUrl = `https://www.indiapost.gov.in/_layouts/15/dpt.cept.tracking/trackconsignment.aspx`;
+        else realTrackingUrl = `https://track.shiprocket.in/tracking/${cleanAwb}`;
+      }
+    }
+
+    const checkpoints = (matchedOrder.timeline && matchedOrder.timeline.length > 0)
+      ? matchedOrder.timeline.map((evt) => ({
+          status: evt.status,
+          title: evt.title,
+          description: evt.description,
+          location: evt.location || (isSelf ? (matchedOrder.sellerDetails?.storeName || "Store Dispatch") : "Regional Hub"),
+          timestamp: evt.timestamp
+        }))
+      : [
+          { status: "placed", title: "Order Placed", description: "Order received and confirmed", location: "Store Hub", timestamp: matchedOrder.createdAt || new Date().toISOString() },
+          { status: "processing", title: "Processing & Packed", description: "Satchel sealed ready for dispatch", location: matchedOrder.sellerDetails?.storeName || "Merchant Store", timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString() }
+        ];
+
+    return {
+      success: true,
+      awbNumber: cleanAwb,
+      orderId: matchedOrder.orderId || matchedOrder.id,
+      deliveryMode: isSelf ? "self_delivery" : "third_party",
+      courierPartnerName: isSelf ? (matchedOrder.sellerDetails?.storeName ? `${matchedOrder.sellerDetails.storeName} Self-Delivery` : "Direct Store Self-Delivery") : courier,
+      currentStatus: matchedOrder.overallStatus || matchedOrder.status || "shipped",
+      estimatedDeliveryDate: matchedOrder.estimatedDeliveryDate || new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+      trackingUrl: realTrackingUrl,
+      sellerDetails: matchedOrder.sellerDetails || null,
+      selfDeliveryDetails: matchedOrder.selfDeliveryDetails || null,
+      checkpoints
+    };
+  }
+
+  // Fallback for simulation / mock AWB
+  const courierPrefix = upperAwb.split("-")[0] || "SHIP";
   const partnerNameMap = {
-    SHIP: "Shiprocket Aggregator",
     DELH: "Delhivery Direct Express",
     BLUE: "BlueDart Campus Air",
+    DTDC: "DTDC Express Courier",
+    EKAR: "Ekart Logistics",
+    POST: "India Post SpeedPost",
     LOCA: "BookVardi Local Express"
   };
 
-  const partnerName = partnerNameMap[courierPrefix] || "Shiprocket Delivery Network";
+  const partnerName = partnerNameMap[courierPrefix] || "Express Courier Network";
+  let fallbackUrl = `https://track.shiprocket.in/tracking/${cleanAwb}`;
+  if (courierPrefix === "DELH") fallbackUrl = `https://www.delhivery.com/track/package/${cleanAwb}`;
+  else if (courierPrefix === "BLUE") fallbackUrl = `https://www.bluedart.com/tracking?awb=${cleanAwb}`;
+  else if (courierPrefix === "DTDC") fallbackUrl = `https://www.dtdc.in/tracking/shipment-tracking.asp?awb=${cleanAwb}`;
+  else if (courierPrefix === "EKAR") fallbackUrl = `https://ekartlogistics.com/shipmenttrack/${cleanAwb}`;
 
-  // Simulate realistic checkpoint progress based on timestamp or AWB
   const checkpoints = [
     {
       status: "placed",
@@ -214,13 +286,13 @@ export const getLiveAwbTrackingService = async (awbNumber) => {
       status: "in_transit",
       title: "In Transit at Sorting Facility",
       description: "Package sorted & routed to destination regional gateway",
-      location: "Central Transshipment Hub, Delhi NCR",
+      location: "Central Transshipment Hub",
       timestamp: new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString()
     },
     {
       status: "out_for_delivery",
       title: "Out for Delivery",
-      description: "Courier executive on the way to school/delivery address",
+      description: "Delivery executive on the way to address",
       location: "Destination Delivery Hub",
       timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
     }
@@ -229,10 +301,11 @@ export const getLiveAwbTrackingService = async (awbNumber) => {
   return {
     success: true,
     awbNumber: cleanAwb,
+    deliveryMode: "third_party",
     courierPartnerName: partnerName,
     currentStatus: "out_for_delivery",
     estimatedDeliveryDate: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
-    trackingUrl: `https://track.shiprocket.in/tracking/${cleanAwb}`,
+    trackingUrl: fallbackUrl,
     checkpoints
   };
 };

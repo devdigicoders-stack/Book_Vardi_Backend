@@ -1,5 +1,34 @@
+import mongoose from "mongoose";
 import Coupon from "../models/Coupon.js";
 import SellerOffer from "../models/SellerOffer.js";
+
+const formatCouponResponse = (c) => ({
+  id: c._id ? String(c._id) : c.id,
+  _id: c._id ? String(c._id) : c.id,
+  code: c.code,
+  title: c.title || `${c.code} Promo Offer`,
+  description: c.description || "",
+  subtitle: c.description || `${c.discount}${c.type === "percentage" ? "%" : "₹"} OFF`,
+  discount: c.discount,
+  discountValue: c.discount,
+  type: c.type,
+  discountType: (c.type === "fixed" || c.type === "flat") ? "flat" : "percentage",
+  minAmount: c.minAmount || 0,
+  minOrderValue: c.minAmount || 0,
+  minOrderAmount: c.minAmount || 0,
+  maxDiscount: c.maxDiscount || 0,
+  usageLimit: c.usageLimit || 0,
+  usageCount: c.usageCount || 0,
+  status: c.status || "active",
+  expiryDate: c.expiryDate,
+  validUntil: c.expiryDate ? new Date(c.expiryDate).toISOString().split("T")[0] : "",
+  createdRole: c.createdRole || "admin",
+  sellerId: c.sellerId || null,
+  storeId: c.storeId || null,
+  applicableProducts: c.applicableProducts || [],
+  createdAt: c.createdAt,
+  updatedAt: c.updatedAt
+});
 
 // 1. Validate & Apply Coupon
 export const applyCoupon = async (req, res) => {
@@ -7,11 +36,12 @@ export const applyCoupon = async (req, res) => {
     const { code, cartTotal, cartItems } = req.body;
 
     if (!code) {
-      return res.status(400).json({ message: "Coupon code is required" });
+      return res.json({ success: false, message: "Coupon code is required" });
     }
 
-    if (cartTotal === undefined || Number(cartTotal) <= 0) {
-      return res.status(400).json({ message: "Valid cart total is required" });
+    const totalNum = Number(cartTotal);
+    if (cartTotal === undefined || isNaN(totalNum) || totalNum <= 0) {
+      return res.json({ success: false, message: "Valid cart total is required" });
     }
 
     const cleanCode = String(code).toUpperCase().trim();
@@ -41,44 +71,60 @@ export const applyCoupon = async (req, res) => {
     }
 
     if (!coupon) {
-      return res.status(404).json({ message: "Invalid or inactive coupon code" });
+      return res.json({ success: false, message: "Invalid or inactive coupon code" });
     }
 
     // Check expiry
-    if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
-      if (typeof coupon.save === "function") {
-        coupon.status = "expired";
-        await coupon.save();
+    if (coupon.expiryDate) {
+      const expDate = new Date(coupon.expiryDate);
+      if (typeof coupon.expiryDate === 'string' && !coupon.expiryDate.includes('T')) {
+        expDate.setHours(23, 59, 59, 999);
       }
-      return res.status(400).json({ message: "This coupon code has expired" });
+      if (expDate < new Date()) {
+        if (typeof coupon.save === "function") {
+          coupon.status = "expired";
+          await coupon.save().catch(() => {});
+        }
+        return res.json({ success: false, message: "This coupon code has expired" });
+      }
     }
 
-    // Determine coupon seller & product scoping
-    const isSellerScoped = Boolean(coupon.createdRole === "seller" || coupon.sellerId || coupon.storeId);
-    const targetSellerId = coupon.sellerId ? String(coupon.sellerId) : (coupon.storeId ? String(coupon.storeId) : null);
-    const applicableProds = (coupon.applicableProducts || []).map(p => String(p));
+    const extractId = (val) => {
+      if (!val) return null;
+      if (typeof val === 'object') {
+        return String(val._id || val.id || val.$oid || '').trim();
+      }
+      return String(val).trim();
+    };
 
-    let eligibleSubtotal = Number(cartTotal);
+    // Determine coupon seller & product scoping
+    const targetSellerId = extractId(coupon.sellerId) || extractId(coupon.storeId);
+    const isSellerScoped = Boolean(coupon.createdRole === "seller" || targetSellerId);
+    const applicableProds = (coupon.applicableProducts || [])
+      .map(p => extractId(p))
+      .filter(Boolean);
+
+    let eligibleSubtotal = totalNum;
 
     if (Array.isArray(cartItems) && cartItems.length > 0) {
       const eligibleItems = cartItems.filter((item) => {
-        const itemSellerId = item.sellerId ? String(item.sellerId) : (item.seller ? String(item.seller) : (item.storeId ? String(item.storeId) : null));
-        const itemProductId = item.id ? String(item.id) : (item._id ? String(item._id) : (item.productId ? String(item.productId) : null));
+        const itemSellerId = extractId(item.sellerId) || extractId(item.seller) || extractId(item.storeId) || extractId(item.userId);
+        const itemProductId = extractId(item.id) || extractId(item._id) || extractId(item.productId);
 
         if (isSellerScoped) {
           // Seller-created coupon applies ONLY to items from that seller
-          if (targetSellerId && itemSellerId && itemSellerId !== targetSellerId) {
+          if (targetSellerId && itemSellerId && itemSellerId.toLowerCase() !== targetSellerId.toLowerCase()) {
             return false;
           }
           // If seller chose specific products, check product match
           if (applicableProds.length > 0) {
-            return applicableProds.includes(itemProductId);
+            return itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
           }
           return true;
         } else {
           // Admin-created coupon applies to every product (unless admin set specific applicableProducts)
           if (applicableProds.length > 0) {
-            return applicableProds.includes(itemProductId);
+            return itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
           }
           return true;
         }
@@ -86,24 +132,33 @@ export const applyCoupon = async (req, res) => {
 
       if (eligibleItems.length === 0) {
         if (isSellerScoped) {
-          return res.status(400).json({
+          return res.json({
+            success: false,
             message: applicableProds.length > 0
               ? "This coupon is only applicable to specific products from this seller."
               : "This seller-created coupon is only applicable to products from this seller."
           });
         } else {
-          return res.status(400).json({
+          return res.json({
+            success: false,
             message: "This coupon is not applicable to any items in your cart."
           });
         }
       }
 
-      eligibleSubtotal = eligibleItems.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 1)), 0);
+      const calculatedSum = eligibleItems.reduce((sum, item) => {
+        const price = Number(item.price ?? item.sellingPrice ?? item.discountPrice ?? item.unitPrice ?? 0);
+        const qty = Number(item.quantity ?? item.qty ?? 1);
+        return sum + (price * qty);
+      }, 0);
+
+      eligibleSubtotal = calculatedSum > 0 ? calculatedSum : totalNum;
     }
 
     // Check minimum purchase requirement on eligible subtotal
-    if (eligibleSubtotal < coupon.minAmount) {
-      return res.status(400).json({
+    if (eligibleSubtotal < (coupon.minAmount || 0)) {
+      return res.json({
+        success: false,
         message: `Minimum purchase of ₹${coupon.minAmount} on eligible items is required to use this coupon.`
       });
     }
@@ -112,84 +167,231 @@ export const applyCoupon = async (req, res) => {
     let discountAmount = 0;
     if (coupon.type === "percentage") {
       discountAmount = Math.round(((eligibleSubtotal * coupon.discount) / 100) * 100) / 100;
+      if (coupon.maxDiscount && coupon.maxDiscount > 0) {
+        discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+      }
     } else {
       discountAmount = Math.min(eligibleSubtotal, coupon.discount);
     }
 
-    const finalPayable = Math.max(0, Math.round((Number(cartTotal) - discountAmount) * 100) / 100);
+    const finalPayable = Math.max(0, Math.round((totalNum - discountAmount) * 100) / 100);
 
     res.json({
+      success: true,
       message: "Coupon applied successfully",
       coupon: {
         code: coupon.code,
         discount: coupon.discount,
         type: coupon.type,
         minAmount: coupon.minAmount,
+        maxDiscount: coupon.maxDiscount || 0,
         createdRole: coupon.createdRole || (targetSellerId ? "seller" : "admin"),
         sellerId: targetSellerId,
         applicableProducts: applicableProds
       },
-      cartTotal: Number(cartTotal),
+      cartTotal: totalNum,
       eligibleSubtotal,
       discountAmount,
       finalPayable
     });
   } catch (error) {
-    res.status(500).json({ message: "Failed to apply coupon", error: error.message });
+    res.status(500).json({ success: false, message: "Failed to apply coupon", error: error.message });
   }
 };
 
-// 2. Get All Active Coupons (Public list for banners/promos)
+// 2. Get All Active Coupons (Public list for storefront banners/promos/product pages)
 export const getActiveCoupons = async (req, res) => {
   try {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
     const coupons = await Coupon.find({
       status: "active",
-      expiryDate: { $gte: new Date() }
-    }).select("code discount type minAmount expiryDate createdRole sellerId storeId applicableProducts");
+      $or: [
+        { expiryDate: { $gte: todayStart } },
+        { expiryDate: null },
+        { expiryDate: { $exists: false } }
+      ]
+    }).sort({ createdAt: -1 });
 
-    res.json(coupons);
+    const couponCodes = new Set(coupons.map(c => String(c.code).toUpperCase().trim()));
+
+    // Also pull active seller offers that may not yet be in Coupon collection
+    const sellerOffers = await SellerOffer.find({
+      status: "active",
+      $or: [
+        { endDate: { $gte: todayStart } },
+        { endDate: null },
+        { endDate: { $exists: false } }
+      ]
+    }).sort({ createdAt: -1 });
+
+    const formattedList = coupons.map(formatCouponResponse);
+
+    for (const offer of sellerOffers) {
+      const codeUpper = String(offer.code).toUpperCase().trim();
+      if (!couponCodes.has(codeUpper)) {
+        couponCodes.add(codeUpper);
+        formattedList.push({
+          id: offer._id ? String(offer._id) : offer.id,
+          _id: offer._id ? String(offer._id) : offer.id,
+          code: offer.code,
+          title: offer.title || `${offer.code} Offer`,
+          description: offer.description || "",
+          subtitle: offer.description || `${offer.discountValue}${offer.discountType === "percentage" ? "%" : "₹"} OFF`,
+          discount: offer.discountValue,
+          discountValue: offer.discountValue,
+          type: (offer.discountType === "flat" || offer.discountType === "fixed") ? "fixed" : "percentage",
+          discountType: (offer.discountType === "flat" || offer.discountType === "fixed") ? "flat" : "percentage",
+          minAmount: offer.minOrderAmount || 0,
+          minOrderValue: offer.minOrderAmount || 0,
+          minOrderAmount: offer.minOrderAmount || 0,
+          maxDiscount: offer.maxDiscount || 0,
+          usageLimit: 0,
+          usageCount: 0,
+          status: offer.status || "active",
+          expiryDate: offer.endDate,
+          validUntil: offer.endDate ? new Date(offer.endDate).toISOString().split("T")[0] : "",
+          createdRole: "seller",
+          sellerId: offer.sellerId || null,
+          storeId: offer.sellerId || null,
+          applicableProducts: offer.applicableProducts || [],
+          createdAt: offer.createdAt,
+          updatedAt: offer.updatedAt
+        });
+      }
+    }
+
+    res.json(formattedList);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch coupons", error: error.message });
   }
 };
 
-// 3. Admin: Create Coupon
+// 3. Admin / Seller: Create or Update Coupon
 export const createCoupon = async (req, res) => {
   try {
-    const { code, discount, type, minAmount, expiryDate, storeId, sellerId, createdRole, applicableProducts } = req.body;
+    const rawCode = req.body.code || req.body.couponCode;
+    const rawDiscount = req.body.discount !== undefined ? req.body.discount : req.body.discountValue;
+    const rawType = req.body.type || req.body.discountType || "percentage";
+    const rawMin = req.body.minAmount !== undefined 
+      ? req.body.minAmount 
+      : (req.body.minOrderValue !== undefined ? req.body.minOrderValue : (req.body.minOrderAmount !== undefined ? req.body.minOrderAmount : 0));
+    const rawExpiry = req.body.expiryDate || req.body.validUntil || req.body.endDate;
 
-    if (!code || discount === undefined || !type || minAmount === undefined || !expiryDate) {
-      return res.status(400).json({ message: "All coupon fields are required" });
+    if (!rawCode || rawDiscount === undefined || !rawExpiry) {
+      return res.status(400).json({ message: "Coupon code, discount value, and expiry date are required" });
     }
 
-    const existing = await Coupon.findOne({ code: code.toUpperCase().trim() });
-    if (existing) {
-      return res.status(400).json({ message: "Coupon code already exists" });
+    const cleanCode = String(rawCode).toUpperCase().trim();
+    const cleanDiscount = Number(rawDiscount);
+    if (isNaN(cleanDiscount) || cleanDiscount <= 0) {
+      return res.status(400).json({ message: "Discount must be a positive number" });
     }
 
-    const coupon = await Coupon.create({
-      code: code.toUpperCase().trim(),
-      discount: Number(discount),
-      type,
-      minAmount: Number(minAmount),
-      expiryDate: new Date(expiryDate),
-      storeId: storeId || sellerId || null,
-      sellerId: sellerId || storeId || null,
-      createdRole: createdRole || (sellerId || storeId ? "seller" : "admin"),
-      applicableProducts: Array.isArray(applicableProducts) ? applicableProducts.map(String) : []
-    });
+    const cleanType = (rawType === "flat" || rawType === "fixed") ? "fixed" : "percentage";
+    const cleanMinAmount = Math.max(0, Number(rawMin || 0));
+    const cleanExpiryDate = new Date(rawExpiry);
+    if (isNaN(cleanExpiryDate.getTime())) {
+      return res.status(400).json({ message: "Invalid expiry date provided" });
+    }
 
-    res.status(201).json({ message: "Coupon created successfully", coupon });
+    const title = req.body.title ? String(req.body.title).trim() : `${cleanCode} Promo Offer`;
+    const description = req.body.description ? String(req.body.description).trim() : (req.body.subtitle || "");
+    const maxDiscount = Number(req.body.maxDiscount || 0);
+    const usageLimit = Number(req.body.usageLimit || 0);
+    const storeId = req.body.storeId || req.body.sellerId || null;
+    const sellerId = req.body.sellerId || req.body.storeId || null;
+    const createdRole = req.body.createdRole || (sellerId || storeId ? "seller" : "admin");
+    const applicableProducts = Array.isArray(req.body.applicableProducts) ? req.body.applicableProducts.map(String) : [];
+
+    let coupon = await Coupon.findOne({ code: cleanCode });
+    if (coupon) {
+      coupon.title = title;
+      coupon.description = description;
+      coupon.discount = cleanDiscount;
+      coupon.type = cleanType;
+      coupon.minAmount = cleanMinAmount;
+      coupon.maxDiscount = maxDiscount;
+      coupon.usageLimit = usageLimit;
+      coupon.expiryDate = cleanExpiryDate;
+      coupon.status = req.body.status || "active";
+      if (storeId) coupon.storeId = storeId;
+      if (sellerId) coupon.sellerId = sellerId;
+      coupon.createdRole = createdRole;
+      if (applicableProducts.length > 0) coupon.applicableProducts = applicableProducts;
+      await coupon.save();
+    } else {
+      coupon = await Coupon.create({
+        code: cleanCode,
+        title,
+        description,
+        discount: cleanDiscount,
+        type: cleanType,
+        minAmount: cleanMinAmount,
+        maxDiscount,
+        usageLimit,
+        usageCount: 0,
+        status: req.body.status || "active",
+        expiryDate: cleanExpiryDate,
+        storeId,
+        sellerId,
+        createdRole,
+        applicableProducts
+      });
+    }
+
+    const formatted = formatCouponResponse(coupon);
+    res.status(201).json({ message: "Coupon created successfully", coupon: formatted });
   } catch (error) {
     res.status(500).json({ message: "Failed to create coupon", error: error.message });
   }
 };
 
-// 4. Admin: Get all coupons
+// 4. Admin: Get all coupons (with normalized fields)
 export const getAllCouponsAdmin = async (req, res) => {
   try {
     const coupons = await Coupon.find().sort({ createdAt: -1 });
-    res.json(coupons);
+    const couponCodes = new Set(coupons.map(c => String(c.code).toUpperCase().trim()));
+
+    const sellerOffers = await SellerOffer.find().sort({ createdAt: -1 });
+    const formattedList = coupons.map(formatCouponResponse);
+
+    for (const offer of sellerOffers) {
+      const codeUpper = String(offer.code).toUpperCase().trim();
+      if (!couponCodes.has(codeUpper)) {
+        couponCodes.add(codeUpper);
+        formattedList.push({
+          id: offer._id ? String(offer._id) : offer.id,
+          _id: offer._id ? String(offer._id) : offer.id,
+          code: offer.code,
+          title: offer.title || `${offer.code} Offer`,
+          description: offer.description || "",
+          subtitle: offer.description || `${offer.discountValue}${offer.discountType === "percentage" ? "%" : "₹"} OFF`,
+          discount: offer.discountValue,
+          discountValue: offer.discountValue,
+          type: (offer.discountType === "flat" || offer.discountType === "fixed") ? "fixed" : "percentage",
+          discountType: (offer.discountType === "flat" || offer.discountType === "fixed") ? "flat" : "percentage",
+          minAmount: offer.minOrderAmount || 0,
+          minOrderValue: offer.minOrderAmount || 0,
+          minOrderAmount: offer.minOrderAmount || 0,
+          maxDiscount: offer.maxDiscount || 0,
+          usageLimit: 0,
+          usageCount: 0,
+          status: offer.status || "active",
+          expiryDate: offer.endDate,
+          validUntil: offer.endDate ? new Date(offer.endDate).toISOString().split("T")[0] : "",
+          createdRole: "seller",
+          sellerId: offer.sellerId || null,
+          storeId: offer.sellerId || null,
+          applicableProducts: offer.applicableProducts || [],
+          createdAt: offer.createdAt,
+          updatedAt: offer.updatedAt
+        });
+      }
+    }
+
+    res.json(formattedList);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch coupons", error: error.message });
   }
@@ -198,9 +400,65 @@ export const getAllCouponsAdmin = async (req, res) => {
 // 5. Admin: Delete Coupon
 export const deleteCoupon = async (req, res) => {
   try {
-    await Coupon.findByIdAndDelete(req.params.id);
+    const targetId = req.params.id;
+    let deleted = false;
+
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      const c = await Coupon.findByIdAndDelete(targetId);
+      if (c) {
+        deleted = true;
+        await SellerOffer.findOneAndDelete({ code: c.code }).catch(() => {});
+      } else {
+        const o = await SellerOffer.findByIdAndDelete(targetId);
+        if (o) deleted = true;
+      }
+    }
+
+    if (!deleted) {
+      const clean = String(targetId).toUpperCase().trim();
+      await Coupon.findOneAndDelete({ code: clean });
+      await SellerOffer.findOneAndDelete({ code: clean });
+    }
+
     res.json({ message: "Coupon deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: "Failed to delete coupon", error: error.message });
+  }
+};
+
+// 6. Admin / Seller: Update Coupon Status or Details
+export const updateCoupon = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const filter = mongoose.Types.ObjectId.isValid(targetId)
+      ? { _id: targetId }
+      : { code: String(targetId).toUpperCase().trim() };
+
+    let coupon = await Coupon.findOne(filter);
+    if (!coupon) {
+      return res.status(404).json({ message: "Coupon not found" });
+    }
+
+    if (req.body.status) coupon.status = req.body.status;
+    if (req.body.title) coupon.title = req.body.title;
+    if (req.body.description !== undefined) coupon.description = req.body.description;
+    if (req.body.discount !== undefined || req.body.discountValue !== undefined) {
+      coupon.discount = Number(req.body.discount ?? req.body.discountValue);
+    }
+    if (req.body.type || req.body.discountType) {
+      const rawT = req.body.type || req.body.discountType;
+      coupon.type = (rawT === "flat" || rawT === "fixed") ? "fixed" : "percentage";
+    }
+    if (req.body.minAmount !== undefined || req.body.minOrderValue !== undefined) {
+      coupon.minAmount = Number(req.body.minAmount ?? req.body.minOrderValue);
+    }
+    if (req.body.expiryDate || req.body.validUntil) {
+      coupon.expiryDate = new Date(req.body.expiryDate || req.body.validUntil);
+    }
+
+    await coupon.save();
+    res.json({ message: "Coupon updated successfully", coupon: formatCouponResponse(coupon) });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update coupon", error: error.message });
   }
 };

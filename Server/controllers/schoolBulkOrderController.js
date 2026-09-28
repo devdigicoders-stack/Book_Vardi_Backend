@@ -144,11 +144,7 @@ export const submitSellerQuotation = async (req, res) => {
   try {
     const { id } = req.params;
     const sellerId = req.user.id;
-    const { quoteAmount, unitPrice, estimatedDeliveryDays, proposedDeliveryDate, notes } = req.body;
-
-    if (!quoteAmount) {
-      return res.status(400).json({ success: false, message: "Quote amount is required." });
-    }
+    const { quoteAmount, unitPrice, itemPrices, volumeDiscountNote, estimatedDeliveryDays, proposedDeliveryDate, notes } = req.body;
 
     const bulkOrder = await SchoolBulkOrder.findById(id);
     if (!bulkOrder) {
@@ -161,6 +157,52 @@ export const submitSellerQuotation = async (req, res) => {
     const sellerPhone = seller ? (seller.phone || "") : "";
     const sellerCity = seller ? (seller.city || "") : "";
 
+    // Process and enrich itemPrices with calculations and scale notes
+    let formattedItemPrices = [];
+    let calculatedSubtotal = 0;
+
+    if (Array.isArray(itemPrices) && itemPrices.length > 0) {
+      formattedItemPrices = itemPrices.map((ip, idx) => {
+        const reqItem = Array.isArray(bulkOrder.requirements)
+          ? bulkOrder.requirements.find(
+              (r, rIdx) => String(r._id || rIdx) === String(ip.itemId) || String(r.itemName) === String(ip.itemName)
+            )
+          : null;
+
+        const qty = Number(ip.quantity || reqItem?.quantity || 1);
+        const unitRate = Number(ip.pricePerUnit || 0);
+        const custBudget = Number(ip.customerBudget || reqItem?.budgetPerUnit || 0);
+        const lineTotal = Number(ip.totalPrice) || (qty * unitRate);
+
+        if (reqItem && unitRate > 0) {
+          reqItem.sellerPricePerUnit = unitRate;
+        }
+
+        calculatedSubtotal += lineTotal;
+
+        return {
+          itemId: String(ip.itemId || reqItem?._id || idx),
+          itemName: ip.itemName || reqItem?.itemName || "Bulk Item",
+          category: ip.category || reqItem?.category || "General Bulk Procurement",
+          quantity: qty,
+          customerBudget: custBudget,
+          pricePerUnit: unitRate,
+          totalPrice: lineTotal,
+          discountTierNote: ip.discountTierNote || ""
+        };
+      });
+    }
+
+    const finalQuoteAmount = calculatedSubtotal > 0 ? calculatedSubtotal : Number(quoteAmount || 0);
+    if (!finalQuoteAmount || finalQuoteAmount <= 0) {
+      return res.status(400).json({ success: false, message: "Quote amount or item prices are required." });
+    }
+
+    const totalQty = Array.isArray(bulkOrder.requirements)
+      ? bulkOrder.requirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0)
+      : (bulkOrder.totalQuantity || 1);
+    const calculatedUnitPrice = Number(unitPrice) || (totalQty > 0 ? Math.round(finalQuoteAmount / totalQty) : 0);
+
     // Check if seller already submitted a quotation
     const existingIndex = bulkOrder.quotations.findIndex(
       q => String(q.sellerId) === String(sellerId)
@@ -172,8 +214,10 @@ export const submitSellerQuotation = async (req, res) => {
       sellerStoreName,
       sellerPhone,
       sellerCity,
-      quoteAmount: Number(quoteAmount),
-      unitPrice: Number(unitPrice) || 0,
+      quoteAmount: finalQuoteAmount,
+      unitPrice: calculatedUnitPrice,
+      itemPrices: formattedItemPrices,
+      volumeDiscountNote: volumeDiscountNote || "",
       estimatedDeliveryDays: Number(estimatedDeliveryDays) || 7,
       proposedDeliveryDate: proposedDeliveryDate || "",
       notes: notes || "",
@@ -192,7 +236,7 @@ export const submitSellerQuotation = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Quotation of ₹${Number(quoteAmount).toLocaleString()} submitted successfully!`,
+      message: `Quotation of ₹${Number(finalQuoteAmount).toLocaleString()} submitted successfully!`,
       order: bulkOrder
     });
   } catch (error) {
@@ -200,7 +244,7 @@ export const submitSellerQuotation = async (req, res) => {
   }
 };
 
-// POST Admin Approve Specific Seller Quotation
+// POST Admin / Customer Approve Specific Seller Quotation
 export const approveSellerQuotation = async (req, res) => {
   try {
     const { id } = req.params;
@@ -230,6 +274,16 @@ export const approveSellerQuotation = async (req, res) => {
     bulkOrder.status = "quote_accepted";
     bulkOrder.targetBudgetPerKit = String(winningQuote.quoteAmount);
 
+    // Sync winning quote itemPrices to main requirements sellerPricePerUnit
+    if (Array.isArray(winningQuote.itemPrices) && winningQuote.itemPrices.length > 0 && Array.isArray(bulkOrder.requirements)) {
+      winningQuote.itemPrices.forEach((ip) => {
+        const reqItem = bulkOrder.requirements.find((r, idx) => String(r._id || idx) === String(ip.itemId) || String(r.itemName) === String(ip.itemName));
+        if (reqItem) {
+          reqItem.sellerPricePerUnit = Number(ip.pricePerUnit) || 0;
+        }
+      });
+    }
+
     await bulkOrder.save();
 
     res.json({
@@ -247,15 +301,19 @@ export const createSellerSchoolOrder = async (req, res) => {
   try {
     const sellerId = req.user?.id || null;
     const {
+      referenceId,
       institutionName,
       contactName,
       contactPhone,
       contactEmail,
+      requirements,
       requirementSummary,
       quantity,
       estimatedBudget,
+      overallBudget,
       quoteAmount,
       targetDeliveryDate,
+      logoEmbroideryRequired,
       additionalNotes
     } = req.body;
 
@@ -263,7 +321,22 @@ export const createSellerSchoolOrder = async (req, res) => {
       return res.status(400).json({ message: "Institution name, contact person, and phone are required." });
     }
 
-    const refId = `SCH-REQ-${Math.floor(1000 + Math.random() * 9000)}`;
+    const refId = referenceId || `SCH-REQ-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const formattedRequirements = Array.isArray(requirements) ? requirements.map(r => ({
+      category: r.category || "General Bulk Procurement",
+      itemName: r.itemName || r.name || "Bulk Item",
+      quantity: Number(r.quantity) || 100,
+      budgetPerUnit: Number(r.budgetPerUnit || r.budgetUnit) || 0,
+      sellerPricePerUnit: Number(r.sellerPricePerUnit || r.sellerPrice) || 0,
+      sampleImage: r.sampleImage || (Array.isArray(r.sampleImages) ? r.sampleImages[0] : ""),
+      sampleImages: Array.isArray(r.sampleImages) ? r.sampleImages : (r.sampleImage ? [r.sampleImage] : []),
+      customizations: r.customizations || "",
+      notes: r.notes || r.additionalNotes || ""
+    })) : [];
+
+    const calculatedOverallBudget = Number(overallBudget) || formattedRequirements.reduce((sum, item) => sum + (item.quantity * item.budgetPerUnit), 0) || Number(estimatedBudget) || 0;
+    const calculatedTotalQty = Number(quantity) || formattedRequirements.reduce((sum, item) => sum + item.quantity, 0) || 100;
 
     const newReq = new SchoolBulkOrder({
       referenceId: refId,
@@ -274,10 +347,13 @@ export const createSellerSchoolOrder = async (req, res) => {
       city: req.body.city || "Delhi",
       state: req.body.state || "Delhi",
       pincode: req.body.pincode || "110001",
-      totalQuantity: Number(quantity) || 100,
-      targetBudgetPerKit: String(estimatedBudget || 1000),
+      requirements: formattedRequirements,
+      totalQuantity: calculatedTotalQty,
+      overallBudget: calculatedOverallBudget,
+      targetBudgetPerKit: String(calculatedOverallBudget || estimatedBudget || 1000),
       additionalNotes: requirementSummary || additionalNotes || "",
       targetDeliveryDate: targetDeliveryDate || "",
+      logoEmbroideryRequired: Boolean(logoEmbroideryRequired),
       sellerId: sellerId,
       status: sellerId ? "Requirement Received" : "pending"
     });
@@ -286,6 +362,33 @@ export const createSellerSchoolOrder = async (req, res) => {
     res.status(201).json({ success: true, message: "School bulk order created successfully", order: newReq });
   } catch (error) {
     res.status(500).json({ message: "Failed to create school bulk order", error: error.message });
+  }
+};
+
+// PATCH Update Item-Level Seller Offered Prices
+export const updateItemSellerPrices = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { itemPrices } = req.body; // [{ itemId: string, sellerPricePerUnit: number }]
+
+    const bulkOrder = await SchoolBulkOrder.findById(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ message: "School bulk requirement request not found" });
+    }
+
+    if (Array.isArray(itemPrices) && Array.isArray(bulkOrder.requirements)) {
+      itemPrices.forEach((ip) => {
+        const reqItem = bulkOrder.requirements.find((r, idx) => String(r._id || idx) === String(ip.itemId) || String(r.itemName) === String(ip.itemName));
+        if (reqItem) {
+          reqItem.sellerPricePerUnit = Number(ip.sellerPricePerUnit) || 0;
+        }
+      });
+    }
+
+    await bulkOrder.save();
+    res.json({ success: true, message: "Item seller prices updated successfully", order: bulkOrder });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update item seller prices", error: error.message });
   }
 };
 

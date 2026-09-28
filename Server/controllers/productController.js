@@ -23,6 +23,19 @@ const parseArray = (input) => {
   return [];
 };
 
+// Helper function to safely parse boolean inputs
+const parseBool = (val, defaultVal = true) => {
+  if (val === undefined || val === null || val === "") return defaultVal;
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const s = val.trim().toLowerCase();
+    if (s === "false" || s === "0" || s === "off" || s === "no") return false;
+    if (s === "true" || s === "1" || s === "on" || s === "yes") return true;
+  }
+  if (typeof val === "number") return val !== 0;
+  return Boolean(val);
+};
+
 // Timeout race wrapper to ensure responses under 15 seconds
 const withTimeout = (promise, ms = 15000) => {
   return Promise.race([
@@ -423,6 +436,10 @@ export const createProduct = async (req, res) => {
       payload.gstPercentage = parsedGstVal;
       payload.gstRate = parsedGstVal;
     }
+    payload.isGstInclusive = parseBool(payload.isGstInclusive, true);
+    if (payload.isReturnable !== undefined) payload.isReturnable = parseBool(payload.isReturnable, true);
+    if (payload.isExchangeable !== undefined) payload.isExchangeable = parseBool(payload.isExchangeable, true);
+    if (payload.isRefundable !== undefined) payload.isRefundable = parseBool(payload.isRefundable, true);
 
     if (Array.isArray(payload.sizeVariants) && payload.sizeVariants.length > 0) {
       payload.sizeVariants = payload.sizeVariants.map((v, vIdx) => {
@@ -503,6 +520,12 @@ export const updateProduct = async (req, res) => {
     if (updates.ages !== undefined) updates.ages = parseArray(updates.ages);
     if (updates.colors !== undefined) updates.colors = parseArray(updates.colors);
     if (updates.tags !== undefined) updates.tags = parseArray(updates.tags);
+    if (updates.isGstInclusive !== undefined) {
+      updates.isGstInclusive = parseBool(updates.isGstInclusive, true);
+    }
+    if (updates.isReturnable !== undefined) updates.isReturnable = parseBool(updates.isReturnable, true);
+    if (updates.isExchangeable !== undefined) updates.isExchangeable = parseBool(updates.isExchangeable, true);
+    if (updates.isRefundable !== undefined) updates.isRefundable = parseBool(updates.isRefundable, true);
     if (updates.paymentMethodAllowed !== undefined) {
       const pMethod = updates.paymentMethodAllowed;
       updates.paymentMethodsAllowed = pMethod === "COD_Only"
