@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const platformSettingSchema = new mongoose.Schema({
   key: { type: String, default: "global_settings", unique: true },
   schoolRadiusKm: { type: Number, default: 25 },
-  defaultCommissionRate: { type: Number, default: 10 },
+  defaultCommissionRate: { type: Number, default: 5 },
   gstTaxRate: { type: Number, default: 18 },
   shippingFee: { type: Number, default: 50 },
   minOrderFreeShipping: { type: Number, default: 99 },

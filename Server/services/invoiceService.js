@@ -1,5 +1,163 @@
 import PDFDocument from "pdfkit";
 
+export const isGenericSellerPlaceholder = (val) => {
+  if (!val || typeof val !== 'string') return true;
+  const s = val.trim().toLowerCase();
+  return (
+    s === '' ||
+    s === 'bookvardi verified seller hub' ||
+    s === 'bookvardi verified seller' ||
+    s === 'bookvardimerchant' ||
+    s === 'bookvardi merchant' ||
+    s === 'book vardi partner merchant' ||
+    s === 'book vardi partner store' ||
+    s === 'partner merchant' ||
+    s === 'unknown seller' ||
+    s === 'new merchant' ||
+    s === 'merchant store' ||
+    s === 'direct marketplace' ||
+    s === 'n/a'
+  );
+};
+
+export const isGenericCustomerPlaceholder = (val) => {
+  if (!val || typeof val !== 'string') return true;
+  const s = val.trim().toLowerCase();
+  return (
+    s === '' ||
+    s === 'student' ||
+    s === 'student customer' ||
+    s === 'test student' ||
+    s === 'avatar upload tester' ||
+    s === 'customer' ||
+    s === 'valued customer' ||
+    s === 'verified customer' ||
+    s === 'user' ||
+    s === 'null' ||
+    s === 'undefined' ||
+    s === 'n/a'
+  );
+};
+
+export const resolveInvoiceSellerDetails = (order, filterSellerId = null) => {
+  const items = order.items || [];
+  let targetItem = items.find(it => {
+    if (filterSellerId) {
+      const sId = it.sellerId?._id?.toString() || it.sellerId?.toString();
+      return sId === filterSellerId.toString();
+    }
+    const cand = it.sellerDetails?.storeName || it.sellerDetails?.sellerName || it.sellerName || it.storeName;
+    return cand && !isGenericSellerPlaceholder(cand);
+  }) || items[0] || {};
+
+  const sObj = (targetItem.sellerId && typeof targetItem.sellerId === 'object') ? targetItem.sellerId : null;
+  const sDetails = targetItem.sellerDetails || order.sellerDetails || {};
+
+  const storeCandidate = 
+    (sObj && !isGenericSellerPlaceholder(sObj.storeName) && sObj.storeName) ||
+    (sObj && !isGenericSellerPlaceholder(sObj.name) && sObj.name) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.storeName) && sDetails.storeName) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.sellerName) && sDetails.sellerName) ||
+    (!isGenericSellerPlaceholder(targetItem.sellerName) && targetItem.sellerName) ||
+    (!isGenericSellerPlaceholder(targetItem.storeName) && targetItem.storeName) ||
+    (!isGenericSellerPlaceholder(targetItem.sellerStoreName) && targetItem.sellerStoreName) ||
+    (!isGenericSellerPlaceholder(order.sellerStoreName) && order.sellerStoreName) ||
+    (!isGenericSellerPlaceholder(order.sellerName) && order.sellerName) ||
+    sObj?.storeName ||
+    sObj?.name ||
+    sDetails.storeName ||
+    sDetails.sellerName ||
+    targetItem.sellerName ||
+    targetItem.storeName ||
+    order.sellerStoreName ||
+    order.sellerName ||
+    "BookVardi Verified Seller";
+
+  const ownerCandidate = sObj?.name || sObj?.ownerFullName || sDetails.sellerName || sDetails.name || "";
+  const phoneCandidate = sObj?.phone || sDetails.phone || targetItem.sellerPhone || order.sellerPhone || "";
+  const emailCandidate = sObj?.email || sDetails.email || targetItem.sellerEmail || order.sellerEmail || "";
+  const addressCandidate = sObj?.address || sObj?.addressLine || sDetails.address || targetItem.sellerAddress || order.sellerAddress || "";
+  const cityCandidate = sObj?.city || sDetails.city || targetItem.sellerCity || order.sellerCity || "";
+  const stateCandidate = sObj?.state || sDetails.state || targetItem.sellerState || order.sellerState || "";
+  const pincodeCandidate = sObj?.pincode || sDetails.pincode || "";
+  const gstCandidate = sObj?.gstNumber || sDetails.gstNumber || order.gstNumber || "";
+
+  return {
+    storeName: storeCandidate,
+    ownerName: ownerCandidate,
+    phone: phoneCandidate,
+    email: emailCandidate,
+    address: addressCandidate,
+    city: cityCandidate,
+    state: stateCandidate,
+    pincode: pincodeCandidate,
+    gstNumber: gstCandidate
+  };
+};
+
+export const resolveInvoiceConsumerDetails = (order) => {
+  const addr = (typeof order.shippingAddress === 'object' && order.shippingAddress !== null)
+    ? order.shippingAddress
+    : {};
+
+  // 1. Consumer Phone & Email first
+  const phoneFromAddr = addr.phone || addr.mobile || addr.contactPhone;
+  const phoneFromCust = typeof order.customer === 'object' ? order.customer?.phone : (typeof order.customerPhone === 'string' ? order.customerPhone : '');
+  const phoneFromUser = (order.userId && typeof order.userId === 'object') ? order.userId.phone : (order.userPhone || order.phone);
+  const resolvedPhone = phoneFromAddr || phoneFromCust || phoneFromUser || "";
+
+  const emailFromCust = typeof order.customer === 'object' ? order.customer?.email : (typeof order.customerEmail === 'string' ? order.customerEmail : '');
+  const emailFromAddr = addr.email;
+  const emailFromUser = (order.userId && typeof order.userId === 'object') ? order.userId.email : (order.userEmail || order.email);
+  const resolvedEmail = emailFromCust || emailFromAddr || emailFromUser || "";
+
+  // 2. Consumer Name
+  const candidateNames = [
+    addr.name,
+    addr.fullName,
+    addr.recipientName,
+    addr.contactPerson,
+    typeof order.customer === 'object' ? order.customer?.name : null,
+    typeof order.customerName === 'string' ? order.customerName : null,
+    (order.userId && typeof order.userId === 'object') ? (order.userId.name || order.userId.fullName) : null,
+    order.userName,
+    order.user?.name
+  ].filter(n => n && !isGenericCustomerPlaceholder(n));
+
+  const resolvedName = candidateNames[0] || (resolvedPhone ? `Verified Consumer (${resolvedPhone.slice(-4)})` : "Verified Consumer");
+
+  // 3. Consumer Address
+  let street = "";
+  let cityStatePin = "";
+
+  if (typeof order.shippingAddress === 'string' && order.shippingAddress.trim() && !order.shippingAddress.toLowerCase().includes('customer address') && !order.shippingAddress.toLowerCase().includes('customer delivery address')) {
+    street = order.shippingAddress.trim();
+  } else if (typeof order.address === 'string' && order.address.trim() && !order.address.toLowerCase().includes('customer address') && !order.address.toLowerCase().includes('customer delivery address')) {
+    street = order.address.trim();
+  } else {
+    const line1 = [
+      addr.houseNumber || addr.flat || addr.flatNo,
+      addr.addressLine || addr.addressLine1 || addr.street || addr.address,
+      addr.colony || addr.landmark || addr.area
+    ].filter(Boolean).join(', ');
+
+    street = line1 || (addr.city ? `${addr.city}, ${addr.state || ''}`.trim() : "Verified Delivery Location");
+    cityStatePin = [
+      addr.city,
+      addr.state,
+      addr.pincode ? `PIN: ${addr.pincode}` : ''
+    ].filter(Boolean).join(', ');
+  }
+
+  return {
+    name: resolvedName,
+    phone: resolvedPhone,
+    email: resolvedEmail,
+    street,
+    cityStatePin: cityStatePin || (addr.city || addr.state ? `${addr.city || ''} ${addr.state || ''}`.trim() : "India")
+  };
+};
+
 /**
  * Generate a professional Flipkart / Amazon style GST Tax Invoice PDF
  * @param {Object} order - Order object from MongoDB (populated with product & seller)
@@ -19,12 +177,12 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .fillColor(accentColor)
     .fontSize(22)
     .font("Helvetica-Bold")
-    .text("SchoolKart", 40, 40)
+    .text("BookVardi", 40, 40)
     .fontSize(9)
     .font("Helvetica")
     .fillColor(mutedColor)
     .text("India's Premier School & Education Marketplace", 40, 68)
-    .text("GSTIN: 09AAACS1429B1Z2 | support@schoolkart.com", 40, 80);
+    .text("GSTIN: 09AAACS1429B1Z2 | support@bookvardi.com", 40, 80);
 
   doc
     .fillColor(primaryColor)
@@ -36,16 +194,14 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .fillColor(mutedColor)
     .text(`Invoice No: INV-${order.orderId || order._id.toString().substring(0, 8).toUpperCase()}`, 400, 62, { align: "right" })
     .text(`Order ID: ${order.orderId || order._id}`, 400, 74, { align: "right" })
-    .text(`Date: ${new Date(order.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`, 400, 86, { align: "right" });
+    .text(`Date: ${new Date(order.createdAt || Date.now()).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`, 400, 86, { align: "right" });
 
   // Divider Line
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 105).lineTo(555, 105).stroke();
 
   // 2. SOLD BY (SELLER) & BILL TO / SHIP TO SECTION
-  const sellerInfo = order.items && order.items[0]?.sellerId ? order.items[0].sellerId : null;
-  const sellerName = sellerInfo?.storeName || sellerInfo?.name || "SchoolKart Verified Seller Hub";
-  const sellerPhone = sellerInfo?.phone || "Support Helpline";
-  const sellerCity = sellerInfo?.city || "India";
+  const resolvedSeller = resolveInvoiceSellerDetails(order, filterSellerId);
+  const resolvedConsumer = resolveInvoiceConsumerDetails(order);
 
   // Left Column: Sold By
   doc
@@ -53,34 +209,56 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
     .text("Sold By / Seller:", 40, 118)
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedSeller.storeName, 40, 132, { width: 260 })
     .font("Helvetica")
-    .fontSize(9)
-    .fillColor(mutedColor)
-    .text(sellerName, 40, 132)
-    .text(`Location: ${sellerCity}`, 40, 144)
-    .text(`Helpline: ${sellerPhone}`, 40, 156)
-    .text("GST Category: Regular Taxpayer", 40, 168);
+    .fontSize(8.5)
+    .fillColor(mutedColor);
+
+  let sY = 145;
+  if (resolvedSeller.ownerName && resolvedSeller.ownerName !== resolvedSeller.storeName) {
+    doc.text(`Contact: ${resolvedSeller.ownerName}`, 40, sY, { width: 260 });
+    sY += 12;
+  }
+  const sellerLocStr = [resolvedSeller.address, resolvedSeller.city, resolvedSeller.state, resolvedSeller.pincode].filter(Boolean).join(", ");
+  doc.text(sellerLocStr ? `Address: ${sellerLocStr}` : "Location: India", 40, sY, { width: 260 });
+  sY += 12;
+
+  const sellerContactStr = [
+    resolvedSeller.phone ? `Helpline: ${resolvedSeller.phone}` : null,
+    resolvedSeller.email ? `Email: ${resolvedSeller.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (sellerContactStr) {
+    doc.text(sellerContactStr, 40, sY, { width: 260 });
+    sY += 12;
+  }
+  doc.text(resolvedSeller.gstNumber ? `GSTIN: ${resolvedSeller.gstNumber}` : "GST Category: Regular Taxpayer", 40, sY, { width: 260 });
 
   // Right Column: Customer Shipping Address
-  const customerName = order.customer?.name || "Valued Customer";
-  const customerPhone = order.customer?.phone || "";
-  const customerEmail = order.customer?.email || "";
-  const address = order.shippingAddress || {};
-  const street = address.street || order.address || "Delivery Address";
-  const cityState = `${address.city || ""} ${address.state || ""} ${address.pincode || ""}`.trim();
-
   doc
     .fontSize(10)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
     .text("Billing & Delivery Address:", 320, 118)
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedConsumer.name, 320, 132, { width: 235 })
     .font("Helvetica")
-    .fontSize(9)
+    .fontSize(8.5)
     .fillColor(mutedColor)
-    .text(customerName, 320, 132)
-    .text(street, 320, 144, { width: 235 })
-    .text(cityState || "India", 320, 156)
-    .text(`Phone: ${customerPhone} ${customerEmail ? "| " + customerEmail : ""}`, 320, 168, { width: 235 });
+    .text(resolvedConsumer.street, 320, 145, { width: 235 })
+    .text(resolvedConsumer.cityStatePin, 320, 157, { width: 235 });
+
+  const consumerContactStr = [
+    resolvedConsumer.phone ? `Phone: ${resolvedConsumer.phone}` : null,
+    resolvedConsumer.email ? `Email: ${resolvedConsumer.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (consumerContactStr) {
+    doc.text(consumerContactStr, 320, 169, { width: 235 });
+  }
 
   // Divider Line
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 195).lineTo(555, 195).stroke();
@@ -105,8 +283,52 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     doc.fontSize(8).fillColor(mutedColor).text(`Razorpay Payment ID: ${order.razorpayPaymentId}`, 40, 220);
   }
 
+  // Logistics tracking gating: strictly visible when Out for Delivery & partner decided
+  const normStatus = String(order.overallStatus || order.status || "").toLowerCase().replace(/_/g, " ");
+  const isOut = normStatus === "out for delivery" || normStatus === "delivered";
+  const isSelf = String(order.deliveryMode || order.deliveryType || "").toLowerCase().includes("self") || Boolean(order.selfDeliveryDetails?.deliveryPartnerToken || order.selfDeliveryDetails?.deliveryPersonName);
+  const isThirdParty = String(order.deliveryMode || order.deliveryType || "").toLowerCase().includes("third") || Boolean(order.courierName || order.thirdPartyDetails?.courierName);
+  const hasPartner = isSelf || isThirdParty || Boolean(order.courierName || order.selfDeliveryDetails?.deliveryPersonName);
+  const hasTracking = isOut && hasPartner && Boolean(order.trackingNumber || order.selfDeliveryDetails?.deliveryPartnerToken || order.thirdPartyDetails?.trackingNumber);
+
+  const deliveryPartnerDisplay = isSelf 
+    ? (order.selfDeliveryDetails?.deliveryPersonName ? `Direct Self-Delivery (Rider: ${order.selfDeliveryDetails.deliveryPersonName})` : "Direct Self-Delivery (Store Fleet)")
+    : (order.courierName || order.thirdPartyDetails?.courierName || "3rd-Party Logistics Carrier");
+
+  const trackingNumberDisplay = order.trackingNumber || (isSelf ? order.selfDeliveryDetails?.deliveryPartnerToken : order.thirdPartyDetails?.trackingNumber) || "";
+  const trackingLinkDisplay = order.trackingUrl || order.selfDeliveryDetails?.trackingUrl || order.thirdPartyDetails?.trackingUrl || "";
+
+  let trackingOffset = 0;
+  const trackingLineY = 220 + (order.razorpayPaymentId ? 14 : 0);
+  if (hasTracking) {
+    trackingOffset = 18;
+    doc
+      .fontSize(8)
+      .font("Helvetica-Bold")
+      .fillColor("#047857")
+      .text(`Dispatch & Delivery: `, 40, trackingLineY, { continued: true })
+      .font("Helvetica")
+      .fillColor(primaryColor)
+      .text(`${deliveryPartnerDisplay} | Tracking ID: `, { continued: true })
+      .font("Helvetica-Bold")
+      .text(trackingNumberDisplay, { continued: trackingLinkDisplay ? true : false });
+    if (trackingLinkDisplay) {
+      doc
+        .font("Helvetica")
+        .fillColor(accentColor)
+        .text(` | URL: ${trackingLinkDisplay}`);
+    }
+  } else {
+    trackingOffset = 14;
+    doc
+      .fontSize(8)
+      .font("Helvetica")
+      .fillColor(mutedColor)
+      .text(`Logistics Status: ${isOut ? "Out for Delivery (Awaiting Partner Assignment)" : "Awaiting Out for Delivery Dispatch"} (Tracking generated upon Out for Delivery)`, 40, trackingLineY);
+  }
+
   // 4. ITEMS TABLE HEADER
-  const tableTop = order.razorpayPaymentId ? 240 : 230;
+  const tableTop = (order.razorpayPaymentId ? 235 : 220) + trackingOffset + 6;
   
   // Table Header Background
   doc.rect(40, tableTop, 515, 22).fill("#f1f5f9");
@@ -148,12 +370,19 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   const getItemSellerName = (item) => {
     if (item.sellerId && typeof item.sellerId === "object") {
       const sName = item.sellerId.storeName || item.sellerId.name || item.sellerId.sellerName || item.sellerId.legalName;
-      if (sName) return sName;
+      if (sName && !isGenericSellerPlaceholder(sName)) return sName;
     }
-    if (item.sellerName) return item.sellerName;
-    if (item.storeName) return item.storeName;
-    if (item.seller) return typeof item.seller === "string" ? item.seller : (item.seller.storeName || item.seller.name);
-    return sellerName;
+    if (item.sellerDetails && typeof item.sellerDetails === "object") {
+      const sName = item.sellerDetails.storeName || item.sellerDetails.sellerName;
+      if (sName && !isGenericSellerPlaceholder(sName)) return sName;
+    }
+    if (item.sellerName && !isGenericSellerPlaceholder(item.sellerName)) return item.sellerName;
+    if (item.storeName && !isGenericSellerPlaceholder(item.storeName)) return item.storeName;
+    if (item.seller) {
+      const sName = typeof item.seller === "string" ? item.seller : (item.seller.storeName || item.seller.name);
+      if (sName && !isGenericSellerPlaceholder(sName)) return sName;
+    }
+    return resolvedSeller.storeName || "BookVardi Verified Seller";
   };
 
   itemsToRender.forEach((item, index) => {
@@ -250,12 +479,12 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     return parseStateKeyFromText(fallbackText || '');
   };
 
-  const sellerStateKey = getDynamicState(sellerInfo, `${sellerInfo?.city || ''} ${sellerInfo?.address || ''}`);
-  const customerStateKey = getDynamicState(address, `${street} ${cityState}`);
+  const sellerStateKey = getDynamicState(resolvedSeller, `${resolvedSeller?.state || ''} ${resolvedSeller?.city || ''} ${resolvedSeller?.address || ''}`);
+  const customerStateKey = getDynamicState(order.shippingAddress, `${resolvedConsumer?.street || ''} ${resolvedConsumer?.cityStatePin || ''}`);
 
   const isSameState = !sellerStateKey || !customerStateKey || sellerStateKey === customerStateKey;
-  const sellerStateStr = sellerInfo?.state || sellerInfo?.city || sellerStateKey || "Seller Location";
-  const customerStateStr = address?.state || address?.city || customerStateKey || "Customer Location";
+  const sellerStateStr = resolvedSeller?.state || resolvedSeller?.city || sellerStateKey || "Seller Location";
+  const customerStateStr = order.shippingAddress?.state || order.shippingAddress?.city || customerStateKey || "Customer Location";
 
   const taxableValue = Math.round(totalTaxableValue * 100) / 100;
   const totalTax = Math.round(totalTaxAmount * 100) / 100;
@@ -263,36 +492,50 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   const sgst = cgst;
 
   // Tax Breakdown (Left)
-  if (isSameState) {
-    doc
-      .fontSize(8)
-      .font("Helvetica-Bold")
-      .fillColor(primaryColor)
-      .text("GST Tax Breakdown (Intra-State):", 45, y)
-      .font("Helvetica")
-      .fillColor(mutedColor)
-      .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
-      .text(`CGST (Central 50%): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
-      .text(`SGST (State 50%): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
-      .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+  if (totalTax > 0) {
+    if (isSameState) {
+      doc
+        .fontSize(8)
+        .font("Helvetica-Bold")
+        .fillColor(primaryColor)
+        .text("GST Tax Breakdown (Intra-State):", 45, y)
+        .font("Helvetica")
+        .fillColor(mutedColor)
+        .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
+        .text(`CGST (Central 50%): ₹${cgst.toLocaleString("en-IN")}`, 45, y + 26)
+        .text(`SGST (State 50%): ₹${sgst.toLocaleString("en-IN")}`, 45, y + 38)
+        .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+    } else {
+      doc
+        .fontSize(8)
+        .font("Helvetica-Bold")
+        .fillColor(primaryColor)
+        .text("GST Tax Breakdown (Inter-State):", 45, y)
+        .font("Helvetica")
+        .fillColor(mutedColor)
+        .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
+        .text(`IGST (Integrated 100%): ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 26)
+        .text(`Supply: ${sellerStateStr} -> ${customerStateStr}`, 45, y + 38)
+        .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+    }
   } else {
     doc
       .fontSize(8)
       .font("Helvetica-Bold")
       .fillColor(primaryColor)
-      .text("GST Tax Breakdown (Inter-State):", 45, y)
+      .text("Tax Classification:", 45, y)
       .font("Helvetica")
       .fillColor(mutedColor)
-      .text(`Taxable Amount: ₹${taxableValue.toLocaleString("en-IN")}`, 45, y + 14)
-      .text(`IGST (Integrated 100%): ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 26)
-      .text(`Supply: ${sellerStateStr} -> ${customerStateStr}`, 45, y + 38)
-      .text(`Total Tax Collected: ₹${totalTax.toLocaleString("en-IN")}`, 45, y + 50);
+      .text("Retail Consumer Invoice", 45, y + 14)
+      .text("All item prices are inclusive of all applicable taxes.", 45, y + 26)
+      .text("Zero additional tax levied at checkout.", 45, y + 38);
   }
 
   // Financial Summary (Right)
   const shippingCost = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
   const discountAmount = Number(order.discount ?? order.discountAmount ?? 0);
-  const calculatedGrandTotal = Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount));
+  const pointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
+  const calculatedGrandTotal = Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
 
   let rightY = y;
   doc
@@ -309,26 +552,31 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
       .fillColor("#047857") // Emerald green
       .text(`-₹${discountAmount.toLocaleString("en-IN")}`, 480, rightY, { align: "right" })
       .fillColor(mutedColor);
-  } else {
+  }
+
+  if (pointsDiscount > 0) {
+    rightY += 14;
     doc
-      .text("Offer / Coupon:", 350, rightY, { align: "right", width: 120 })
-      .text("Not Applied (₹0.00)", 480, rightY, { align: "right" });
+      .text("Reward Points:", 350, rightY, { align: "right", width: 120 })
+      .fillColor("#047857")
+      .text(`-₹${pointsDiscount.toLocaleString("en-IN")}`, 480, rightY, { align: "right" })
+      .fillColor(mutedColor);
   }
 
   rightY += 14;
   doc
-    .text("Delivery Charges:", 350, rightY, { align: "right", width: 120 })
-    .text(shippingCost === 0 ? "Not Applied (FREE)" : `₹${shippingCost.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+    .text("Delivery Charges (Incl. 18% GST):", 310, rightY, { align: "right", width: 160 })
+    .text(shippingCost === 0 ? "FREE" : `₹${shippingCost.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
 
   // Grand Total Banner
-  y += 45;
-  doc.rect(360, y, 195, 26).fill("#e0f2fe"); // Light sky blue
+  const bannerY = Math.max(y + 55, rightY + 16);
+  doc.rect(360, bannerY, 195, 26).fill("#e0f2fe"); // Light sky blue
   doc
     .fontSize(11)
     .font("Helvetica-Bold")
     .fillColor(accentColor)
-    .text("Grand Total:", 370, y + 7)
-    .text(`₹${calculatedGrandTotal.toLocaleString("en-IN")}`, 480, y + 7, { align: "right" });
+    .text("Grand Total:", 370, bannerY + 7)
+    .text(`₹${calculatedGrandTotal.toLocaleString("en-IN")}`, 480, bannerY + 7, { align: "right" });
 
   // 7. FOOTER & DECLARATION
   const footerY = 730;
@@ -343,10 +591,279 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .fillColor(mutedColor)
     .text("1. This is a computer generated invoice and does not require physical signature.", 40, footerY + 22)
     .text("2. All disputes are subject to local judicial jurisdiction.", 40, footerY + 32)
-    .text("3. Returns / exchanges are subject to the SchoolKart standard 7-day school exchange policy.", 40, footerY + 42)
+    .text("3. Returns / exchanges are subject to the BookVardi standard 7-day school exchange policy.", 40, footerY + 42)
     .font("Helvetica-Bold")
     .fillColor(accentColor)
-    .text("Thank you for choosing SchoolKart for your child's educational journey!", 40, footerY + 56, { align: "center" });
+    .text("Thank you for choosing BookVardi for your child's educational journey!", 40, footerY + 56, { align: "center" });
+
+  doc.end();
+  return doc;
+};
+
+/**
+ * Generate a professional GST Credit Note PDF for cancelled orders
+ * @param {Object} order - Order object from MongoDB
+ * @param {Object} [filterSellerId] - Optional seller ID
+ * @returns {PDFDocument} - Streaming PDF document
+ */
+export const generateCreditNotePDF = (order, filterSellerId = null) => {
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+
+  const primaryColor = "#0f172a"; // Slate 900
+  const roseColor = "#be123c"; // Rose 700
+  const mutedColor = "#64748b"; // Slate 500
+  const borderColor = "#e2e8f0"; // Slate 200
+
+  const orderIdStr = order.orderId || (order._id ? order._id.toString().substring(0, 8).toUpperCase() : "ORDER");
+  const creditNoteNo = `CN-${orderIdStr}`;
+  const originalInvoiceNo = `INV-${orderIdStr}`;
+  const cancelDateStr = new Date(order.cancelledAt || order.updatedAt || order.createdAt).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  });
+
+  // 1. HEADER SECTION (Brand & Credit Note Title)
+  doc
+    .fillColor(roseColor)
+    .fontSize(22)
+    .font("Helvetica-Bold")
+    .text("BookVardi", 40, 40)
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("India's Premier School & Education Marketplace", 40, 68)
+    .text("GSTIN: 09AAACS1429B1Z2 | support@bookvardi.com", 40, 80);
+
+  doc
+    .fillColor(roseColor)
+    .fontSize(16)
+    .font("Helvetica-Bold")
+    .text("CREDIT NOTE", 400, 40, { align: "right" })
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text(`Credit Note No: ${creditNoteNo}`, 400, 62, { align: "right" })
+    .text(`Original Invoice Ref: ${originalInvoiceNo}`, 400, 74, { align: "right" })
+    .text(`Date of Reversal: ${cancelDateStr}`, 400, 86, { align: "right" });
+
+  // Divider Line
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 105).lineTo(555, 105).stroke();
+
+  // 2. SELLER & CUSTOMER SECTION
+  const resolvedSeller = resolveInvoiceSellerDetails(order, filterSellerId);
+  const resolvedConsumer = resolveInvoiceConsumerDetails(order);
+
+  // Left Column: Issued By
+  doc
+    .fontSize(10)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Issued By (Seller):", 40, 118)
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedSeller.storeName, 40, 132, { width: 260 })
+    .font("Helvetica")
+    .fontSize(8.5)
+    .fillColor(mutedColor);
+
+  let cnSY = 145;
+  if (resolvedSeller.ownerName && resolvedSeller.ownerName !== resolvedSeller.storeName) {
+    doc.text(`Contact: ${resolvedSeller.ownerName}`, 40, cnSY, { width: 260 });
+    cnSY += 12;
+  }
+  const cnLocStr = [resolvedSeller.address, resolvedSeller.city, resolvedSeller.state, resolvedSeller.pincode].filter(Boolean).join(", ");
+  doc.text(cnLocStr ? `Address: ${cnLocStr}` : "Location: India", 40, cnSY, { width: 260 });
+  cnSY += 12;
+
+  const cnSellerContactStr = [
+    resolvedSeller.phone ? `Helpline: ${resolvedSeller.phone}` : null,
+    resolvedSeller.email ? `Email: ${resolvedSeller.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (cnSellerContactStr) {
+    doc.text(cnSellerContactStr, 40, cnSY, { width: 260 });
+    cnSY += 12;
+  }
+  doc.text(resolvedSeller.gstNumber ? `GSTIN: ${resolvedSeller.gstNumber}` : "GST Category: Regular Taxpayer", 40, cnSY, { width: 260 });
+
+  // Right Column: Customer Details
+  doc
+    .fontSize(10)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Issued To (Customer):", 320, 118)
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedConsumer.name, 320, 132, { width: 235 })
+    .font("Helvetica")
+    .fontSize(8.5)
+    .fillColor(mutedColor)
+    .text(resolvedConsumer.street, 320, 145, { width: 235 })
+    .text(resolvedConsumer.cityStatePin, 320, 157, { width: 235 });
+
+  const cnCustContactStr = [
+    resolvedConsumer.phone ? `Phone: ${resolvedConsumer.phone}` : null,
+    resolvedConsumer.email ? `Email: ${resolvedConsumer.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (cnCustContactStr) {
+    doc.text(cnCustContactStr, 320, 169, { width: 235 });
+  }
+
+  // Divider Line
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 195).lineTo(555, 195).stroke();
+
+  // 3. CANCELLATION META BOX
+  doc.rect(40, 205, 515, 30).fill("#fff1f2"); // Light rose background
+  const cancelReason = order.cancellationReason || order.cancelReason || order.reason || "Order Cancellation Requested by Customer";
+
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(roseColor)
+    .text("Status: ORDER CANCELLED & REFUND CREDITED", 50, 212)
+    .font("Helvetica")
+    .fillColor(primaryColor)
+    .text(`Reason: ${cancelReason}`, 50, 223, { width: 495 });
+
+  // 4. ITEMS TABLE HEADER
+  const tableTop = 248;
+  doc.rect(40, tableTop, 515, 22).fill("#f1f5f9");
+
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("#", 45, tableTop + 6)
+    .text("Cancelled Item Description", 65, tableTop + 6)
+    .text("Size / Age", 250, tableTop + 6)
+    .text("Qty", 345, tableTop + 6, { align: "center" })
+    .text("Unit Price", 390, tableTop + 6, { align: "right" })
+    .text("Refunded (INR)", 470, tableTop + 6, { align: "right" });
+
+  let itemsToRender = order.items || [];
+  if (filterSellerId) {
+    itemsToRender = itemsToRender.filter(
+      (item) => item.sellerId && item.sellerId._id?.toString() === filterSellerId.toString()
+    );
+  }
+
+  let y = tableTop + 26;
+  let subtotal = 0;
+
+  itemsToRender.forEach((item, index) => {
+    const itemTotal = (item.finalPrice || item.price || 0) * (item.quantity || 1);
+    subtotal += itemTotal;
+
+    const variantDetails = [
+      item.size ? `Size: ${item.size}` : "",
+      item.age ? `Age: ${item.age}` : "",
+      "Reversal: 100%"
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const itemSeller = item.sellerName || item.storeName || (item.sellerDetails && (item.sellerDetails.storeName || item.sellerDetails.sellerName)) || (item.sellerId && (item.sellerId.storeName || item.sellerId.name)) || resolvedSeller.storeName;
+
+    doc
+      .fontSize(9)
+      .font("Helvetica")
+      .fillColor(primaryColor)
+      .text(`${index + 1}`, 45, y)
+      .text(`${item.name || "Product Item"}\nSold by: ${itemSeller}`, 65, y, { width: 175 })
+      .fillColor(mutedColor)
+      .fontSize(8)
+      .text(variantDetails, 250, y, { width: 95 })
+      .fillColor(primaryColor)
+      .fontSize(9)
+      .text(`${item.quantity || 1}`, 345, y, { align: "center" })
+      .text(`₹${(item.finalPrice || item.price || 0).toLocaleString("en-IN")}`, 390, y, { align: "right" })
+      .font("Helvetica-Bold")
+      .fillColor(roseColor)
+      .text(`-₹${itemTotal.toLocaleString("en-IN")}`, 470, y, { align: "right" });
+
+    y += 32;
+    doc.strokeColor("#f1f5f9").lineWidth(0.5).moveTo(40, y - 4).lineTo(555, y - 4).stroke();
+  });
+
+  // 5. TOTALS CALCULATION
+  y += 10;
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, y).lineTo(555, y).stroke();
+  y += 10;
+
+  const shippingCost = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
+  const discountAmount = Number(order.discount ?? order.discountAmount ?? 0);
+  const pointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
+  const totalRefundAmount = Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
+
+  // Statutory Reversal Notice (Left)
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("GST Statutory Compliance Notice:", 45, y)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("Credit Note issued under Section 34 of CGST Act, 2017.", 45, y + 14)
+    .text("Original supply tax liability reversed in full.", 45, y + 26)
+    .text(`Refund Mode: ${order.paymentMethod || "Online Refund"}`, 45, y + 38)
+    .text(`Refund Status: Completed / Processing`, 45, y + 50);
+
+  // Financial Refund Summary (Right)
+  let rightY = y;
+  doc
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("Subtotal Reversal:", 350, rightY, { align: "right", width: 120 })
+    .text(`₹${subtotal.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+
+  if (discountAmount > 0) {
+    rightY += 14;
+    doc
+      .text("Coupon Reversal:", 350, rightY, { align: "right", width: 120 })
+      .text(`-₹${discountAmount.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+  }
+
+  if (pointsDiscount > 0) {
+    rightY += 14;
+    doc
+      .text("Reward Points Restored:", 350, rightY, { align: "right", width: 120 })
+      .text(`+₹${pointsDiscount.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+  }
+
+  rightY += 14;
+  doc
+    .text("Delivery Adjustment (Incl. 18% GST):", 310, rightY, { align: "right", width: 160 })
+    .text(shippingCost === 0 ? "FREE" : `₹${shippingCost.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+
+  // Net Refunded Banner
+  const bannerY = Math.max(y + 60, rightY + 20);
+  doc.rect(340, bannerY, 215, 28).fill("#fff1f2"); // Rose light
+  doc
+    .fontSize(11)
+    .font("Helvetica-Bold")
+    .fillColor(roseColor)
+    .text("Net Refunded Amount:", 350, bannerY + 8)
+    .text(`₹${totalRefundAmount.toLocaleString("en-IN")}`, 480, bannerY + 8, { align: "right" });
+
+  // 6. FOOTER
+  const footerY = 730;
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, footerY).lineTo(555, footerY).stroke();
+
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Terms & Conditions:", 40, footerY + 10)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("1. This Credit Note certifies full cancellation and refund authorization for the specified order.", 40, footerY + 22)
+    .text("2. The refunded amount has been processed to the customer's original payment method or wallet.", 40, footerY + 32)
+    .font("Helvetica-Bold")
+    .fillColor(roseColor)
+    .text("BookVardi Customer Support Helpline: support@bookvardi.com", 40, footerY + 50, { align: "center" });
 
   doc.end();
   return doc;

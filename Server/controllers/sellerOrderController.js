@@ -3,6 +3,7 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
+import { enrichOrdersWithSellerAndConsumer } from "./orderController.js";
 
 // Use the configured frontend app base URL so delivery links work on local and deployed hosts.
 const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL || "http://localhost:3000";
@@ -259,7 +260,7 @@ export const getSellerOrders = async (req, res) => {
         status: formattedStatus,
         rawStatus: o.overallStatus || o.status || "Pending",
         paymentMethod: o.paymentMethod || "UPI",
-        paymentStatus: o.paymentStatus || "Paid",
+        paymentStatus: o.paymentStatus || (String(o.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "Paid"),
         cancellationReason: o.cancellationReason || "",
         cancelledBy: o.cancelledBy || (o.cancellationReason ? "Customer" : ""),
         cancelledAt: o.cancelledAt || null,
@@ -694,12 +695,15 @@ export const downloadSellerInvoice = async (req, res) => {
 
     const { generateTaxInvoicePDF } = await import("../services/invoiceService.js");
 
-    const filename = `Seller_Invoice_${order.orderId || order._id}.pdf`;
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const filename = `Seller_Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const pdfDoc = generateTaxInvoicePDF(order, sellerId);
+    const pdfDoc = generateTaxInvoicePDF(enrichedOrder, sellerId);
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Seller invoice download error:", error);

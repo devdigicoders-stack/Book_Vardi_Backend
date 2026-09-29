@@ -20,6 +20,7 @@ import mongoose from "mongoose";
 import Admin from "./Server/models/Admin.js";
 import User from "./Server/models/User.js";
 import Seller from "./Server/models/Seller.js";
+import Kit from "./Server/models/Kit.js";
 import bcrypt from "bcryptjs";
 
 // Routes
@@ -114,6 +115,14 @@ const initDefaultSeller = async () => {
         approvedAt: new Date()
       });
       console.log("Default approved seller initialized (+911231231232)");
+    }
+
+    const defaultSellerDoc = existingSeller || await Seller.findOne({ phone: "+911231231232" });
+    if (defaultSellerDoc) {
+      await Kit.updateMany(
+        { $or: [{ sellerId: { $exists: false } }, { sellerId: null }] },
+        { $set: { sellerId: defaultSellerDoc._id } }
+      );
     }
   } catch (err) {
     console.error("Default seller creation error:", err.message);

@@ -1052,16 +1052,19 @@ export const getPublicPlatformSettings = async (req, res) => {
       settings = await PlatformSetting.create({ key: "global_settings" });
     }
     const threshold = settings.minOrderFreeShipping !== undefined ? Number(settings.minOrderFreeShipping) : (settings.freeShippingThreshold !== undefined ? Number(settings.freeShippingThreshold) : 99);
+    const commRate = settings.defaultCommissionRate !== undefined ? Number(settings.defaultCommissionRate) : 5;
     res.json({
       freeShippingThreshold: threshold,
       minOrderFreeShipping: threshold,
       shippingFee: Number(settings.shippingFee || 49),
+      defaultCommissionRate: commRate,
+      commissionRate: commRate,
       supportEmail: settings.supportEmail || "support@bookvardi.in",
       supportPhone: settings.supportPhone || "+91 98765 43210"
     });
   } catch (error) {
     console.error("Error in getPublicPlatformSettings:", error);
-    res.json({ freeShippingThreshold: 99, minOrderFreeShipping: 99, shippingFee: 49 });
+    res.json({ freeShippingThreshold: 99, minOrderFreeShipping: 99, shippingFee: 49, defaultCommissionRate: 5, commissionRate: 5 });
   }
 };
 

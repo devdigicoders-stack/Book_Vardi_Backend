@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import School from "../models/School.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { cacheMiddleware, clearCache } from "../utils/cache.js";
@@ -161,6 +162,8 @@ router.post("/bulk-order", async (req, res) => {
       requirements,
       totalQuantity,
       targetDeliveryDate,
+      expectedQuotationDate,
+      quotationDeadline,
       logoEmbroideryRequired,
       targetBudgetPerKit,
       additionalNotes
@@ -193,6 +196,15 @@ router.post("/bulk-order", async (req, res) => {
     const totalQty = Number(totalQuantity) || sanitizedRequirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
     const calculatedOverallBudget = Number(req.body.overallBudget) || sanitizedRequirements.reduce((sum, r) => sum + (r.quantity * r.budgetPerUnit), 0) || Number(targetBudgetPerKit) || 0;
 
+    // Prepayment is NOT initiated by buyer; only specified by seller upon quotation
+    const buyerAdvType = req.body.buyerAdvanceType || "percentage";
+    const buyerAdvPct = Number(req.body.buyerAdvancePercentage) || 0;
+    const buyerAdvAmt = Number(req.body.buyerAdvanceAmount) || 0;
+
+    const userId = req.user?.id || req.user?._id || req.headers["x-user-id"] || req.body.userId || null;
+    const userPhone = req.body.userPhone || req.headers["x-user-phone"] || contactPhone || "";
+    const userEmail = req.body.userEmail || req.headers["x-user-email"] || contactEmail || "";
+
     const bulkOrder = new SchoolBulkOrder({
       referenceId: refCode,
       institutionName,
@@ -202,6 +214,9 @@ router.post("/bulk-order", async (req, res) => {
       contactEmail: contactEmail || "",
       contactPhone,
       designation: designation || "Administrator",
+      userId: userId && mongoose.Types.ObjectId.isValid(userId) ? userId : null,
+      userPhone,
+      userEmail,
       address: address || "",
       city: city || "",
       state: state || "",
@@ -210,9 +225,16 @@ router.post("/bulk-order", async (req, res) => {
       totalQuantity: totalQty,
       overallBudget: calculatedOverallBudget,
       targetDeliveryDate: targetDeliveryDate || "",
+      expectedQuotationDate: expectedQuotationDate || quotationDeadline || req.body.expectedQuotationReceivingDate || "",
       logoEmbroideryRequired: Boolean(logoEmbroideryRequired),
       targetBudgetPerKit: String(calculatedOverallBudget || targetBudgetPerKit || ""),
       additionalNotes: additionalNotes || "",
+      buyerAdvanceType: buyerAdvType,
+      buyerAdvancePercentage: buyerAdvPct,
+      buyerAdvanceAmount: buyerAdvAmt,
+      buyerAdvanceNote: req.body.buyerAdvanceNote || "",
+      advancePaymentStatus: "pending",
+      advanceReceiptNumber: `REC-ADV-${refCode}`,
       assignmentMode: req.body.assignmentMode || "broadcast",
       status: "published"
     });
@@ -232,11 +254,19 @@ router.post("/bulk-order", async (req, res) => {
 });
 
 import {
+  getCustomerSchoolOrders,
   getAdminSchoolOrders,
   distributeSchoolOrder,
   approveSellerQuotation,
-  updateItemSellerPrices
+  updateItemSellerPrices,
+  downloadAdvanceReceipt,
+  recordAdvancePayment,
+  updateSellerSchoolOrder,
+  submitBuyerCounterDemand
 } from "../controllers/schoolBulkOrderController.js";
+
+// GET Private Customer Bulk Orders
+router.get("/bulk-orders/my-orders", getCustomerSchoolOrders);
 
 // GET all School Bulk Orders (Admin view)
 router.get("/bulk-orders/list", getAdminSchoolOrders);
@@ -245,11 +275,24 @@ router.get("/bulk-orders/admin-list", getAdminSchoolOrders);
 // PATCH Admin Distribute Bulk Order (Direct, Selected, Broadcast)
 router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);
 
-// POST Admin Approve Specific Seller Quotation
+// POST Buyer Submit 2nd Version / Counter-Demand on a Seller Quotation
+router.post("/bulk-orders/:id/quotations/:quoteId/counter", submitBuyerCounterDemand);
+
+// POST Buyer Approve Specific Seller Quotation (Winning Quote)
 router.post("/bulk-orders/:id/approve-quote", approveSellerQuotation);
+
+// PATCH Update Bulk Order Status & Self-Delivery Details (accepted, packed, out for delivery, received)
+router.patch("/bulk-orders/:id/status", updateSellerSchoolOrder);
 
 // PATCH Update Item-Level Seller Offered Prices
 router.patch("/bulk-orders/:id/item-prices", updateItemSellerPrices);
+
+// GET Download PDF Partial Advance Payment Receipt
+router.get("/bulk-orders/:id/advance-receipt", downloadAdvanceReceipt);
+
+// PATCH/POST Record / Confirm Partial Advance Payment
+router.patch("/bulk-orders/:id/advance-payment", recordAdvancePayment);
+router.post("/bulk-orders/:id/advance-payment", recordAdvancePayment);
 
 export default router;
 

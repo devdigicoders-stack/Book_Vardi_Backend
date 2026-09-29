@@ -47,6 +47,14 @@ import {
   exportUsersAdmin,
   exportSellersAdmin
 } from "../controllers/exportController.js";
+import {
+  getAdminKits,
+  getAdminKitById,
+  updateKitApproval,
+  createAdminKit,
+  updateAdminKit,
+  deleteAdminKit
+} from "../controllers/adminKitController.js";
 import { authenticateAdmin, requireSuperAdmin } from "../middlewares/auth.js";
 
 const router = express.Router();
@@ -89,6 +97,17 @@ router.put("/products/:id", authenticateAdmin, updateAdminProduct);
 router.put("/products/:id/approval", authenticateAdmin, updateProductApproval);
 router.patch("/products/:id/approval", authenticateAdmin, updateProductApproval);
 router.delete("/products/:id", authenticateAdmin, deleteAdminProduct);
+
+// ==========================================
+// Admin Kit & Bundle Management
+// ==========================================
+router.get("/kits", authenticateAdmin, getAdminKits);
+router.get("/kits/:id", authenticateAdmin, getAdminKitById);
+router.patch("/kits/:id/approval", authenticateAdmin, updateKitApproval);
+router.put("/kits/:id/approval", authenticateAdmin, updateKitApproval);
+router.post("/kits", authenticateAdmin, createAdminKit);
+router.put("/kits/:id", authenticateAdmin, updateAdminKit);
+router.delete("/kits/:id", authenticateAdmin, deleteAdminKit);
 
 // ==========================================
 // Admin Inventory & Warehouse Management (RESTful)

@@ -49,7 +49,8 @@ export const createPayment = async (req, res) => {
         amount: Math.round(Number(amount) * 100),
         currency: currency.toUpperCase(),
         receipt,
-        status: "created"
+        status: "created",
+        isSimulated: true
       };
     }
 
@@ -87,6 +88,7 @@ export const createPayment = async (req, res) => {
       currency: razorpayOrder.currency,
       razorpayOrderId: razorpayOrder.id,
       receipt: razorpayOrder.receipt,
+      isSimulated: Boolean(razorpayOrder.isSimulated),
       paymentDbId: payment._id
     });
   } catch (error) {

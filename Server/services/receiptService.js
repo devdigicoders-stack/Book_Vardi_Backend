@@ -1,0 +1,215 @@
+import PDFDocument from "pdfkit";
+
+/**
+ * Generate an official PDF Partial Advance Payment Receipt for a School Bulk Order
+ * @param {Object} order - SchoolBulkOrder document
+ * @returns {PDFDocument} - Streaming PDF document
+ */
+export const generatePartialAdvanceReceiptPDF = (order) => {
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+
+  const primaryColor = "#0f172a"; // Slate 900
+  const brandTeal = "#0f766e"; // Teal 700
+  const accentGold = "#d97706"; // Amber 600
+  const mutedColor = "#64748b"; // Slate 500
+  const borderColor = "#e2e8f0"; // Slate 200
+
+  const receiptNo = order.advanceReceiptNumber || `REC-ADV-${order.referenceId || order._id.toString().substring(0, 8).toUpperCase()}`;
+  const totalBudget = Number(order.overallBudget || 0);
+  const advAmount = Number(
+    order.advancePaidAmount ||
+    order.sellerAdvanceAmount ||
+    order.buyerAdvanceAmount ||
+    (totalBudget * (order.sellerAdvancePercentage || order.buyerAdvancePercentage || 25) / 100) ||
+    0
+  );
+  const remainingBalance = Math.max(0, totalBudget - advAmount);
+
+  // 1. HEADER SECTION
+  doc
+    .fillColor(brandTeal)
+    .fontSize(22)
+    .font("Helvetica-Bold")
+    .text("Bookvardi", 40, 40)
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("B2B & School Institutional Procurement Desk", 40, 68)
+    .text("GSTIN: 09AAACS1429B1Z2 | corporate@bookvardi.in", 40, 80);
+
+  doc
+    .fillColor(primaryColor)
+    .fontSize(14)
+    .font("Helvetica-Bold")
+    .text("PARTIAL ADVANCE RECEIPT", 360, 40, { align: "right" })
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text(`Receipt No: ${receiptNo}`, 360, 60, { align: "right" })
+    .text(`Bulk Order Ref: ${order.referenceId}`, 360, 72, { align: "right" })
+    .text(`Date: ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`, 360, 84, { align: "right" });
+
+  // Divider
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 102).lineTo(555, 102).stroke();
+
+  // 2. PARTIES DETAILS (BUYER & SUPPLIER)
+  // Left: Buyer (School)
+  doc
+    .fontSize(10)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Procuring Institution / Buyer:", 40, 115)
+    .font("Helvetica")
+    .fontSize(9)
+    .fillColor(mutedColor)
+    .text(order.institutionName || "School / Institution", 40, 129, { width: 240 })
+    .text(`Attn: ${order.contactName || "Administrator"} (${order.designation || "Officer"})`, 40, 141, { width: 240 })
+    .text(`Phone: ${order.contactPhone || "N/A"} | ${order.contactEmail || ""}`, 40, 153, { width: 240 })
+    .text(`Address: ${[order.address, order.city, order.state, order.pincode].filter(Boolean).join(", ") || "India"}`, 40, 165, { width: 240 });
+
+  // Right: Supplier (Assigned Seller or Marketplace Desk)
+  const sellerInfo = order.sellerId && typeof order.sellerId === "object" ? order.sellerId : null;
+  const supplierName = sellerInfo?.storeName || sellerInfo?.businessName || sellerInfo?.name || "Bookvardi Institutional Seller Network";
+  const supplierPhone = sellerInfo?.phone || "+91 9876543210";
+  const supplierCity = sellerInfo?.city || order.city || "New Delhi, India";
+
+  doc
+    .fontSize(10)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Authorized Seller / Supplier:", 320, 115)
+    .font("Helvetica")
+    .fontSize(9)
+    .fillColor(mutedColor)
+    .text(supplierName, 320, 129, { width: 235 })
+    .text("Verified Institutional Vendor Hub", 320, 141)
+    .text(`Contact: ${supplierPhone}`, 320, 153)
+    .text(`Location: ${supplierCity}`, 320, 165);
+
+  // Divider
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 202).lineTo(555, 202).stroke();
+
+  // 3. ADVANCE PAYMENT HIGHLIGHT CARD (TINTED BOX)
+  doc
+    .roundedRect(40, 212, 515, 68, 6)
+    .fillAndStroke("#f0fdf4", "#bbf7d0");
+
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(brandTeal)
+    .text("PARTIAL ADVANCE BREAKDOWN & AUDIT TRAIL", 55, 222);
+
+  doc
+    .fontSize(8.5)
+    .font("Helvetica")
+    .fillColor(primaryColor)
+    .text(`Overall Estimated Value: ₹${totalBudget.toLocaleString()}`, 55, 238)
+    .text(`Buyer Offered Advance: ${order.buyerAdvancePercentage || 20}% (₹${Number(order.buyerAdvanceAmount || (totalBudget * (order.buyerAdvancePercentage || 20) / 100)).toLocaleString()})`, 55, 250)
+    .text(`Payment Mode: ${order.advancePaymentMode || "Bank Wire / UPI / Demand Draft"}`, 55, 262);
+
+  doc
+    .fontSize(11)
+    .font("Helvetica-Bold")
+    .fillColor(brandTeal)
+    .text(`Advance Paid / Agreed: ₹${advAmount.toLocaleString()}`, 330, 236, { align: "right" })
+    .fontSize(8.5)
+    .font("Helvetica-Bold")
+    .fillColor("#b91c1c") // Red
+    .text(`Remaining Balance Due: ₹${remainingBalance.toLocaleString()}`, 330, 252, { align: "right" })
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text(`Status: ${(order.advancePaymentStatus || "Agreed").toUpperCase()}`, 330, 264, { align: "right" });
+
+  // 4. PROCUREMENT ITEMS SUMMARY TABLE
+  const tableTop = 295;
+  doc
+    .rect(40, tableTop, 515, 20)
+    .fill("#f8fafc");
+
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("#", 45, tableTop + 6)
+    .text("Requirement Demand Item", 65, tableTop + 6)
+    .text("Category", 260, tableTop + 6)
+    .text("Qty", 380, tableTop + 6, { align: "center", width: 40 })
+    .text("Budget/Unit", 430, tableTop + 6, { align: "right", width: 55 })
+    .text("Line Total", 495, tableTop + 6, { align: "right", width: 55 });
+
+  let y = tableTop + 24;
+  const items = Array.isArray(order.requirements) && order.requirements.length > 0
+    ? order.requirements.slice(0, 8)
+    : [{ itemName: "Bulk Uniform / Stationery Set", category: "General Bulk", quantity: order.totalQuantity || 100, budgetPerUnit: Math.round(totalBudget / (order.totalQuantity || 100)) }];
+
+  items.forEach((item, index) => {
+    const qty = Number(item.quantity) || 1;
+    const rate = Number(item.sellerPricePerUnit || item.budgetPerUnit) || 0;
+    const lineTotal = qty * rate;
+
+    doc
+      .fontSize(8)
+      .font("Helvetica")
+      .fillColor(primaryColor)
+      .text(String(index + 1), 45, y)
+      .text(item.itemName || "Procurement Item", 65, y, { width: 190, lineBreak: false })
+      .fillColor(mutedColor)
+      .text(item.category || "General", 260, y, { width: 115, lineBreak: false })
+      .fillColor(primaryColor)
+      .text(String(qty), 380, y, { align: "center", width: 40 })
+      .text(`₹${rate}`, 430, y, { align: "right", width: 55 })
+      .font("Helvetica-Bold")
+      .text(`₹${lineTotal.toLocaleString()}`, 495, y, { align: "right", width: 55 });
+
+    y += 18;
+  });
+
+  // Divider under table
+  doc.strokeColor(borderColor).lineWidth(0.5).moveTo(40, y + 4).lineTo(555, y + 4).stroke();
+
+  // 5. TERMS & CONDITIONS
+  const termsY = Math.max(y + 20, 520);
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Partial Advance Payment Terms & Conditions:", 40, termsY)
+    .font("Helvetica")
+    .fontSize(7.5)
+    .fillColor(mutedColor)
+    .text("1. This receipt confirms partial mobilization advance towards raw material procurement, cutting, and batch tailoring.", 40, termsY + 12)
+    .text("2. The remaining balance amount is strictly due on receipt and physical inspection of sample lots / final delivery consignment.", 40, termsY + 22)
+    .text("3. Any customized embroidery, special logos, or bespoke tailoring work initiated post-advance confirmation is non-cancellable.", 40, termsY + 32)
+    .text("4. All transactions are securely audited and monitored under Bookvardi Institutional Marketplace Escrow guidelines.", 40, termsY + 42);
+
+  // 6. VERIFICATION STAMP & DIGITAL SEAL
+  const stampY = termsY + 68;
+  doc
+    .roundedRect(40, stampY, 230, 52, 6)
+    .strokeColor("#bbf7d0")
+    .fillAndStroke("#f0fdf4", "#86efac");
+
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(brandTeal)
+    .text("✔ BOOKVARDI VERIFIED ADVANCE RECEIPT", 50, stampY + 10)
+    .font("Helvetica")
+    .fontSize(7.5)
+    .fillColor(mutedColor)
+    .text(`Authorized by: Corporate Procurement Desk`, 50, stampY + 22)
+    .text(`Audit Hash: BV-AUD-${order.referenceId || "2026"}-OK`, 50, stampY + 34);
+
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Authorized Seller Signature / Stamp", 360, stampY + 34, { align: "right" })
+    .fontSize(7.5)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("(Digitally signed on Bookvardi Platform)", 360, stampY + 44, { align: "right" });
+
+  return doc;
+};

@@ -8,6 +8,7 @@ import {
   updateOrder,
   deleteOrder,
   downloadInvoice,
+  downloadCreditNote,
   cancelOrder,
   requestReturnExchange,
   updateReturnExchangeStatus
@@ -19,6 +20,7 @@ const router = express.Router();
 router.get("/my-orders", optionalUserAuth, getMyOrders);
 router.get("/track/:orderId", trackOrder); // Public & User order tracking by Order ID
 router.get("/:id/invoice", optionalUserAuth, downloadInvoice);
+router.get("/:id/credit-note", optionalUserAuth, downloadCreditNote);
 router.get("/admin/all", optionalUserAuth, getOrders);
 router.get("/all", optionalUserAuth, getOrders);
 router.get("/", authenticateToken, getOrders);

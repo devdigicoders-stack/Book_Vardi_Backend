@@ -13,7 +13,7 @@ const kitItemSchema = new mongoose.Schema({
   },
   quantity: {
     type: Number,
-    required: [true, "Item quantity is required"], // e.g. 2
+    required: [true, "Item quantity is required"],
     min: 1,
     default: 1
   },
@@ -27,11 +27,19 @@ const kitItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  originalPrice: {
+    type: Number,
+    default: 0
+  },
   size: {
     type: String,
     default: ""
   },
   color: {
+    type: String,
+    default: ""
+  },
+  image: {
     type: String,
     default: ""
   }
@@ -46,32 +54,62 @@ const kitSchema = new mongoose.Schema(
     },
     title: {
       type: String,
-      required: [true, "Kit bundle title is required"], // e.g. "Delhi Public School Complete Uniform Kit"
+      required: [true, "Kit bundle title is required"],
       trim: true
+    },
+    name: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    subtitle: {
+      type: String,
+      trim: true,
+      default: ""
+    },
+    category: {
+      type: String,
+      trim: true,
+      default: "kits"
+    },
+    subCategory: {
+      type: String,
+      trim: true,
+      default: "School Uniform Kit"
+    },
+    sku: {
+      type: String,
+      trim: true,
+      default: ""
     },
     schoolName: {
       type: String,
-      required: [true, "School name is required"], // e.g. "Delhi Public School"
+      required: [true, "School name is required"],
       trim: true
     },
     schoolCode: {
       type: String,
       trim: true,
-      default: "" // e.g. "DPS", "KV"
+      default: ""
     },
     gender: {
       type: String,
-      enum: ["Boy", "Girl", "Unisex"],
-      required: [true, "Target gender is required"]
+      enum: ["Boy", "Girl", "Boys", "Girls", "Unisex", "All"],
+      default: "Unisex"
     },
     classGrade: {
       type: String,
-      required: [true, "Target class/grade is required"], // e.g. "Class 1-5", "Class 6-10"
+      required: [true, "Target class/grade is required"],
       trim: true
     },
     badgeTag: {
       type: String,
       enum: ["Best Seller", "New Arrival", "Verified KV", "School Approved", "Trending", "Special Offer", ""],
+      default: "School Approved"
+    },
+    badge: {
+      type: String,
+      trim: true,
       default: "School Approved"
     },
     items: {
@@ -88,10 +126,25 @@ const kitSchema = new mongoose.Schema(
       required: true,
       min: 0
     },
+    mrp: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    originalPrice: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
     bundlePrice: {
       type: Number,
       required: [true, "Bundle/Kit discounted price is required"],
       min: 0
+    },
+    price: {
+      type: Number,
+      min: 0,
+      default: 0
     },
     savingsAmount: {
       type: Number,
@@ -107,6 +160,24 @@ const kitSchema = new mongoose.Schema(
       min: 0,
       default: 10
     },
+    stockQuantity: {
+      type: Number,
+      min: 0,
+      default: 10
+    },
+    inventoryMode: {
+      type: String,
+      enum: ["fixed", "dynamic"],
+      default: "fixed"
+    },
+    lowStockThreshold: {
+      type: Number,
+      default: 5
+    },
+    image: {
+      type: String,
+      default: ""
+    },
     images: {
       type: [String],
       default: []
@@ -115,6 +186,34 @@ const kitSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: ""
+    },
+    gst: {
+      type: Number,
+      default: 5
+    },
+    gstPercentage: {
+      type: Number,
+      default: 5
+    },
+    isGstInclusive: {
+      type: Boolean,
+      default: true
+    },
+    isReturnable: {
+      type: Boolean,
+      default: true
+    },
+    isRefundable: {
+      type: Boolean,
+      default: true
+    },
+    isExchangeable: {
+      type: Boolean,
+      default: true
+    },
+    returnWindowDays: {
+      type: Number,
+      default: 7
     },
     rating: {
       type: Number,
@@ -128,13 +227,25 @@ const kitSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["available", "out-of-stock", "inactive"],
+      enum: ["available", "out-of-stock", "inactive", "deleted"],
       default: "available"
     },
     approvalStatus: {
       type: String,
       enum: ["Approved", "Pending", "Rejected"],
       default: "Pending"
+    },
+    isApproved: {
+      type: Boolean,
+      default: false
+    },
+    approvalComment: {
+      type: String,
+      default: ""
+    },
+    rejectionReason: {
+      type: String,
+      default: ""
     },
     paymentMethodAllowed: {
       type: String,
@@ -144,6 +255,10 @@ const kitSchema = new mongoose.Schema(
     paymentMethodsAllowed: {
       type: [String],
       default: ["COD", "Online"]
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false
     }
   },
   {
@@ -153,27 +268,64 @@ const kitSchema = new mongoose.Schema(
 
 // Indexes
 kitSchema.index({ sellerId: 1 });
+kitSchema.index({ schoolName: 1 });
+kitSchema.index({ classGrade: 1 });
+kitSchema.index({ status: 1, approvalStatus: 1, isApproved: 1 });
 
 // Calculate totalMrp, savingsAmount, and discountPercentage automatically before saving
 kitSchema.pre("save", function (next) {
+  // Sync isApproved with approvalStatus
+  this.isApproved = (this.approvalStatus === "Approved" || this.approvalStatus === "approved");
+
+  // Sync name with title
+  if (!this.name && this.title) {
+    this.name = this.title;
+  }
+  if (!this.title && this.name) {
+    this.title = this.name;
+  }
+
+  // Calculate totalMrp from constituent items if present
   if (this.items && this.items.length > 0) {
     const calculatedTotalMrp = this.items.reduce((sum, item) => {
-      const itemTotal = item.totalPrice || item.unitPrice * (item.quantity || 1);
+      const itemTotal = item.totalPrice || (item.unitPrice * (item.quantity || 1));
       item.totalPrice = itemTotal;
       return sum + itemTotal;
     }, 0);
 
     this.totalMrp = calculatedTotalMrp;
+    this.mrp = calculatedTotalMrp;
+    this.originalPrice = calculatedTotalMrp;
 
     if (this.bundlePrice && this.bundlePrice < this.totalMrp) {
       this.savingsAmount = Math.max(0, this.totalMrp - this.bundlePrice);
       this.discountPercentage = Math.round((this.savingsAmount / this.totalMrp) * 100);
     } else {
-      this.bundlePrice = this.totalMrp;
-      this.savingsAmount = 0;
-      this.discountPercentage = 0;
+      if (!this.bundlePrice || this.bundlePrice === 0) {
+        this.bundlePrice = this.totalMrp;
+      }
+      this.savingsAmount = Math.max(0, this.totalMrp - this.bundlePrice);
+      this.discountPercentage = this.totalMrp > 0 ? Math.round((this.savingsAmount / this.totalMrp) * 100) : 0;
     }
   }
+
+  this.price = this.bundlePrice;
+  this.stockQuantity = this.stock;
+
+  // Primary image fallback
+  if (Array.isArray(this.images) && this.images.length > 0) {
+    this.image = this.images[0];
+  } else if (this.image && (!this.images || this.images.length === 0)) {
+    this.images = [this.image];
+  }
+
+  // Auto-generate SKU if not provided
+  if (!this.sku) {
+    const cleanSch = (this.schoolCode || this.schoolName || "KIT").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+    const cleanGrd = (this.classGrade || "ALL").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
+    this.sku = `KIT-${cleanSch}-${cleanGrd}-${Date.now().toString().slice(-4)}`;
+  }
+
   next();
 });
 

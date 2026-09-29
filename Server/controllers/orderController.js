@@ -2,6 +2,7 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Kit from "../models/Kit.js";
 import User from "../models/User.js";
+import Seller from "../models/Seller.js";
 import mongoose from "mongoose";
 
 // Helper to locate user document by ID, email, or phone
@@ -30,21 +31,79 @@ const findUserByIdentifier = async (req) => {
   return await User.findOne({ $or: query });
 };
 
+// Helper to safely locate a Product document without throwing CastError on non-ObjectId search IDs
+const findProductByIdOrCustomId = async (searchId) => {
+  if (!searchId) return null;
+  try {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      const prod = await Product.findById(searchId);
+      if (prod) return prod;
+    }
+    return await Product.findOne({ id: searchId });
+  } catch (err) {
+    return null;
+  }
+};
+
+// Helper to safely locate a Kit document without throwing CastError on non-ObjectId search IDs
+const findKitByIdOrCustomId = async (searchId) => {
+  if (!searchId) return null;
+  try {
+    if (mongoose.Types.ObjectId.isValid(searchId)) {
+      const kit = await Kit.findById(searchId);
+      if (kit) return kit;
+    }
+    return await Kit.findOne({ id: searchId });
+  } catch (err) {
+    return null;
+  }
+};
+
+export const isPlaceholderCust = (str) => {
+  if (!str || typeof str !== 'string') return true;
+  const s = str.trim().toLowerCase();
+  return (
+    s === '' ||
+    s === 'student' ||
+    s === 'student customer' ||
+    s === 'customer' ||
+    s === 'valued customer' ||
+    s === 'verified customer' ||
+    s === 'test student' ||
+    s === 'avatar upload tester' ||
+    s === 'user' ||
+    s === 'null' ||
+    s === 'undefined' ||
+    s === 'n/a'
+  );
+};
+
+export const isPlaceholderSeller = (str) => {
+  if (!str || typeof str !== 'string') return true;
+  const s = str.trim().toLowerCase();
+  return (
+    s === '' ||
+    s === 'bookvardi verified seller hub' ||
+    s === 'bookvardi verified seller' ||
+    s === 'bookvardimerchant' ||
+    s === 'bookvardi merchant' ||
+    s === 'book vardi partner merchant' ||
+    s === 'book vardi partner store' ||
+    s === 'partner merchant' ||
+    s === 'unknown seller' ||
+    s === 'new merchant' ||
+    s === 'merchant store' ||
+    s === 'n/a'
+  );
+};
+
 // Helper to safely decrement stock and size variant stock for a product or kit on order placement
 const decrementItemStock = async (item) => {
   const qty = Math.max(1, Number(item.quantity) || 1);
   const searchId = item.productId || item.id || item._id;
   const itemSize = String(item.size || item.selectedSize || "").trim();
 
-  let prod = null;
-  if (searchId) {
-    if (mongoose.Types.ObjectId.isValid(searchId)) {
-      prod = await Product.findById(searchId);
-    }
-    if (!prod) {
-      prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
-    }
-  }
+  let prod = await findProductByIdOrCustomId(searchId);
   if (!prod && item.name) {
     const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
     prod = await Product.findOne({
@@ -82,15 +141,7 @@ const decrementItemStock = async (item) => {
   }
 
   // Also handle Kit document stock
-  let kit = null;
-  if (searchId) {
-    if (mongoose.Types.ObjectId.isValid(searchId)) {
-      kit = await Kit.findById(searchId);
-    }
-    if (!kit) {
-      kit = await Kit.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
-    }
-  }
+  let kit = await findKitByIdOrCustomId(searchId);
   if (!kit && item.name) {
     const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
     kit = await Kit.findOne({
@@ -110,15 +161,7 @@ const incrementItemStock = async (item) => {
   const searchId = item.productId || item.id || item._id;
   const itemSize = String(item.size || item.selectedSize || "").trim();
 
-  let prod = null;
-  if (searchId) {
-    if (mongoose.Types.ObjectId.isValid(searchId)) {
-      prod = await Product.findById(searchId);
-    }
-    if (!prod) {
-      prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
-    }
-  }
+  let prod = await findProductByIdOrCustomId(searchId);
   if (!prod && item.name) {
     const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
     prod = await Product.findOne({
@@ -156,15 +199,7 @@ const incrementItemStock = async (item) => {
   }
 
   // Also handle Kit document stock
-  let kit = null;
-  if (searchId) {
-    if (mongoose.Types.ObjectId.isValid(searchId)) {
-      kit = await Kit.findById(searchId);
-    }
-    if (!kit) {
-      kit = await Kit.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
-    }
-  }
+  let kit = await findKitByIdOrCustomId(searchId);
   if (!kit && item.name) {
     const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
     kit = await Kit.findOne({
@@ -178,14 +213,252 @@ const incrementItemStock = async (item) => {
   }
 };
 
+// Helper to enrich orders with real seller and real consumer details
+export const enrichOrdersWithSellerAndConsumer = async (orders) => {
+  if (!orders) return orders;
+  const isArray = Array.isArray(orders);
+  const orderList = isArray ? orders : [orders];
+  if (orderList.length === 0) return orders;
+
+  try {
+    const sellerIds = new Set();
+    const userIds = new Set();
+    const productIds = new Set();
+
+    orderList.forEach(ord => {
+      if (ord.userId) {
+        const uId = ord.userId._id ? ord.userId._id.toString() : ord.userId.toString();
+        if (mongoose.Types.ObjectId.isValid(uId)) userIds.add(uId);
+      }
+      if (ord.sellerDetails?.sellerId) {
+        const sId = ord.sellerDetails.sellerId.toString();
+        if (mongoose.Types.ObjectId.isValid(sId)) sellerIds.add(sId);
+      }
+      (ord.items || []).forEach(item => {
+        if (item.sellerId) {
+          const sId = item.sellerId._id ? item.sellerId._id.toString() : item.sellerId.toString();
+          if (mongoose.Types.ObjectId.isValid(sId)) sellerIds.add(sId);
+        }
+        if (item.productId) {
+          const pId = item.productId._id ? item.productId._id.toString() : item.productId.toString();
+          if (mongoose.Types.ObjectId.isValid(pId)) productIds.add(pId);
+        }
+      });
+    });
+
+    const sellers = sellerIds.size > 0 
+      ? await Seller.find({ _id: { $in: Array.from(sellerIds) } }).lean()
+      : [];
+
+    const sellerMap = new Map();
+    sellers.forEach(s => {
+      sellerMap.set(s._id.toString(), {
+        sellerId: s._id,
+        storeName: s.storeName || s.name,
+        sellerName: s.name || s.storeName,
+        name: s.name,
+        phone: s.phone || "",
+        email: s.email || "",
+        address: s.address || "",
+        city: s.city || "",
+        state: s.state || "",
+        pincode: s.pincode || "",
+        gstNumber: s.gstNumber || ""
+      });
+    });
+
+    // Check User collection for seller IDs that might be users
+    const remainingSellerIds = Array.from(sellerIds).filter(id => !sellerMap.has(id));
+    if (remainingSellerIds.length > 0) {
+      const sellerUsers = await User.find({ _id: { $in: remainingSellerIds } }).lean();
+      sellerUsers.forEach(u => {
+        sellerMap.set(u._id.toString(), {
+          sellerId: u._id,
+          storeName: u.storeName || u.name,
+          sellerName: u.name || u.storeName,
+          name: u.name,
+          phone: u.phone || "",
+          email: u.email || "",
+          address: u.address || "",
+          city: u.city || "",
+          state: u.state || "",
+          pincode: u.pincode || "",
+          gstNumber: ""
+        });
+      });
+    }
+
+    // Check Products for items with unknown sellers
+    const productMap = new Map();
+    if (productIds.size > 0) {
+      const prods = await Product.find({ _id: { $in: Array.from(productIds) } }).lean();
+      prods.forEach(p => {
+        productMap.set(p._id.toString(), p);
+        if (p.sellerId && !sellerMap.has(p.sellerId.toString())) {
+          sellerIds.add(p.sellerId.toString());
+        }
+      });
+      // Fetch any newly discovered sellerIds from products
+      const newSellerIds = Array.from(sellerIds).filter(id => !sellerMap.has(id));
+      if (newSellerIds.length > 0) {
+        const extraSellers = await Seller.find({ _id: { $in: newSellerIds } }).lean();
+        extraSellers.forEach(s => {
+          sellerMap.set(s._id.toString(), {
+            sellerId: s._id,
+            storeName: s.storeName || s.name,
+            sellerName: s.name || s.storeName,
+            name: s.name,
+            phone: s.phone || "",
+            email: s.email || "",
+            address: s.address || "",
+            city: s.city || "",
+            state: s.state || "",
+            pincode: s.pincode || "",
+            gstNumber: s.gstNumber || ""
+          });
+        });
+      }
+    }
+
+    // Lookup users for consumer details
+    const userMap = new Map();
+    if (userIds.size > 0) {
+      const users = await User.find({ _id: { $in: Array.from(userIds) } }).lean();
+      users.forEach(u => userMap.set(u._id.toString(), u));
+    }
+
+    orderList.forEach(ord => {
+      const uId = ord.userId ? (ord.userId._id ? ord.userId._id.toString() : ord.userId.toString()) : null;
+      const userDoc = uId ? userMap.get(uId) : null;
+      const rawAddr = (ord.shippingAddress && typeof ord.shippingAddress === 'object') ? ord.shippingAddress : {};
+
+      // 1. Resolve Consumer Details
+      const candNames = [
+        rawAddr.name,
+        rawAddr.fullName,
+        rawAddr.recipientName,
+        userDoc?.name,
+        ord.customer?.name,
+        ord.customerName
+      ].filter(n => n && !isPlaceholderCust(n));
+
+      const realName = candNames[0] || (userDoc && !isPlaceholderCust(userDoc.name) ? userDoc.name : "Verified Consumer");
+
+      const realPhone = rawAddr.phone || rawAddr.mobile || ord.customer?.phone || userDoc?.phone || ord.phone || "";
+      const realEmail = ord.customer?.email || rawAddr.email || userDoc?.email || ord.email || "";
+
+      // Hydrate address from user profile if order shipping address is missing
+      if (!rawAddr.street && !rawAddr.addressLine && userDoc?.addresses && userDoc.addresses.length > 0) {
+        const uAddr = userDoc.addresses.find(a => a.isDefault) || userDoc.addresses[0];
+        if (uAddr) {
+          rawAddr.name = rawAddr.name || uAddr.name || realName;
+          rawAddr.phone = rawAddr.phone || uAddr.phone || realPhone;
+          rawAddr.addressLine = uAddr.addressLine || uAddr.street;
+          rawAddr.street = uAddr.street || uAddr.addressLine;
+          rawAddr.city = uAddr.city;
+          rawAddr.state = uAddr.state;
+          rawAddr.pincode = uAddr.pincode;
+          rawAddr.landmark = uAddr.landmark;
+          ord.shippingAddress = rawAddr;
+          ord.address = [uAddr.addressLine, uAddr.street, uAddr.city, uAddr.state].filter(Boolean).join(', ') + (uAddr.pincode ? ` - ${uAddr.pincode}` : '');
+        }
+      }
+
+      if (!ord.customer) ord.customer = {};
+      ord.customer.name = realName;
+      if (realPhone) ord.customer.phone = realPhone;
+      if (realEmail) ord.customer.email = realEmail;
+
+      ord.customerName = realName;
+      ord.customerPhone = realPhone;
+      ord.customerEmail = realEmail;
+
+      // 2. Resolve Seller Details
+      let primarySellerDetails = null;
+
+      (ord.items || []).forEach(item => {
+        const sId = item.sellerId ? (item.sellerId._id ? item.sellerId._id.toString() : item.sellerId.toString()) : null;
+        let matchedSeller = sId ? sellerMap.get(sId) : null;
+
+        if (!matchedSeller && item.productId) {
+          const pId = item.productId._id ? item.productId._id.toString() : item.productId.toString();
+          const pDoc = productMap.get(pId);
+          if (pDoc) {
+            const pSellerId = pDoc.sellerId ? pDoc.sellerId.toString() : null;
+            if (pSellerId && sellerMap.has(pSellerId)) {
+              matchedSeller = sellerMap.get(pSellerId);
+            } else if (pDoc.sellerStoreName || pDoc.storeName) {
+              matchedSeller = {
+                sellerId: pDoc.sellerId,
+                storeName: pDoc.sellerStoreName || pDoc.storeName,
+                sellerName: pDoc.sellerName || pDoc.sellerStoreName || pDoc.storeName,
+                name: pDoc.sellerName || "",
+                phone: "",
+                email: "",
+                address: "",
+                city: "",
+                state: "",
+                pincode: "",
+                gstNumber: ""
+              };
+            }
+          }
+        }
+
+        if (matchedSeller) {
+          item.sellerId = matchedSeller;
+          item.sellerName = matchedSeller.storeName || matchedSeller.name;
+          item.storeName = matchedSeller.storeName;
+          item.sellerPhone = matchedSeller.phone;
+          item.sellerEmail = matchedSeller.email;
+          item.sellerAddress = matchedSeller.address;
+          item.sellerCity = matchedSeller.city;
+          item.sellerState = matchedSeller.state;
+          item.sellerDetails = matchedSeller;
+          if (!primarySellerDetails) primarySellerDetails = matchedSeller;
+        } else if (item.sellerDetails && !isPlaceholderSeller(item.sellerDetails.storeName)) {
+          if (!primarySellerDetails) primarySellerDetails = item.sellerDetails;
+        } else if (!isPlaceholderSeller(item.sellerName || item.storeName)) {
+          const sName = item.sellerName || item.storeName;
+          if (!primarySellerDetails) {
+            primarySellerDetails = {
+              storeName: sName,
+              sellerName: sName,
+              phone: item.sellerPhone || "",
+              city: item.sellerCity || ""
+            };
+          }
+        }
+      });
+
+      if (primarySellerDetails) {
+        if (!ord.sellerDetails || isPlaceholderSeller(ord.sellerDetails.storeName)) {
+          ord.sellerDetails = primarySellerDetails;
+        }
+        ord.sellerName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
+        ord.sellerStoreName = primarySellerDetails.storeName;
+        ord.sellerPhone = primarySellerDetails.phone;
+        ord.sellerCity = primarySellerDetails.city;
+      }
+    });
+
+  } catch (err) {
+    console.warn("⚠️ [enrichOrdersWithSellerAndConsumer] Error:", err.message);
+  }
+
+  return isArray ? orderList : orderList[0];
+};
+
 // 1. Get all orders (Admin / General)
 export const getOrders = async (req, res) => {
   try {
     const orders = await Order.find()
-      .populate("items.productId", "name price images mrp")
-      .populate("items.sellerId", "storeName name phone")
-      .sort({ createdAt: -1 });
-    res.json(orders);
+      .populate("userId", "name email phone addresses")
+      .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+      .sort({ createdAt: -1 })
+      .lean();
+    const enrichedOrders = await enrichOrdersWithSellerAndConsumer(orders);
+    res.json(enrichedOrders);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch orders", error: error.message });
   }
@@ -322,21 +595,25 @@ export const getMyOrders = async (req, res) => {
 // 3. Get single order by ID
 export const getOrderById = async (req, res) => {
   try {
-    let order = null;
-    if (mongoose.Types.ObjectId.isValid(req.params.id)) {
-      order = await Order.findById(req.params.id)
-        .populate("items.productId", "name price images mrp")
-        .populate("items.sellerId", "storeName name phone email address city");
-    }
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let order = isMongoId
+      ? await Order.findById(id)
+          .populate("userId", "name email phone addresses")
+          .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+          .lean()
+      : null;
     if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: req.params.id }, { id: req.params.id }] })
-        .populate("items.productId", "name price images mrp")
-        .populate("items.sellerId", "storeName name phone email address city");
+      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+        .populate("userId", "name email phone addresses")
+        .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+        .lean();
     }
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
-    res.json(order);
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([order]))[0];
+    res.json(enrichedOrder);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch order", error: error.message });
   }
@@ -373,9 +650,14 @@ export const createOrder = async (req, res) => {
     } = req.body;
 
     const resolvedUserId = user ? user._id : (req.user ? req.user.id : req.body.userId || null);
-    const resolvedPhone = user?.phone || req.headers["x-user-phone"] || customer?.phone || req.body.phone || "";
-    const resolvedEmail = user?.email || customer?.email || req.body.email || "";
-    const resolvedName = user?.name || customer?.name || req.body.customer || "Student";
+    const resolvedPhone = shippingAddress?.phone || user?.phone || req.headers["x-user-phone"] || customer?.phone || req.body.phone || "";
+    const resolvedEmail = shippingAddress?.email || user?.email || customer?.email || req.body.email || "";
+    const resolvedName = (shippingAddress && !isPlaceholderCust(shippingAddress.name || shippingAddress.fullName) && (shippingAddress.name || shippingAddress.fullName)) ||
+      (!isPlaceholderCust(customer?.name) && customer?.name) ||
+      (!isPlaceholderCust(user?.name) && user?.name) ||
+      (!isPlaceholderCust(req.body.customerName) && req.body.customerName) ||
+      (!isPlaceholderCust(req.body.customer) && req.body.customer) ||
+      (shippingAddress?.name || shippingAddress?.fullName || customer?.name || user?.name || "Verified Consumer");
 
     let orderItems = items || [];
     let calculatedTotal = totalAmount || total || amount || 0;
@@ -403,16 +685,8 @@ export const createOrder = async (req, res) => {
 
     // Auto-populate productId, sellerId, sellerName, storeName, and GST on order items from Product & User collections
     for (const item of orderItems) {
-      let prod = null;
       const searchId = item.productId || item.id || item._id;
-      if (searchId) {
-        if (mongoose.Types.ObjectId.isValid(searchId)) {
-          prod = await Product.findById(searchId);
-        }
-        if (!prod) {
-          prod = await Product.findOne({ $or: [{ id: searchId }, { _id: searchId }] });
-        }
-      }
+      let prod = await findProductByIdOrCustomId(searchId);
       if (!prod && item.name) {
         const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
         prod = await Product.findOne({
@@ -543,7 +817,15 @@ export const createOrder = async (req, res) => {
       const isCodOrder = paymentMethod && String(paymentMethod).toUpperCase().includes("COD");
       const initialPaymentStatus = isCodOrder ? "pending" : "paid";
 
-      const topDeliveryMode = req.body.deliveryMode || req.body.deliveryType || (req.body.selfDeliveryDetails ? "self_delivery" : (trackingNumber ? "third_party" : ""));
+      const rawDeliveryMode = req.body.deliveryMode || req.body.deliveryType || "";
+      let topDeliveryMode = "pending_choice";
+      if (req.body.selfDeliveryDetails) {
+        topDeliveryMode = "self_delivery";
+      } else if (req.body.courierName || trackingNumber) {
+        topDeliveryMode = "third_party";
+      } else if (["third_party", "self_delivery", "standard", "express", "pending_choice"].includes(rawDeliveryMode)) {
+        topDeliveryMode = rawDeliveryMode;
+      }
 
       const newOrder = new Order({
         orderId: orderIdVal,
@@ -593,6 +875,7 @@ export const createOrder = async (req, res) => {
 
     return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
+    console.error("❌ [POST /api/orders] Error creating order:", error);
     return res.status(400).json({ message: "Failed to create order", error: error.message });
   }
 };
@@ -779,6 +1062,7 @@ export const updateOrder = async (req, res) => {
         existingOrder.refundStatus = "Refund Initiated";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_initiated";
       } else if (newStatus === "refund_completed" || newStatus === "Refund Completed") {
+        existingOrder.paymentStatus = "refunded";
         existingOrder.refundStatus = "Refund Completed";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_completed";
       } else if (newStatus === "return_approved") {
@@ -787,8 +1071,15 @@ export const updateOrder = async (req, res) => {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "product_received";
       }
 
-      // If order is delivered, credit seller wallet balance after deducting platform commission
-      if (newStatus === "delivered" && previousStatus !== "delivered") {
+      // If order is delivered, verify payment status for COD and credit seller wallet balance
+      if ((newStatus === "delivered" || newStatus === "Delivered") && previousStatus !== "delivered" && previousStatus !== "Delivered") {
+        const isCodOrder = String(existingOrder.paymentMethod || "").toUpperCase().includes("COD") || existingOrder.paymentStatus !== "paid";
+        if (isCodOrder) {
+          existingOrder.paymentStatus = "paid";
+          existingOrder.codCollectedAt = new Date();
+          existingOrder.codCollectedBy = req.user?.name || req.body.deliveryPersonName || "Delivery Executive";
+        }
+
         const Seller = (await import("../models/Seller.js")).default;
         for (const item of existingOrder.items) {
           if (item.sellerId) {
@@ -862,9 +1153,18 @@ export const deleteOrder = async (req, res) => {
 // 7. Download Flipkart / Amazon Style GST Tax Invoice PDF
 export const downloadInvoice = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id)
-      .populate("items.productId", "name price images mrp")
-      .populate("items.sellerId", "storeName name phone city");
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let order = isMongoId
+      ? await Order.findById(id)
+          .populate("userId", "name email phone addresses")
+          .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+      : null;
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+        .populate("userId", "name email phone addresses")
+        .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
+    }
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
@@ -895,7 +1195,7 @@ export const downloadInvoice = async (req, res) => {
       const isSeller =
         req.user.role === "seller" &&
         order.items.some(
-          (item) => item.sellerId && item.sellerId._id?.toString() === req.user.id
+          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
         );
 
       if (!isOwner && !isAdmin && !isSeller) {
@@ -903,23 +1203,85 @@ export const downloadInvoice = async (req, res) => {
       }
     }
 
-    const orderStatusVal = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const orderStatusVal = String(enrichedOrder.overallStatus || enrichedOrder.status || "").toLowerCase().trim();
+    const { generateTaxInvoicePDF, generateCreditNotePDF } = await import("../services/invoiceService.js");
+
     if (orderStatusVal === "cancelled") {
-      return res.status(400).json({ message: "Tax Invoice is unavailable for cancelled orders." });
+      const filename = `CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      const pdfDoc = generateCreditNotePDF(enrichedOrder);
+      return pdfDoc.pipe(res);
     }
 
-    const { generateTaxInvoicePDF } = await import("../services/invoiceService.js");
-
-    const filename = `Invoice_${order.orderId || order._id}.pdf`;
+    const filename = `Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const pdfDoc = generateTaxInvoicePDF(order);
+    const pdfDoc = generateTaxInvoicePDF(enrichedOrder);
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Download invoice error:", error);
     res.status(500).json({ message: "Failed to generate invoice", error: error.message });
+  }
+};
+
+// 7b. Dedicated Download Credit Note Endpoint
+export const downloadCreditNote = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let order = isMongoId
+      ? await Order.findById(id)
+          .populate("userId", "name email phone addresses")
+          .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+      : null;
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+        .populate("userId", "name email phone addresses")
+        .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
+    }
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (req.user) {
+      const isOwner =
+        order.user?.toString() === req.user.id ||
+        order.userId?.toString() === req.user.id ||
+        order.customer?.phone === req.user.phone ||
+        order.customer?.email === req.user.email;
+      const isAdmin = req.user.role === "admin";
+      const isSeller =
+        req.user.role === "seller" &&
+        order.items.some(
+          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
+        );
+
+      if (!isOwner && !isAdmin && !isSeller) {
+        return res.status(403).json({ message: "Not authorized to download this credit note" });
+      }
+    }
+
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const { generateCreditNotePDF } = await import("../services/invoiceService.js");
+    const filename = `CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateCreditNotePDF(enrichedOrder);
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error("Download credit note error:", error);
+    res.status(500).json({ message: "Failed to generate credit note", error: error.message });
   }
 };
 
@@ -959,9 +1321,9 @@ export const cancelOrder = async (req, res) => {
     order.cancelledBy = cancelledByName;
     order.cancelledAt = new Date();
 
-    const isPaidOnline = order.paymentStatus === "paid" || (order.paymentMethod && String(order.paymentMethod).toUpperCase() !== "COD");
+    const isPaid = String(order.paymentStatus || '').toLowerCase() === "paid" || (order.paymentMethod && !String(order.paymentMethod).toUpperCase().includes("COD"));
     
-    if (isPaidOnline) {
+    if (isPaid) {
       if (refundDetails && (refundDetails.upiId || refundDetails.accountNumber || refundDetails.method)) {
         order.refundDetails = {
           method: refundDetails.method || (refundDetails.upiId ? "UPI" : "BANK"),
@@ -975,7 +1337,8 @@ export const cancelOrder = async (req, res) => {
       }
       order.refundStatus = "Refund Requested";
     } else {
-      order.refundStatus = "N/A (COD Order)";
+      order.refundStatus = "N/A (Unpaid COD Order)";
+      order.paymentStatus = "cancelled";
     }
 
     // Restock item inventory in DB
@@ -1050,7 +1413,7 @@ export const requestReturnExchange = async (req, res) => {
       const firstItem = order.items[0];
       const searchId = firstItem.productId || firstItem.id;
       if (searchId) {
-        const prod = await Product.findOne({ $or: [{ _id: searchId }, { id: searchId }] });
+        const prod = await findProductByIdOrCustomId(searchId);
         if (prod) {
           if (prod.isReturnable === false) isReturnable = false;
           if (prod.isRefundable === false) isRefundable = false;
@@ -1234,6 +1597,7 @@ export const updateReturnExchangeStatus = async (req, res) => {
       case "refund_processed":
       case "refund_completed":
         overallStatus = "refund_completed";
+        order.paymentStatus = "refunded";
         order.refundStatus = "Refund Completed";
         if (refundTxnId) order.refundDetails = { ...order.refundDetails, refundTxnId, status: "Completed" };
         title = "Refund Processed & Completed";

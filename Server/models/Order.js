@@ -159,8 +159,8 @@ const orderSchema = new mongoose.Schema(
     },
     deliveryMode: {
       type: String,
-      enum: ["third_party", "self_delivery", "pending_choice", ""],
-      default: ""
+      enum: ["third_party", "self_delivery", "pending_choice", "standard", "express", ""],
+      default: "pending_choice"
     },
     courierName: { type: String, default: "" },
     carrier: { type: String, default: "" },
