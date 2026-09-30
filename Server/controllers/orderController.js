@@ -31,6 +31,32 @@ const findUserByIdentifier = async (req) => {
   return await User.findOne({ $or: query });
 };
 
+// Canonical Order Status Normalizer
+export const normalizeOrderStatus = (raw) => {
+  if (!raw) return "Pending";
+  const s = String(raw).toLowerCase().trim().replace(/[\s-]+/g, "_");
+  if (s === "delivered" || s === "completed") return "Delivered";
+  if (s === "out_for_delivery") return "Out for Delivery";
+  if (s === "shipped" || s === "in_transit") return "Shipped";
+  if (s === "packed") return "Packed";
+  if (s === "confirmed") return "Confirmed";
+  if (s === "processing") return "Processing";
+  if (s === "cancelled" || s === "canceled") return "Cancelled";
+  if (s === "return_requested") return "Return Requested";
+  if (s === "return_approved") return "Return Approved";
+  if (s === "product_return_received" || s === "product_received") return "Product Return Received";
+  if (s === "refund_requested") return "Refund Requested";
+  if (s === "refund_approved") return "Refund Approved";
+  if (s === "refund_initiated") return "Refund Initiated";
+  if (s === "refund_completed" || s === "refunded") return "Refund Completed";
+  if (s === "exchange_requested") return "Exchange Requested";
+  if (s === "exchange_approved") return "Exchange Approved";
+  if (s === "exchange_dispatched") return "Exchange Dispatched";
+  if (s === "exchanged") return "Exchanged";
+  if (s === "pending" || s === "placed") return "Pending";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+};
+
 // Helper to safely locate a Product document without throwing CastError on non-ObjectId search IDs
 const findProductByIdOrCustomId = async (searchId) => {
   if (!searchId) return null;
@@ -440,6 +466,15 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         ord.sellerPhone = primarySellerDetails.phone;
         ord.sellerCity = primarySellerDetails.city;
       }
+
+      // Canonicalize status across overall order and individual items
+      ord.overallStatus = normalizeOrderStatus(ord.overallStatus || ord.status);
+      ord.status = ord.overallStatus;
+      if (ord.items && Array.isArray(ord.items)) {
+        ord.items.forEach(item => {
+          item.status = normalizeOrderStatus(item.status || ord.overallStatus);
+        });
+      }
     });
 
   } catch (err) {
@@ -498,6 +533,7 @@ export const getMyOrders = async (req, res) => {
     }
 
     const formattedOrders = orders.map((ord) => {
+      const canonicalStatus = normalizeOrderStatus(ord.overallStatus || ord.status || 'Processing');
       const isSelfDelivery = ord.deliveryMode === 'self_delivery' ||
         Boolean(ord.selfDeliveryDetails?.deliveryPartnerToken) ||
         ord.items?.some(it => it.deliveryType === 'self' || it.deliveryType === 'self_delivery' || it.selfDeliveryDetails?.deliveryPartnerToken);
@@ -550,7 +586,7 @@ export const getMyOrders = async (req, res) => {
           sellerDetails: itemSellerDetails,
           selfDeliveryDetails: itemSelfDelivery,
           thirdPartyDetails: itemThirdParty,
-          status: it.status || ord.overallStatus || ord.status || "Processing"
+          status: normalizeOrderStatus(it.status || canonicalStatus)
         };
       });
 
@@ -558,8 +594,8 @@ export const getMyOrders = async (req, res) => {
         id: ord.id || ord.orderId || ord._id,
         orderId: ord.orderId || ord.id || ord._id,
         date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-        status: ord.overallStatus || ord.status || 'Processing',
-        overallStatus: ord.overallStatus || ord.status || 'Processing',
+        status: canonicalStatus,
+        overallStatus: canonicalStatus,
         deliveryMode: resolvedDeliveryMode,
         courierName: ord.courierName || ord.carrier || firstItem.thirdPartyDetails?.courierName || '',
         carrier: ord.carrier || ord.courierName || '',
@@ -1003,13 +1039,23 @@ export const trackOrder = async (req, res) => {
 // 6. Update Order Status (Admin / Seller / System) with Timeline Push
 export const updateOrder = async (req, res) => {
   try {
-    const existingOrder = await Order.findById(req.params.id);
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let existingOrder = isMongoId ? await Order.findById(id) : null;
+    if (!existingOrder) {
+      existingOrder = await Order.findOne({ $or: [{ orderId: id }, { id: id }] });
+    }
     if (!existingOrder) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const previousStatus = existingOrder.overallStatus;
-    const newStatus = req.body.overallStatus || req.body.status;
+    const previousStatus = existingOrder.overallStatus || existingOrder.status;
+    const previousStatusKey = String(previousStatus || '').toLowerCase().trim().replace(/[\s-]+/g, "_");
+
+    const rawNewStatus = req.body.overallStatus || req.body.status;
+    const newStatusKey = rawNewStatus ? String(rawNewStatus).toLowerCase().trim().replace(/[\s-]+/g, "_") : null;
+    const canonicalStatus = rawNewStatus ? normalizeOrderStatus(rawNewStatus) : null;
+
     const {
       statusTitle,
       statusDescription,
@@ -1039,14 +1085,14 @@ export const updateOrder = async (req, res) => {
       product_return_received: { title: "Product Return Received", desc: "Returned product received at facility and inspected." }
     };
 
-    if (newStatus && newStatus !== previousStatus) {
-      existingOrder.overallStatus = newStatus;
-      existingOrder.status = newStatus;
+    if (canonicalStatus && newStatusKey !== previousStatusKey) {
+      existingOrder.overallStatus = canonicalStatus;
+      existingOrder.status = canonicalStatus;
 
       // Restock item inventory on cancellation or when product return is received / completed
       const restockStatuses = ["cancelled", "returned", "product_return_received", "return_completed"];
-      const isCurrentRestock = restockStatuses.includes(newStatus);
-      const isPreviousRestock = restockStatuses.includes(previousStatus);
+      const isCurrentRestock = restockStatuses.includes(newStatusKey);
+      const isPreviousRestock = restockStatuses.includes(previousStatusKey);
 
       if (isCurrentRestock && !isPreviousRestock) {
         for (const item of existingOrder.items) {
@@ -1056,23 +1102,23 @@ export const updateOrder = async (req, res) => {
       }
 
       // Sync sub-document statuses
-      if (newStatus === "refund_approved" || newStatus === "Refund Approved") {
+      if (newStatusKey === "refund_approved") {
         existingOrder.refundStatus = "Refund Approved";
-      } else if (newStatus === "refund_initiated" || newStatus === "Refund Initiated") {
+      } else if (newStatusKey === "refund_initiated") {
         existingOrder.refundStatus = "Refund Initiated";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_initiated";
-      } else if (newStatus === "refund_completed" || newStatus === "Refund Completed") {
+      } else if (newStatusKey === "refund_completed") {
         existingOrder.paymentStatus = "refunded";
         existingOrder.refundStatus = "Refund Completed";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_completed";
-      } else if (newStatus === "return_approved") {
+      } else if (newStatusKey === "return_approved") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "approved";
-      } else if (newStatus === "product_return_received") {
+      } else if (newStatusKey === "product_return_received" || newStatusKey === "product_received") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "product_received";
       }
 
       // If order is delivered, verify payment status for COD and credit seller wallet balance
-      if ((newStatus === "delivered" || newStatus === "Delivered") && previousStatus !== "delivered" && previousStatus !== "Delivered") {
+      if (newStatusKey === "delivered" && previousStatusKey !== "delivered") {
         const isCodOrder = String(existingOrder.paymentMethod || "").toUpperCase().includes("COD") || existingOrder.paymentStatus !== "paid";
         if (isCodOrder) {
           existingOrder.paymentStatus = "paid";
@@ -1099,9 +1145,9 @@ export const updateOrder = async (req, res) => {
       }
 
       // Append to timeline
-      const statusMeta = statusTextMap[newStatus] || {
-        title: `Status: ${newStatus}`,
-        desc: "Order status updated."
+      const statusMeta = statusTextMap[newStatusKey] || {
+        title: `Order ${canonicalStatus}`,
+        desc: `Order status updated to ${canonicalStatus}.`
       };
 
       const updatedByRole = req.user?.role
@@ -1109,7 +1155,7 @@ export const updateOrder = async (req, res) => {
         : "Admin";
 
       existingOrder.timeline.push({
-        status: newStatus,
+        status: canonicalStatus,
         title: statusTitle || statusMeta.title,
         description: statusDescription || statusMeta.desc,
         location: statusLocation || "",
@@ -1128,6 +1174,25 @@ export const updateOrder = async (req, res) => {
     if (req.body.trackingUrl) existingOrder.trackingUrl = req.body.trackingUrl;
     if (req.body.sellerDetails) existingOrder.sellerDetails = req.body.sellerDetails;
     if (req.body.selfDeliveryDetails) existingOrder.selfDeliveryDetails = req.body.selfDeliveryDetails;
+
+    // Propagate status and fulfillment details to all order items
+    if (existingOrder.items && Array.isArray(existingOrder.items)) {
+      existingOrder.items.forEach(item => {
+        if (canonicalStatus) item.status = canonicalStatus;
+        if (req.body.deliveryMode) item.deliveryType = req.body.deliveryMode;
+        if (req.body.courierName || req.body.trackingNumber !== undefined || req.body.trackingUrl) {
+          item.thirdPartyDetails = {
+            ...item.thirdPartyDetails,
+            courierName: req.body.courierName || existingOrder.courierName || "",
+            trackingNumber: req.body.trackingNumber !== undefined ? req.body.trackingNumber : (existingOrder.trackingNumber || ""),
+            trackingUrl: req.body.trackingUrl || existingOrder.trackingUrl || ""
+          };
+        }
+        if (req.body.selfDeliveryDetails) {
+          item.selfDeliveryDetails = req.body.selfDeliveryDetails;
+        }
+      });
+    }
 
     await existingOrder.save();
     res.json({ message: "Order updated successfully", order: existingOrder });

@@ -41,13 +41,13 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
     .fillColor(primaryColor)
     .fontSize(14)
     .font("Helvetica-Bold")
-    .text("PARTIAL ADVANCE RECEIPT", 360, 40, { align: "right" })
+    .text("TAX INVOICE & ADVANCE RECEIPT", 340, 40, { align: "right" })
     .fontSize(9)
     .font("Helvetica")
     .fillColor(mutedColor)
-    .text(`Receipt No: ${receiptNo}`, 360, 60, { align: "right" })
-    .text(`Bulk Order Ref: ${order.referenceId}`, 360, 72, { align: "right" })
-    .text(`Date: ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`, 360, 84, { align: "right" });
+    .text(`Invoice / Receipt No: ${receiptNo}`, 340, 60, { align: "right" })
+    .text(`Bulk Order Ref: ${order.referenceId}`, 340, 72, { align: "right" })
+    .text(`Date: ${order.advancePaidAt ? new Date(order.advancePaidAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`, 340, 84, { align: "right" });
 
   // Divider
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 102).lineTo(555, 102).stroke();
@@ -91,38 +91,40 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
 
   // 3. ADVANCE PAYMENT HIGHLIGHT CARD (TINTED BOX)
   doc
-    .roundedRect(40, 212, 515, 68, 6)
+    .roundedRect(40, 212, 515, 72, 6)
     .fillAndStroke("#f0fdf4", "#bbf7d0");
 
   doc
     .fontSize(9)
     .font("Helvetica-Bold")
     .fillColor(brandTeal)
-    .text("PARTIAL ADVANCE BREAKDOWN & AUDIT TRAIL", 55, 222);
+    .text("MOBILIZATION PREPAYMENT TAX INVOICE & FINANCIAL TRAIL", 55, 222);
 
   doc
     .fontSize(8.5)
     .font("Helvetica")
     .fillColor(primaryColor)
-    .text(`Overall Estimated Value: ₹${totalBudget.toLocaleString()}`, 55, 238)
-    .text(`Buyer Offered Advance: ${order.buyerAdvancePercentage || 20}% (₹${Number(order.buyerAdvanceAmount || (totalBudget * (order.buyerAdvancePercentage || 20) / 100)).toLocaleString()})`, 55, 250)
-    .text(`Payment Mode: ${order.advancePaymentMode || "Bank Wire / UPI / Demand Draft"}`, 55, 262);
+    .text(`Total Agreed Contract Value: ₹${totalBudget.toLocaleString()}`, 55, 237)
+    .text(`Prepayment Mobilization Rate: ${order.prepaymentPercentage || order.sellerAdvancePercentage || 25}%`, 55, 249)
+    .text(`Online Txn ID: ${order.advanceTransactionId || "Online Razorpay Verified"}`, 55, 261)
+    .text(`Payment Mode: ${order.advancePaymentMode || "Online (Razorpay / UPI)"}`, 55, 273);
 
   doc
     .fontSize(11)
     .font("Helvetica-Bold")
     .fillColor(brandTeal)
-    .text(`Advance Paid / Agreed: ₹${advAmount.toLocaleString()}`, 330, 236, { align: "right" })
-    .fontSize(8.5)
+    .text(`Advance Paid: ₹${advAmount.toLocaleString()}`, 330, 232, { align: "right" })
+    .fontSize(9.5)
     .font("Helvetica-Bold")
     .fillColor("#b91c1c") // Red
-    .text(`Remaining Balance Due: ₹${remainingBalance.toLocaleString()}`, 330, 252, { align: "right" })
+    .text(`Remaining Due on Delivery: ₹${remainingBalance.toLocaleString()}`, 330, 248, { align: "right" })
+    .fontSize(8)
     .font("Helvetica")
     .fillColor(mutedColor)
-    .text(`Status: ${(order.advancePaymentStatus || "Agreed").toUpperCase()}`, 330, 264, { align: "right" });
+    .text(`Status: ${(order.advancePaymentStatus || "Paid").toUpperCase()} (VERIFIED)`, 330, 264, { align: "right" });
 
   // 4. PROCUREMENT ITEMS SUMMARY TABLE
-  const tableTop = 295;
+  const tableTop = 298;
   doc
     .rect(40, tableTop, 515, 20)
     .fill("#f8fafc");
@@ -174,14 +176,14 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
     .fontSize(8)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text("Partial Advance Payment Terms & Conditions:", 40, termsY)
+    .text("Mobilization Advance & Delivery Handover Terms:", 40, termsY)
     .font("Helvetica")
     .fontSize(7.5)
     .fillColor(mutedColor)
-    .text("1. This receipt confirms partial mobilization advance towards raw material procurement, cutting, and batch tailoring.", 40, termsY + 12)
-    .text("2. The remaining balance amount is strictly due on receipt and physical inspection of sample lots / final delivery consignment.", 40, termsY + 22)
-    .text("3. Any customized embroidery, special logos, or bespoke tailoring work initiated post-advance confirmation is non-cancellable.", 40, termsY + 32)
-    .text("4. All transactions are securely audited and monitored under Bookvardi Institutional Marketplace Escrow guidelines.", 40, termsY + 42);
+    .text("1. This tax invoice confirms partial mobilization advance towards raw material procurement, cutting, and batch tailoring.", 40, termsY + 12)
+    .text(`2. The remaining balance amount of ₹${remainingBalance.toLocaleString()} is strictly due on receipt and physical inspection of final delivery consignment.`, 40, termsY + 22)
+    .text("3. Remaining balance settlement and physical handover is verified via the Delivery Partner Tracker Link or on-site UPI QR.", 40, termsY + 32)
+    .text("4. Delivery is fulfilled exclusively via Bookvardi Verified Store Self-Delivery Fleet under platform escrow guidelines.", 40, termsY + 42);
 
   // 6. VERIFICATION STAMP & DIGITAL SEAL
   const stampY = termsY + 68;
@@ -211,5 +213,6 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
     .fillColor(mutedColor)
     .text("(Digitally signed on Bookvardi Platform)", 360, stampY + 44, { align: "right" });
 
+  doc.end();
   return doc;
 };

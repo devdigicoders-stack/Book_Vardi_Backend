@@ -205,6 +205,18 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     advanceTransactionId: { type: String, default: "" },
     advanceReceiptNumber: { type: String, default: "" },
 
+    // Remaining Settlement & Final Payment State
+    remainingPaymentStatus: {
+      type: String,
+      enum: ["pending", "paid"],
+      default: "pending"
+    },
+    remainingPaidAmount: { type: Number, default: 0 },
+    remainingPaidAt: { type: Date },
+    remainingPaymentMode: { type: String, default: "Online (Razorpay / UPI)" },
+    remainingTransactionId: { type: String, default: "" },
+    remainingReceiptNumber: { type: String, default: "" },
+
     // Distribution & Assignment Options: unassigned, direct, selected, broadcast
     assignmentMode: {
       type: String,
@@ -230,12 +242,17 @@ const schoolBulkOrderSchema = new mongoose.Schema(
       trackingId: { type: String, default: "" },
       trackingUrl: { type: String, default: "" },
       deliveryPartnerToken: { type: String, default: "" },
+      deliveryOtp: { type: String, default: "" },
+      driverLocation: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+      },
       dispatchedAt: { type: Date },
       deliveredAt: { type: Date },
       notes: { type: String, default: "" }
     },
 
-    // Status: pending, under_review, published, assigned, quoted, quote_accepted, accepted, packed, out for delivery, received, fulfilled, rejected
+    // Status: pending, under_review, published, assigned, quoted, quote_accepted, accepted, packed, out for delivery, completed, received, fulfilled, rejected
     status: { type: String, default: "pending" }
   },
   { timestamps: true }

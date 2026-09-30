@@ -266,7 +266,9 @@ import {
   submitBuyerCounterDemand,
   acceptBuyerCounterDemand,
   createSchoolBulkPrepaymentOrder,
-  verifySchoolBulkPrepayment
+  verifySchoolBulkPrepayment,
+  createSchoolBulkRemainingPaymentOrder,
+  verifySchoolBulkRemainingPayment
 } from "../controllers/schoolBulkOrderController.js";
 
 // GET Private Customer Bulk Orders
@@ -296,6 +298,12 @@ router.post("/bulk-orders/:id/advance-payment/create-order", createSchoolBulkPre
 
 // POST Verify Razorpay Prepayment Signature and Release Order for Fulfillment
 router.post("/bulk-orders/:id/advance-payment/verify", verifySchoolBulkPrepayment);
+
+// POST Create Online Razorpay / UPI Order for Remaining Balance
+router.post("/bulk-orders/:id/remaining-payment/create-order", createSchoolBulkRemainingPaymentOrder);
+
+// POST Verify Razorpay Remaining Payment Signature and Mark Order Completed
+router.post("/bulk-orders/:id/remaining-payment/verify", verifySchoolBulkRemainingPayment);
 
 // PATCH Update Bulk Order Status & Self-Delivery Details (accepted, packed, out for delivery, received)
 router.patch("/bulk-orders/:id/status", updateSellerSchoolOrder);

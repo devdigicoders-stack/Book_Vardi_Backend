@@ -842,7 +842,7 @@ export const acceptBuyerCounterDemand = async (req, res) => {
       req.seller?._id,
       req.user?._id,
       req.seller?.id,
-      req.headers["x-seller-id"]
+      req.headers?.["x-seller-id"]
     ].filter(Boolean).map(String);
 
     const cleanUserPhone = String(req.user?.phone || req.seller?.phone || "").replace(/\D/g, "").slice(-10);
@@ -1000,7 +1000,7 @@ export const reviseSellerQuotation = async (req, res) => {
       req.seller?._id,
       req.user?._id,
       req.seller?.id,
-      req.headers["x-seller-id"]
+      req.headers?.["x-seller-id"]
     ].filter(Boolean).map(String);
 
     const cleanUserPhone = String(req.user?.phone || req.seller?.phone || "").replace(/\D/g, "").slice(-10);
@@ -1473,23 +1473,29 @@ export const updateSellerSchoolOrder = async (req, res) => {
     // Constraint: Only self delivery available for seller bulk orders
     bulkOrder.deliveryMode = "self_delivery";
 
-    if (deliveryDetails) {
-      const existingDetails = bulkOrder.deliveryDetails || {};
-      const isOutForDelivery = status === "out for delivery" || status === "out_for_delivery";
-      const isReceived = status === "received" || status === "delivered";
+    const existingDetails = bulkOrder.deliveryDetails || {};
+    const isOutForDelivery = status === "out for delivery" || status === "out_for_delivery";
+    const isDeliveredOrCompleted = status === "received" || status === "delivered" || status === "completed";
 
-      bulkOrder.deliveryDetails = {
-        deliveryBoyName: deliveryDetails.deliveryBoyName || existingDetails.deliveryBoyName || "",
-        deliveryBoyPhone: deliveryDetails.deliveryBoyPhone || existingDetails.deliveryBoyPhone || "",
-        vehicleNumber: deliveryDetails.vehicleNumber || existingDetails.vehicleNumber || "",
-        trackingId: deliveryDetails.trackingId || existingDetails.trackingId || `BV-SLF-${bulkOrder.referenceId}`,
-        trackingUrl: deliveryDetails.trackingUrl || existingDetails.trackingUrl || `/#delivery-partner?token=BV-SLF-${bulkOrder.referenceId}`,
-        deliveryPartnerToken: deliveryDetails.deliveryPartnerToken || existingDetails.deliveryPartnerToken || `BV-SLF-${bulkOrder.referenceId}`,
-        dispatchedAt: isOutForDelivery ? (existingDetails.dispatchedAt || new Date()) : existingDetails.dispatchedAt,
-        deliveredAt: isReceived ? new Date() : existingDetails.deliveredAt,
-        notes: deliveryDetails.notes || existingDetails.notes || ""
-      };
-    }
+    // Auto-generate delivery OTP if dispatched and none exists
+    const resolvedOtp = existingDetails.deliveryOtp || (isOutForDelivery ? Math.floor(1000 + Math.random() * 9000).toString() : "");
+
+    const token = (deliveryDetails && deliveryDetails.deliveryPartnerToken) || existingDetails.deliveryPartnerToken || `BV-SLF-${bulkOrder.referenceId}`;
+    const trackingUrl = (deliveryDetails && deliveryDetails.trackingUrl) || existingDetails.trackingUrl || `/#delivery-partner?token=${token}`;
+
+    bulkOrder.deliveryDetails = {
+      deliveryBoyName: (deliveryDetails && deliveryDetails.deliveryBoyName) !== undefined ? deliveryDetails.deliveryBoyName : (existingDetails.deliveryBoyName || ""),
+      deliveryBoyPhone: (deliveryDetails && deliveryDetails.deliveryBoyPhone) !== undefined ? deliveryDetails.deliveryBoyPhone : (existingDetails.deliveryBoyPhone || ""),
+      vehicleNumber: (deliveryDetails && deliveryDetails.vehicleNumber) !== undefined ? deliveryDetails.vehicleNumber : (existingDetails.vehicleNumber || ""),
+      trackingId: (deliveryDetails && deliveryDetails.trackingId) || existingDetails.trackingId || token,
+      trackingUrl,
+      deliveryPartnerToken: token,
+      deliveryOtp: resolvedOtp,
+      ...(existingDetails.driverLocation ? { driverLocation: existingDetails.driverLocation } : {}),
+      dispatchedAt: isOutForDelivery ? (existingDetails.dispatchedAt || new Date()) : existingDetails.dispatchedAt,
+      deliveredAt: isDeliveredOrCompleted ? (existingDetails.deliveredAt || new Date()) : existingDetails.deliveredAt,
+      notes: (deliveryDetails && deliveryDetails.notes) !== undefined ? deliveryDetails.notes : (existingDetails.notes || "")
+    };
 
     if (quantity) bulkOrder.totalQuantity = Number(quantity);
     if (targetDeliveryDate) bulkOrder.targetDeliveryDate = targetDeliveryDate;
@@ -1498,7 +1504,7 @@ export const updateSellerSchoolOrder = async (req, res) => {
 
     await bulkOrder.save();
 
-    const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers["x-seller-id"]].filter(Boolean).map(String);
+    const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers?.["x-seller-id"]].filter(Boolean).map(String);
     const candidatePhones = [req.user?.phone, req.seller?.phone].filter(Boolean);
 
     const responseOrder = (req.user?.role === "admin" || req.user?.role === "super_admin")
@@ -1608,6 +1614,25 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => String(q._id) === String(bulkOrder.acceptedQuoteId) ||
+           q.status === "approved" ||
+           q.negotiationStage === "seller_accepted_counter"
+    );
+
+    // Mutual Verification Guard: Both buyer and seller must have agreed/verified terms
+    const isVerifiedByBoth = winningQuote && (
+      winningQuote.status === "approved" ||
+      winningQuote.negotiationStage === "seller_accepted_counter"
+    ) && bulkOrder.negotiationStage !== "buyer_countered";
+
+    if (!isVerifiedByBoth) {
+      return res.status(400).json({
+        success: false,
+        message: "Bulk order quotation must be mutually verified and agreed by both the buyer and seller before online prepayment can proceed."
+      });
     }
 
     const requiredAdvance = Number(bulkOrder.sellerAdvanceAmount) || (
@@ -1724,6 +1749,10 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
       });
     }
 
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
+    );
+
     const paidAmt = Number(clientPaidAmount) || bulkOrder.sellerAdvanceAmount || (
       bulkOrder.sellerAdvancePercentage > 0
         ? Math.round((Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || 0) * bulkOrder.sellerAdvancePercentage) / 100)
@@ -1731,17 +1760,214 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
     );
 
     bulkOrder.advancePaidAmount = paidAmt;
-    bulkOrder.advancePaymentMode = "Online (Razorpay)";
+    bulkOrder.advancePaymentMode = "Online (Razorpay / UPI)";
     bulkOrder.advanceTransactionId = razorpay_payment_id;
     bulkOrder.advanceReceiptNumber = `REC-ADV-${bulkOrder.referenceId}`;
     bulkOrder.advancePaidAt = new Date();
     bulkOrder.advancePaymentStatus = "paid";
-    bulkOrder.status = "accepted";
+    bulkOrder.status = "confirmed"; // Order officially confirmed with winning seller!
+    if (winningQuote?.sellerId) {
+      bulkOrder.sellerId = winningQuote.sellerId;
+    }
+
+    // Mark all competing seller quotations as rejected
+    if (Array.isArray(bulkOrder.quotations)) {
+      bulkOrder.quotations.forEach(q => {
+        if (winningQuote && String(q._id) !== String(winningQuote._id) && String(q.id) !== String(winningQuote._id)) {
+          q.status = "rejected";
+          q.negotiationStage = "rejected";
+        }
+      });
+    }
 
     // Add milestone round to winning quote negotiation history
+    if (winningQuote) {
+      if (!Array.isArray(winningQuote.negotiationHistory)) {
+        winningQuote.negotiationHistory = [];
+      }
+      winningQuote.negotiationHistory.push({
+        round: winningQuote.negotiationHistory.length + 1,
+        version: winningQuote.currentVersion || 1,
+        senderRole: "buyer",
+        senderName: bulkOrder.contactName || bulkOrder.institutionName || "Buyer",
+        senderId: String(bulkOrder.userId || ""),
+        quoteAmount: winningQuote.quoteAmount,
+        unitPrice: winningQuote.unitPrice,
+        estimatedDeliveryDays: winningQuote.estimatedDeliveryDays,
+        prepaymentPercentage: winningQuote.prepaymentPercentage,
+        prepaymentAmount: winningQuote.prepaymentAmount,
+        prepaymentRaised: false,
+        deliveryDaysRaised: false,
+        notes: `Online mobilization prepayment of ₹${paidAmt.toLocaleString()} received and verified via Razorpay (TXN: ${razorpay_payment_id}). Order officially confirmed with ${winningQuote.sellerStoreName || winningQuote.sellerName || "vendor"} for fulfillment.`,
+        createdAt: new Date()
+      });
+    }
+
+    await bulkOrder.save();
+
+    return res.json({
+      success: true,
+      message: `Online prepayment of ₹${paidAmt.toLocaleString()} verified successfully! Order confirmed with vendor.`,
+      order: bulkOrder,
+      receiptNumber: bulkOrder.advanceReceiptNumber,
+      transactionId: bulkOrder.advanceTransactionId,
+      receiptUrl: `/api/schools/bulk-orders/${bulkOrder._id}/advance-receipt`,
+      status: bulkOrder.status
+    });
+  } catch (error) {
+    console.error("Verify school bulk prepayment error:", error);
+    return res.status(500).json({ success: false, message: "Failed to verify online prepayment", error: error.message });
+  }
+};
+
+// POST Initiate Online Razorpay/UPI Order for Remaining Bulk Order Balance
+export const createSchoolBulkRemainingPaymentOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
     const winningQuote = (bulkOrder.quotations || []).find(
       q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
     );
+
+    const totalAmount = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || winningQuote?.quoteAmount || 0);
+    const advancePaid = Number(bulkOrder.advancePaidAmount || 0);
+    const remainingBalance = Math.max(0, totalAmount - advancePaid);
+
+    if (remainingBalance <= 0) {
+      return res.status(400).json({ success: false, message: "No remaining balance due for this bulk order." });
+    }
+
+    if (bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed") {
+      return res.status(400).json({ success: false, message: "Remaining balance has already been verified and paid for this order." });
+    }
+
+    const key_id = process.env.RAZORPAY_KEY_ID || "rzp_test_6kz5nGEzi8uXRw";
+    const receipt = `rem_${bulkOrder.referenceId}_${Date.now().toString(36).slice(-5)}`;
+
+    let razorpayOrder;
+    try {
+      const razorpay = getRazorpayInstance();
+      const options = {
+        amount: Math.round(remainingBalance * 100), // in paise
+        currency: "INR",
+        receipt,
+        notes: {
+          bulkOrderId: String(bulkOrder._id),
+          referenceId: bulkOrder.referenceId,
+          type: "school_bulk_remaining_payment",
+          customerPhone: bulkOrder.contactPhone || bulkOrder.userPhone || "",
+          schoolName: bulkOrder.institutionName || ""
+        }
+      };
+      razorpayOrder = await razorpay.orders.create(options);
+    } catch (rzpErr) {
+      console.warn("Razorpay API remaining order creation warning, falling back to simulated order:", rzpErr.message);
+      razorpayOrder = {
+        id: `order_rem_${Date.now().toString(36)}`,
+        entity: "order",
+        amount: Math.round(remainingBalance * 100),
+        currency: "INR",
+        receipt,
+        status: "created",
+        isSimulated: true
+      };
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "Remaining balance online payment order initiated successfully",
+      key: key_id,
+      amount: razorpayOrder.amount, // in paise
+      remainingAmountRupees: remainingBalance,
+      currency: razorpayOrder.currency || "INR",
+      razorpayOrderId: razorpayOrder.id,
+      receipt: razorpayOrder.receipt,
+      isSimulated: Boolean(razorpayOrder.isSimulated),
+      customer: {
+        name: bulkOrder.contactName || "School Representative",
+        phone: bulkOrder.contactPhone || bulkOrder.userPhone || "",
+        email: bulkOrder.contactEmail || bulkOrder.userEmail || ""
+      },
+      institutionName: bulkOrder.institutionName,
+      referenceId: bulkOrder.referenceId,
+      totalAmount,
+      advancePaid
+    });
+  } catch (error) {
+    console.error("Create school bulk remaining payment order error:", error);
+    return res.status(500).json({ success: false, message: "Failed to initiate online remaining payment", error: error.message });
+  }
+};
+
+// POST Verify Razorpay Signature for Remaining Balance and Mark Order Completed
+export const verifySchoolBulkRemainingPayment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      paidAmount: clientPaidAmount
+    } = req.body;
+
+    if (!razorpay_order_id || !razorpay_payment_id) {
+      return res.status(400).json({
+        success: false,
+        message: "razorpay_order_id and razorpay_payment_id are required for verification"
+      });
+    }
+
+    const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";
+
+    let isValidSignature = false;
+    if (razorpay_signature) {
+      const generatedSignature = crypto
+        .createHmac("sha256", key_secret)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest("hex");
+
+      isValidSignature = generatedSignature === razorpay_signature;
+    } else {
+      isValidSignature = process.env.NODE_ENV !== "production";
+    }
+
+    if (!isValidSignature) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid Razorpay payment signature. Online verification failed."
+      });
+    }
+
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
+    );
+
+    const totalAmount = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || winningQuote?.quoteAmount || 0);
+    const advancePaid = Number(bulkOrder.advancePaidAmount || 0);
+    const expectedRemaining = Math.max(0, totalAmount - advancePaid);
+    const paidAmt = Number(clientPaidAmount) || expectedRemaining;
+
+    bulkOrder.remainingPaidAmount = paidAmt;
+    bulkOrder.remainingPaymentMode = "Online (Razorpay / UPI)";
+    bulkOrder.remainingTransactionId = razorpay_payment_id;
+    bulkOrder.remainingReceiptNumber = `REC-REM-${bulkOrder.referenceId}`;
+    bulkOrder.remainingPaidAt = new Date();
+    bulkOrder.remainingPaymentStatus = "paid";
+    bulkOrder.status = "completed"; // Order marked completed when user pays on UPI/Razorpay for remaining payment
+
+    if (!bulkOrder.deliveryDetails) {
+      bulkOrder.deliveryDetails = {};
+    }
+    bulkOrder.deliveryDetails.deliveredAt = new Date();
 
     if (winningQuote) {
       if (!Array.isArray(winningQuote.negotiationHistory)) {
@@ -1760,7 +1986,7 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
         prepaymentAmount: winningQuote.prepaymentAmount,
         prepaymentRaised: false,
         deliveryDaysRaised: false,
-        notes: `Online mobilization prepayment of ₹${paidAmt.toLocaleString()} received and verified via Razorpay (TXN: ${razorpay_payment_id}). Order released to vendor for fulfillment.`,
+        notes: `Final remaining balance payment of ₹${paidAmt.toLocaleString()} received and verified via UPI/Razorpay (TXN: ${razorpay_payment_id}). Bulk order officially marked COMPLETED and delivered.`,
         createdAt: new Date()
       });
     }
@@ -1769,14 +1995,16 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Online prepayment of ₹${paidAmt.toLocaleString()} verified successfully! Order released for fulfillment.`,
+      message: `Remaining balance payment of ₹${paidAmt.toLocaleString()} verified successfully! Order marked as completed.`,
       order: bulkOrder,
-      receiptNumber: bulkOrder.advanceReceiptNumber,
-      transactionId: bulkOrder.advanceTransactionId
+      receiptNumber: bulkOrder.remainingReceiptNumber,
+      transactionId: bulkOrder.remainingTransactionId,
+      status: bulkOrder.status
     });
   } catch (error) {
-    console.error("Verify school bulk prepayment error:", error);
-    return res.status(500).json({ success: false, message: "Failed to verify online prepayment", error: error.message });
+    console.error("Verify school bulk remaining payment error:", error);
+    return res.status(500).json({ success: false, message: "Failed to verify online remaining payment", error: error.message });
   }
 };
+
 

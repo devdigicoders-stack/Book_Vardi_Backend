@@ -1,7 +1,8 @@
 import mongoose from "mongoose";
 import Order from "../models/Order.js";
+import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 
-// Helper to locate order by token or ID
+// Helper to locate order or bulk requisition by token or ID
 const findOrderByTokenOrId = async (tokenOrId) => {
   if (!tokenOrId) return null;
 
@@ -16,7 +17,7 @@ const findOrderByTokenOrId = async (tokenOrId) => {
   const tokenPattern = { $regex: `^${normalizedToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" };
 
   let order = null;
-  // 1. Direct match on root or item selfDeliveryDetails
+  // 1. Direct match on retail Order selfDeliveryDetails
   order = await Order.findOne({
     $or: [
       { "selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
@@ -50,18 +51,105 @@ const findOrderByTokenOrId = async (tokenOrId) => {
     });
   }
 
-  return order;
+  if (order) {
+    return { order, isBulk: false };
+  }
+
+  // 4. Check SchoolBulkOrder (Institutional B2B Orders)
+  const bulkQuery = [
+    { "deliveryDetails.deliveryPartnerToken": normalizedToken },
+    { "deliveryDetails.deliveryPartnerToken": tokenPattern },
+    { "deliveryDetails.trackingId": normalizedToken },
+    { "deliveryDetails.trackingId": tokenPattern },
+    { referenceId: normalizedToken },
+    { referenceId: tokenPattern }
+  ];
+  if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
+    bulkQuery.push({ _id: normalizedToken });
+  }
+  const bulkOrder = await SchoolBulkOrder.findOne({ $or: bulkQuery });
+  if (bulkOrder) {
+    return { order: bulkOrder, isBulk: true };
+  }
+
+  return null;
 };
 
 // 1. Get Delivery Partner Order View (Sanitized - OTP Omitted)
 export const getDeliveryPartnerOrder = async (req, res) => {
   try {
     const { token } = req.params;
-    const order = await findOrderByTokenOrId(token);
+    const lookup = await findOrderByTokenOrId(token);
 
-    if (!order) {
+    if (!lookup) {
       return res.status(404).json({ success: false, message: "Delivery task not found or link expired." });
     }
+
+    if (lookup.isBulk) {
+      const bulkOrder = lookup.order;
+      const winningQuote = (bulkOrder.quotations || []).find(
+        q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
+      );
+      const totalAmount = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || winningQuote?.quoteAmount || 0);
+      const advancePaidAmount = Number(bulkOrder.advancePaidAmount || 0);
+      const remainingAmount = Math.max(0, totalAmount - advancePaidAmount);
+      const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed";
+
+      const sanitizedSelfDetails = {
+        deliveryPersonName: bulkOrder.deliveryDetails?.deliveryBoyName || "Store Fleet Rider",
+        deliveryPersonPhone: bulkOrder.deliveryDetails?.deliveryBoyPhone || "",
+        vehicleNumber: bulkOrder.deliveryDetails?.vehicleNumber || "Store Fleet",
+        deliveryPartnerToken: bulkOrder.deliveryDetails?.deliveryPartnerToken || token,
+        trackingUrl: bulkOrder.deliveryDetails?.trackingUrl || "",
+        driverLocation: bulkOrder.deliveryDetails?.driverLocation || null,
+        notes: bulkOrder.deliveryDetails?.notes || ""
+      };
+
+      const sanitizedOrder = {
+        id: bulkOrder._id,
+        orderId: bulkOrder.referenceId,
+        isBulkOrder: true,
+        overallStatus: bulkOrder.status,
+        status: bulkOrder.status,
+        date: bulkOrder.createdAt ? new Date(bulkOrder.createdAt).toLocaleDateString("en-IN") : "",
+        totalAmount,
+        advancePaidAmount,
+        remainingAmount,
+        paymentMethod: "Online / UPI (Razorpay)",
+        paymentStatus: isPaid ? "paid" : "pending_balance",
+        customer: {
+          name: bulkOrder.institutionName || bulkOrder.contactName || "School Campus",
+          phone: bulkOrder.contactPhone || bulkOrder.userPhone || "",
+          email: bulkOrder.contactEmail || bulkOrder.userEmail || "",
+          designation: bulkOrder.designation || "Administrator"
+        },
+        shippingAddress: {
+          street: bulkOrder.address || "",
+          city: bulkOrder.city || "",
+          state: bulkOrder.state || "",
+          pincode: bulkOrder.pincode || ""
+        },
+        items: (bulkOrder.requirements || []).map((r, i) => ({
+          id: r._id || i + 1,
+          name: r.itemName || "Institutional Uniform / Supply",
+          price: Number(r.sellerPricePerUnit || 0),
+          quantity: Number(r.quantity || 1),
+          size: r.size || "",
+          category: r.category || "School Uniform",
+          image: r.samplePhoto || ""
+        })),
+        sellerDetails: {
+          storeName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "Store Fleet",
+          phone: winningQuote?.sellerPhone || "",
+          email: winningQuote?.sellerEmail || ""
+        },
+        selfDeliveryDetails: sanitizedSelfDetails
+      };
+
+      return res.json({ success: true, order: sanitizedOrder });
+    }
+
+    const order = lookup.order;
 
     // Prepare sanitized self delivery details (omit deliveryOtp for security)
     const selfDetails = order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || {};
@@ -123,14 +211,31 @@ export const getDeliveryPartnerOrder = async (req, res) => {
 export const resendCustomerDeliveryOtp = async (req, res) => {
   try {
     const { token } = req.params;
-    const order = await findOrderByTokenOrId(token);
+    const lookup = await findOrderByTokenOrId(token);
 
-    if (!order) {
+    if (!lookup) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
 
-    // Generate fresh 4-digit OTP
     const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+    if (lookup.isBulk) {
+      const bulkOrder = lookup.order;
+      if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
+      bulkOrder.deliveryDetails.deliveryOtp = freshOtp;
+      await bulkOrder.save();
+
+      const customerPhone = bulkOrder.contactPhone || bulkOrder.userPhone || "School Campus Admin";
+      console.log(`📲 [SMS/OTP RESENT] Bulk Delivery OTP ${freshOtp} dispatched to Customer (${customerPhone}) for Requisition #${bulkOrder.referenceId}`);
+
+      return res.json({
+        success: true,
+        message: `Delivery OTP has been resent to Customer (${customerPhone}).`,
+        otpLastSentAt: new Date()
+      });
+    }
+
+    const order = lookup.order;
 
     if (!order.selfDeliveryDetails) {
       order.selfDeliveryDetails = {};
@@ -170,11 +275,42 @@ export const verifyDeliveryOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: "4-digit Delivery OTP is required." });
     }
 
-    const order = await findOrderByTokenOrId(token);
+    const lookup = await findOrderByTokenOrId(token);
 
-    if (!order) {
+    if (!lookup) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
+
+    if (lookup.isBulk) {
+      const bulkOrder = lookup.order;
+      const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || "4829").trim();
+      const providedOtp = String(otp).trim();
+
+      if (providedOtp !== expectedOtp) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid Delivery OTP code. Please ask the school representative for the correct 4-digit PIN."
+        });
+      }
+
+      bulkOrder.status = "completed";
+      if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
+      bulkOrder.deliveryDetails.deliveredAt = new Date();
+      if (bulkOrder.remainingPaymentStatus !== "paid") {
+        bulkOrder.remainingPaymentStatus = "paid";
+        bulkOrder.remainingPaidAt = new Date();
+        bulkOrder.remainingPaymentMode = "Handover / Delivery Verified";
+      }
+      await bulkOrder.save();
+
+      return res.json({
+        success: true,
+        message: "🎉 Delivery OTP verified successfully! Bulk order marked as Completed.",
+        orderId: bulkOrder.referenceId
+      });
+    }
+
+    const order = lookup.order;
 
     const expectedOtp = String(
       order.selfDeliveryDetails?.deliveryOtp ||
@@ -266,10 +402,24 @@ export const updateDriverLocation = async (req, res) => {
       return res.status(400).json({ success: false, message: "Valid lat and lng coordinates required." });
     }
 
-    const order = await findOrderByTokenOrId(token);
-    if (!order) {
+    const lookup = await findOrderByTokenOrId(token);
+    if (!lookup) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
+
+    if (lookup.isBulk) {
+      const bulkOrder = lookup.order;
+      if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
+      bulkOrder.deliveryDetails.driverLocation = {
+        lat: Number(lat),
+        lng: Number(lng),
+        updatedAt: new Date()
+      };
+      await bulkOrder.save();
+      return res.json({ success: true, message: "Driver location updated successfully." });
+    }
+
+    const order = lookup.order;
 
     if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
     order.selfDeliveryDetails.driverLocation = {

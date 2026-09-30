@@ -5,6 +5,32 @@ import Seller from "../models/Seller.js";
 import User from "../models/User.js";
 import { enrichOrdersWithSellerAndConsumer } from "./orderController.js";
 
+// Canonical Order Status Normalizer
+export const normalizeOrderStatus = (raw) => {
+  if (!raw) return "Pending";
+  const s = String(raw).toLowerCase().trim().replace(/[\s-]+/g, "_");
+  if (s === "delivered" || s === "completed") return "Delivered";
+  if (s === "out_for_delivery") return "Out for Delivery";
+  if (s === "shipped" || s === "in_transit") return "Shipped";
+  if (s === "packed") return "Packed";
+  if (s === "confirmed") return "Confirmed";
+  if (s === "processing") return "Processing";
+  if (s === "cancelled" || s === "canceled") return "Cancelled";
+  if (s === "return_requested") return "Return Requested";
+  if (s === "return_approved") return "Return Approved";
+  if (s === "product_return_received" || s === "product_received") return "Product Return Received";
+  if (s === "refund_requested") return "Refund Requested";
+  if (s === "refund_approved") return "Refund Approved";
+  if (s === "refund_initiated") return "Refund Initiated";
+  if (s === "refund_completed" || s === "refunded") return "Refund Completed";
+  if (s === "exchange_requested") return "Exchange Requested";
+  if (s === "exchange_approved") return "Exchange Approved";
+  if (s === "exchange_dispatched") return "Exchange Dispatched";
+  if (s === "exchanged") return "Exchanged";
+  if (s === "pending" || s === "placed") return "Pending";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+};
+
 // Use the configured frontend app base URL so delivery links work on local and deployed hosts.
 const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL || "http://localhost:3000";
 
@@ -218,25 +244,7 @@ export const getSellerOrders = async (req, res) => {
         0
       );
 
-      const rawStatus = (o.overallStatus || o.status || "Pending").toLowerCase().trim();
-      const formattedStatus =
-        rawStatus === "delivered" || rawStatus === "completed" ? "Delivered" :
-        rawStatus === "shipped" ? "Shipped" :
-        rawStatus === "packed" ? "Packed" :
-        rawStatus === "confirmed" ? "Confirmed" :
-        rawStatus === "cancelled" ? "Cancelled" :
-        rawStatus === "return_requested" ? "Return Requested" :
-        rawStatus === "exchange_requested" ? "Exchange Requested" :
-        rawStatus === "return_approved" ? "Return Approved" :
-        rawStatus === "exchange_approved" ? "Exchange Approved" :
-        rawStatus === "return_rejected" ? "Return Rejected" :
-        rawStatus === "exchange_rejected" ? "Exchange Rejected" :
-        rawStatus === "pickup_scheduled" ? "Pickup Scheduled" :
-        rawStatus === "product_received" ? "Product Received" :
-        rawStatus === "refund_completed" || rawStatus === "refund_processed" ? "Refunded" :
-        rawStatus === "exchange_dispatched" ? "Exchange Dispatched" :
-        rawStatus === "exchanged" ? "Exchanged" :
-        "Pending";
+      const formattedStatus = normalizeOrderStatus(o.overallStatus || o.status || "Pending");
 
       return {
         id: o.orderId || o.id || String(o._id),
@@ -288,7 +296,7 @@ export const getSellerOrders = async (req, res) => {
           size: item.size || "",
           color: item.color || "",
           image: item.image || "",
-          status: item.status || formattedStatus,
+          status: normalizeOrderStatus(item.status || formattedStatus),
           deliveryType: item.deliveryType || o.deliveryMode || "",
           selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
           thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
@@ -546,8 +554,8 @@ export const updateSellerOrderStatus = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const formattedStatus = status
-      ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()
-      : (order.status || "Pending");
+      ? normalizeOrderStatus(status)
+      : normalizeOrderStatus(order.status || "Pending");
 
     const sellerInfo = await resolveSellerProfileDetails(req, order);
     order.sellerDetails = sellerInfo;
@@ -628,7 +636,7 @@ export const updateSellerOrderStatus = async (req, res) => {
 
     if (status) {
       order.status = formattedStatus;
-      order.overallStatus = formattedStatus.toLowerCase();
+      order.overallStatus = formattedStatus;
     }
 
     if (status) {
@@ -638,7 +646,7 @@ export const updateSellerOrderStatus = async (req, res) => {
         : (trackingNumber ? `Courier: ${courierName || order.courierName || 'Express'} (AWB: ${trackingNumber})` : 'Dispatched via Courier');
 
       order.timeline.push({
-        status: formattedStatus.toLowerCase(),
+        status: formattedStatus,
         title: `Order ${formattedStatus}`,
         description: `Status updated to ${formattedStatus} by seller (${sellerInfo.storeName}). ${deliveryDesc}`,
         timestamp: new Date(),
