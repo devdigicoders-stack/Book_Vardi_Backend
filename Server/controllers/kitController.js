@@ -11,19 +11,61 @@ export const getKits = async (req, res) => {
       isApproved: { $ne: false }
     };
 
-    if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
-    if (gender && gender !== "All") filter.gender = gender;
-    if (classGrade) filter.classGrade = { $regex: classGrade, $options: "i" };
+    const andConditions = [];
+
+    if (schoolName && schoolName.trim()) {
+      const schStr = schoolName.trim();
+      const isAllReq = ["all", "all schools", "any", "any school", "general"].includes(schStr.toLowerCase());
+      if (!isAllReq) {
+        andConditions.push({
+          $or: [
+            { schoolName: { $regex: schStr, $options: "i" } },
+            { schoolName: { $regex: "all school|open for all|general", $options: "i" } },
+            { schoolCode: { $in: ["ALL", "GEN", "ALL-SCHOOLS"] } }
+          ]
+        });
+      }
+    }
+
+    if (gender && gender !== "All") {
+      andConditions.push({
+        $or: [
+          { gender: gender },
+          { gender: { $in: ["Unisex", "All"] } }
+        ]
+      });
+    }
+
+    if (classGrade && classGrade.trim()) {
+      const clsStr = classGrade.trim();
+      const isAllCls = ["all", "all classes", "all grades", "any class"].includes(clsStr.toLowerCase());
+      if (!isAllCls) {
+        andConditions.push({
+          $or: [
+            { classGrade: { $regex: clsStr, $options: "i" } },
+            { classGrade: { $regex: "all class|all grade|all", $options: "i" } }
+          ]
+        });
+      }
+    }
+
     if (badgeTag) filter.badgeTag = badgeTag;
     if (sellerId) filter.sellerId = sellerId;
 
-    if (search) {
-      filter.$or = [
-        { title: { $regex: search, $options: "i" } },
-        { schoolName: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
-        { "items.name": { $regex: search, $options: "i" } }
-      ];
+    if (search && search.trim()) {
+      const q = search.trim();
+      andConditions.push({
+        $or: [
+          { title: { $regex: q, $options: "i" } },
+          { schoolName: { $regex: q, $options: "i" } },
+          { description: { $regex: q, $options: "i" } },
+          { "items.name": { $regex: q, $options: "i" } }
+        ]
+      });
+    }
+
+    if (andConditions.length > 0) {
+      filter.$and = andConditions;
     }
 
     const kits = await Kit.find(filter)

@@ -1,4 +1,6 @@
 import mongoose from "mongoose";
+import "./Product.js";
+import "./Seller.js";
 
 const kitItemSchema = new mongoose.Schema({
   productId: {
@@ -227,12 +229,12 @@ const kitSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["available", "out-of-stock", "inactive", "deleted"],
+      enum: ["available", "out-of-stock", "inactive", "deleted", "pending", "active", "draft"],
       default: "available"
     },
     approvalStatus: {
       type: String,
-      enum: ["Approved", "Pending", "Rejected"],
+      enum: ["Approved", "Pending", "Rejected", "approved", "pending", "rejected"],
       default: "Pending"
     },
     isApproved: {
@@ -274,8 +276,17 @@ kitSchema.index({ status: 1, approvalStatus: 1, isApproved: 1 });
 
 // Calculate totalMrp, savingsAmount, and discountPercentage automatically before saving
 kitSchema.pre("save", function (next) {
-  // Sync isApproved with approvalStatus
-  this.isApproved = (this.approvalStatus === "Approved" || this.approvalStatus === "approved");
+  // Normalize and sync approvalStatus & isApproved
+  if (this.approvalStatus) {
+    const s = String(this.approvalStatus).toLowerCase();
+    this.approvalStatus = s === "approved" ? "Approved" : (s === "rejected" ? "Rejected" : "Pending");
+  }
+  this.isApproved = (this.approvalStatus === "Approved");
+
+  if (this.status) {
+    const st = String(this.status).toLowerCase();
+    if (st === "active") this.status = "available";
+  }
 
   // Sync name with title
   if (!this.name && this.title) {

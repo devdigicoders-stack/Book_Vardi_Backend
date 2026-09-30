@@ -263,7 +263,10 @@ import {
   downloadAdvanceReceipt,
   recordAdvancePayment,
   updateSellerSchoolOrder,
-  submitBuyerCounterDemand
+  submitBuyerCounterDemand,
+  acceptBuyerCounterDemand,
+  createSchoolBulkPrepaymentOrder,
+  verifySchoolBulkPrepayment
 } from "../controllers/schoolBulkOrderController.js";
 
 // GET Private Customer Bulk Orders
@@ -282,8 +285,17 @@ router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);
 // POST Buyer Submit 2nd Version / Counter-Demand on a Seller Quotation
 router.post("/bulk-orders/:id/quotations/:quoteId/counter", submitBuyerCounterDemand);
 
+// POST Seller / Admin Accept Buyer Counter-Demand on a Quotation
+router.post("/bulk-orders/:id/quotations/:quoteId/accept-counter", acceptBuyerCounterDemand);
+
 // POST Buyer Approve Specific Seller Quotation (Winning Quote)
 router.post("/bulk-orders/:id/approve-quote", approveSellerQuotation);
+
+// POST Create Online Razorpay Prepayment Order for Bulk Order
+router.post("/bulk-orders/:id/advance-payment/create-order", createSchoolBulkPrepaymentOrder);
+
+// POST Verify Razorpay Prepayment Signature and Release Order for Fulfillment
+router.post("/bulk-orders/:id/advance-payment/verify", verifySchoolBulkPrepayment);
 
 // PATCH Update Bulk Order Status & Self-Delivery Details (accepted, packed, out for delivery, received)
 router.patch("/bulk-orders/:id/status", updateSellerSchoolOrder);

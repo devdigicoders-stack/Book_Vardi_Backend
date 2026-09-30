@@ -33,6 +33,25 @@ const normalizePaymentMethod = (p) => {
   return "Both";
 };
 
+const normalizeKitStatus = (s) => {
+  if (!s) return "available";
+  const str = String(s).trim().toLowerCase();
+  if (["available", "active"].includes(str)) return "available";
+  if (["out-of-stock", "outofstock"].includes(str)) return "out-of-stock";
+  if (["inactive", "disabled"].includes(str)) return "inactive";
+  if (["deleted"].includes(str)) return "deleted";
+  if (["pending", "draft"].includes(str)) return "pending";
+  return "available";
+};
+
+const normalizeApprovalStatus = (s) => {
+  if (!s) return "Pending";
+  const str = String(s).trim().toLowerCase();
+  if (str === "approved") return "Approved";
+  if (str === "rejected") return "Rejected";
+  return "Pending";
+};
+
 const isValidObjectId = (id) => {
   if (!id) return false;
   if (id instanceof mongoose.Types.ObjectId) return true;
@@ -41,58 +60,74 @@ const isValidObjectId = (id) => {
 };
 
 const getExpandedSellerIds = async (req) => {
-  const rawIds = [
-    req.user?.id,
-    req.seller?._id,
-    req.seller?.id,
-    req.user?._id,
-    req.user?.phone,
-    req.seller?.phone,
-    req.headers?.["x-seller-id"],
-    req.headers?.["x-user-phone"],
-    req.headers?.["x-seller-phone"],
-    req.query?.sellerId
-  ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
+  try {
+    const rawIds = [
+      req.user?.id,
+      req.seller?._id,
+      req.seller?.id,
+      req.user?._id,
+      req.user?.phone,
+      req.seller?.phone,
+      req.headers?.["x-seller-id"],
+      req.headers?.["x-user-phone"],
+      req.headers?.["x-seller-phone"],
+      req.query?.sellerId
+    ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
-  const sellerSet = new Set();
-  rawIds.forEach((id) => {
-    if (isValidObjectId(id)) {
-      sellerSet.add(new mongoose.Types.ObjectId(String(id)));
+    const sellerSet = new Set();
+    const idStrings = new Set();
+
+    rawIds.forEach((id) => {
+      if (isValidObjectId(id)) {
+        const strId = String(id);
+        if (!idStrings.has(strId)) {
+          idStrings.add(strId);
+          sellerSet.add(new mongoose.Types.ObjectId(strId));
+        }
+      }
+    });
+
+    const validObjectIds = Array.from(sellerSet);
+    const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
+    const phoneVariants = phoneList.flatMap((p) => {
+      const digits10 = p.slice(-10);
+      return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
+    });
+
+    const orConditions = [
+      ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
+      ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
+    ];
+
+    if (orConditions.length > 0) {
+      const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
+      sellerDocs.forEach((doc) => {
+        if (doc._id && isValidObjectId(doc._id)) {
+          const strId = String(doc._id);
+          if (!idStrings.has(strId)) {
+            idStrings.add(strId);
+            sellerSet.add(new mongoose.Types.ObjectId(strId));
+          }
+        }
+      });
+
+      const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
+      userDocs.forEach((doc) => {
+        if (doc._id && isValidObjectId(doc._id)) {
+          const strId = String(doc._id);
+          if (!idStrings.has(strId)) {
+            idStrings.add(strId);
+            sellerSet.add(new mongoose.Types.ObjectId(strId));
+          }
+        }
+      });
     }
-  });
 
-  const validObjectIds = rawIds.filter((id) => isValidObjectId(id)).map((id) => new mongoose.Types.ObjectId(String(id)));
-  const phoneList = rawIds.map((id) => String(id).replace(/\D/g, "")).filter((p) => p.length >= 8);
-  const phoneVariants = phoneList.flatMap((p) => {
-    const digits10 = p.slice(-10);
-    return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
-  });
-
-  const Seller = (await import("../models/Seller.js")).default;
-  const User = (await import("../models/User.js")).default;
-
-  const orConditions = [
-    ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
-    ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
-  ];
-
-  if (orConditions.length > 0) {
-    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
-    sellerDocs.forEach((doc) => {
-      if (doc._id && isValidObjectId(doc._id)) {
-        sellerSet.add(new mongoose.Types.ObjectId(String(doc._id)));
-      }
-    });
-
-    const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
-    userDocs.forEach((doc) => {
-      if (doc._id && isValidObjectId(doc._id)) {
-        sellerSet.add(new mongoose.Types.ObjectId(String(doc._id)));
-      }
-    });
+    return Array.from(sellerSet);
+  } catch (err) {
+    console.error("getExpandedSellerIds error:", err);
+    return [];
   }
-
-  return Array.from(sellerSet);
 };
 
 // Get all kits created by the logged-in Seller
@@ -107,7 +142,10 @@ export const getSellerKits = async (req, res) => {
     const filter = {
       isDeleted: { $ne: true },
       status: { $nin: ["deleted"] },
-      sellerId: { $in: validObjectIds }
+      $or: [
+        { sellerId: { $in: validObjectIds } },
+        { sellerId: { $in: validObjectIds.map(id => id.toString()) } }
+      ]
     };
 
     const kits = await Kit.find(filter)
@@ -173,6 +211,7 @@ export const createKit = async (req, res) => {
       isGstInclusive,
       paymentMethodAllowed,
       status,
+      approvalStatus,
       image,
       images
     } = req.body;
@@ -298,9 +337,9 @@ export const createKit = async (req, res) => {
       description: (description || "").trim(),
       paymentMethodAllowed: paymentAllowedStr,
       paymentMethodsAllowed: paymentMethodsArr,
-      status: status || "available",
-      approvalStatus: "Pending", // Required Admin Review Approval by Default
-      isApproved: false
+      status: normalizeKitStatus(status || "available"),
+      approvalStatus: normalizeApprovalStatus(approvalStatus || "Pending"),
+      isApproved: normalizeApprovalStatus(approvalStatus || "Pending") === "Approved"
     });
 
     await newKit.save();
@@ -344,17 +383,21 @@ export const updateKit = async (req, res) => {
     if (updates.subtitle !== undefined) kit.subtitle = updates.subtitle;
     if (updates.schoolName) kit.schoolName = updates.schoolName.trim();
     if (updates.schoolCode !== undefined) kit.schoolCode = updates.schoolCode.trim();
-    if (updates.gender) kit.gender = updates.gender;
+    if (updates.gender) kit.gender = normalizeGender(updates.gender);
     if (updates.classGrade) kit.classGrade = updates.classGrade.trim();
     if (updates.badgeTag || updates.badge) {
-      kit.badgeTag = updates.badgeTag || updates.badge;
+      kit.badgeTag = normalizeBadge(updates.badgeTag || updates.badge);
       kit.badge = kit.badgeTag;
     }
     if (updates.description !== undefined) kit.description = updates.description.trim();
     if (updates.sku !== undefined) kit.sku = updates.sku.trim();
     if (updates.gst !== undefined) kit.gst = Number(updates.gst);
     if (updates.isGstInclusive !== undefined) kit.isGstInclusive = Boolean(updates.isGstInclusive);
-    if (updates.status) kit.status = updates.status;
+    if (updates.status !== undefined) kit.status = normalizeKitStatus(updates.status);
+    if (updates.approvalStatus !== undefined) {
+      kit.approvalStatus = normalizeApprovalStatus(updates.approvalStatus);
+      kit.isApproved = kit.approvalStatus === "Approved";
+    }
 
     if (updates.bundlePrice !== undefined || updates.price !== undefined) {
       kit.bundlePrice = Number(updates.bundlePrice !== undefined ? updates.bundlePrice : updates.price);
