@@ -233,7 +233,7 @@ router.post("/bulk-order", async (req, res) => {
       buyerAdvancePercentage: buyerAdvPct,
       buyerAdvanceAmount: buyerAdvAmt,
       buyerAdvanceNote: req.body.buyerAdvanceNote || "",
-      advancePaymentStatus: "pending",
+      advancePaymentStatus: req.body.advancePaymentStatus || "pending",
       advanceReceiptNumber: `REC-ADV-${refCode}`,
       assignmentMode: req.body.assignmentMode || "broadcast",
       status: "published"
@@ -255,6 +255,7 @@ router.post("/bulk-order", async (req, res) => {
 
 import {
   getCustomerSchoolOrders,
+  getSchoolOrderById,
   getAdminSchoolOrders,
   distributeSchoolOrder,
   approveSellerQuotation,
@@ -271,6 +272,9 @@ router.get("/bulk-orders/my-orders", getCustomerSchoolOrders);
 // GET all School Bulk Orders (Admin view)
 router.get("/bulk-orders/list", getAdminSchoolOrders);
 router.get("/bulk-orders/admin-list", getAdminSchoolOrders);
+
+// GET single School Bulk Order by ID or referenceId
+router.get("/bulk-orders/:id", getSchoolOrderById);
 
 // PATCH Admin Distribute Bulk Order (Direct, Selected, Broadcast)
 router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);

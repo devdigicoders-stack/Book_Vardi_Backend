@@ -196,8 +196,8 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     // Agreed Advance & Receipt State
     advancePaymentStatus: {
       type: String,
-      enum: ["offered", "demanded", "agreed", "paid_partially", "paid"],
-      default: "offered"
+      enum: ["pending", "offered", "demanded", "agreed", "paid_partially", "paid"],
+      default: "pending"
     },
     advancePaidAmount: { type: Number, default: 0 },
     advancePaidAt: { type: Date },

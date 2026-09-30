@@ -8,11 +8,13 @@ const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 // Generic JWT Authenticator
 export const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+  let token = authHeader && authHeader.split(" ")[1];
 
-  if (!token) {
-    return res.status(401).json({ message: "Access token required" });
+  if (!token || token === "undefined" || token === "null" || token.trim() === "") {
+    return res.status(401).json({ message: "Access token required", code: "NO_TOKEN" });
   }
+
+  token = token.trim();
 
   // Handle dev/fallback tokens when testing locally or running in demo mode
   if (token === "mock-jwt-token-123" || token === "dev-admin-token" || token === "super-admin-token" || token === "test-token") {
@@ -27,7 +29,7 @@ export const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({ message: "Invalid or expired token" });
+      return res.status(401).json({ message: "Invalid or expired token", code: "TOKEN_EXPIRED" });
     }
     req.user = user;
     next();

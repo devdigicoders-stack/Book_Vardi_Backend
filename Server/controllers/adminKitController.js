@@ -96,6 +96,13 @@ export const updateKitApproval = async (req, res) => {
 
     if (approvalStatus === "Approved") {
       kit.status = "available";
+      kit.isApproved = true;
+    } else if (approvalStatus === "Pending") {
+      kit.status = "pending";
+      kit.isApproved = false;
+    } else if (approvalStatus === "Rejected") {
+      kit.status = "inactive";
+      kit.isApproved = false;
     }
 
     await kit.save();
