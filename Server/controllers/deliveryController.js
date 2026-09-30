@@ -170,8 +170,10 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       status: order.overallStatus || order.status || "Processing",
       date: order.date || (order.createdAt ? new Date(order.createdAt).toLocaleDateString("en-IN") : ""),
       totalAmount: order.totalAmount || order.total || 0,
-      paymentMethod: order.paymentMethod || "UPI",
-      paymentStatus: order.paymentStatus || "paid",
+      paymentMethod: order.paymentMethod || "COD",
+      paymentStatus: order.paymentStatus
+        ? order.paymentStatus
+        : (String(order.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "paid"),
       customer: {
         name: order.customer?.name || "Customer",
         phone: order.customer?.phone || order.shippingAddress?.phone || "",

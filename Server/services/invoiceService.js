@@ -311,7 +311,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
       .fillColor(primaryColor)
       .text(`${deliveryPartnerDisplay} | Tracking ID: `, { continued: true })
       .font("Helvetica-Bold")
-      .text(trackingNumberDisplay, { continued: trackingLinkDisplay ? true : false });
+      .text(trackingNumberDisplay || "Not Assigned", { continued: trackingLinkDisplay ? true : false });
     if (trackingLinkDisplay) {
       doc
         .font("Helvetica")
@@ -324,7 +324,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
       .fontSize(8)
       .font("Helvetica")
       .fillColor(mutedColor)
-      .text(`Logistics Status: ${isOut ? "Out for Delivery (Awaiting Partner Assignment)" : "Awaiting Out for Delivery Dispatch"} (Tracking generated upon Out for Delivery)`, 40, trackingLineY);
+      .text(`Logistics Status: ${isOut ? "Out for Delivery (Awaiting Partner Assignment)" : "Awaiting Dispatch"} | Tracking ID: Not Assigned`, 40, trackingLineY);
   }
 
   // 4. ITEMS TABLE HEADER

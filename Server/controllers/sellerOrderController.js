@@ -565,9 +565,17 @@ export const updateSellerOrderStatus = async (req, res) => {
 
     let computedTrackingUrl = trackingUrl || "";
     if (resolvedMode === "third_party") {
-      computedTrackingUrl = trackingUrl || resolveCarrierTrackingUrl(courierName || order.courierName, trackingNumber || order.trackingNumber);
-      if (trackingNumber) order.trackingNumber = trackingNumber;
       if (courierName) order.courierName = courierName;
+      let effectiveAwb = trackingNumber || order.trackingNumber || "";
+      if (!effectiveAwb && (courierName || order.courierName)) {
+        const courierPrefix = String(courierName || order.courierName || "BLUEDART")
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, "")
+          .slice(0, 10) || "COURIER";
+        effectiveAwb = `${courierPrefix}-${Math.floor(10000000 + Math.random() * 90000000)}`;
+      }
+      order.trackingNumber = effectiveAwb;
+      computedTrackingUrl = trackingUrl || resolveCarrierTrackingUrl(order.courierName, effectiveAwb);
       if (computedTrackingUrl) order.trackingUrl = computedTrackingUrl;
     }
 
