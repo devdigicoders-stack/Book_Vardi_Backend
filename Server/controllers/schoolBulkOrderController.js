@@ -1709,18 +1709,30 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
            q.status === "approved" ||
            q.status === "seller_accepted" ||
            q.status === "buyer_accepted" ||
+           q.negotiationStage === "approved" ||
            q.negotiationStage === "seller_accepted_counter"
     );
 
     // Mutual Verification Guard: Both buyer and seller must have agreed/verified terms
-    const isVerifiedByBoth = winningQuote && (
+    const isUnderCounter = bulkOrder.status === "buyer_countered" || winningQuote?.negotiationStage === "buyer_countered";
+    const isVerifiedByBoth = winningQuote && !isUnderCounter && (
       winningQuote.status === "approved" ||
+      winningQuote.status === "seller_accepted" ||
       winningQuote.negotiationStage === "approved" ||
+      winningQuote.negotiationStage === "seller_accepted_counter" ||
       bulkOrder.status === "accepted" ||
+      bulkOrder.status === "confirmed" ||
       bulkOrder.status === "quote_accepted" ||
       bulkOrder.status === "seller_accepted_counter" ||
       bulkOrder.status === "buyer_accepted"
-    ) && bulkOrder.negotiationStage !== "buyer_countered";
+    );
+
+    if (isUnderCounter) {
+      return res.status(400).json({
+        success: false,
+        message: "Quotation is currently under buyer counter-demand. The seller must review and accept the counter-demand terms before online prepayment can proceed."
+      });
+    }
 
     if (!isVerifiedByBoth) {
       return res.status(400).json({

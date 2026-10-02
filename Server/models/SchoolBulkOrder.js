@@ -109,6 +109,7 @@ const quotationSchema = new mongoose.Schema(
         "buyer_countered",
         "seller_accepted_counter",
         "revised_by_seller",
+        "buyer_accepted_quote",
         "approved",
         "rejected"
       ],
@@ -136,7 +137,7 @@ const quotationSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["submitted", "under_review", "approved", "rejected"],
+      enum: ["submitted", "under_review", "approved", "rejected", "buyer_accepted"],
       default: "submitted"
     },
     submittedAt: { type: Date, default: Date.now }

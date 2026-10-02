@@ -714,6 +714,14 @@ export const downloadSellerInvoice = async (req, res) => {
     const orderObj = order.toObject ? order.toObject() : order;
     const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
 
+    // STRICT PAYMENT STATUS VERIFICATION CHECK: Seller Invoice only created after payment status is verified & confirmed ("paid")
+    const paymentStatus = String(enrichedOrder.paymentStatus || "").toLowerCase().trim();
+    if (paymentStatus !== "paid") {
+      return res.status(400).json({
+        message: `Tax Invoice cannot be created until payment status is verified and confirmed. Current payment status: ${enrichedOrder.paymentStatus || "pending"}.`
+      });
+    }
+
     const filename = `Seller_Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");

@@ -57,6 +57,19 @@ connectDB()
   })
   .catch(() => {});
 
+// Middleware: Auto-reconnect MongoDB if connection drops or disconnects
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState === 0) {
+    console.warn("⚠️ MongoDB connection was disconnected. Auto-reconnecting...");
+    try {
+      await connectDB();
+    } catch (e) {
+      console.error("Failed to auto-reconnect MongoDB:", e.message);
+    }
+  }
+  next();
+});
+
 // 2. Create Default Admin & ensure Phone 1231231232 has admin role
 const initDefaultAdmin = async () => {
   try {

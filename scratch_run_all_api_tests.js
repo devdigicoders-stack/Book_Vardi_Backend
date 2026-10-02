@@ -374,6 +374,7 @@ async function runAllApiTests() {
           phone: '9876543210'
         },
         paymentMethod: 'Razorpay / Online UPI',
+        paymentStatus: 'pending',
         subtotal: 429,
         totalAmount: 429,
         total: 429,
@@ -397,6 +398,16 @@ async function runAllApiTests() {
     const orderDoc = newOrderRes.data?.order;
     const dbOrderId = orderDoc?._id;
     recordTest('Order Lifecycle & Sync', '1. CREATE Order (User Portal)', Boolean(dbOrderId), `Order ID: #${orderCode}`, Date.now() - t9);
+
+    // INVOICE VERIFICATION TEST: Unverified payment status rejects invoice download
+    const t9inv = Date.now();
+    const invUnverifiedRes = createMockRes();
+    await downloadInvoice({ params: { id: dbOrderId }, user: { id: testUser._id, role: 'customer' } }, invUnverifiedRes);
+    const isRejectedWhenUnverified = invUnverifiedRes.statusCode === 400 && invUnverifiedRes.data?.message?.includes('payment status is verified');
+    recordTest('Order Lifecycle & Sync', '1b. VERIFY: Invoice creation blocked when payment status is unverified', isRejectedWhenUnverified, `Response 400: ${invUnverifiedRes.data?.message}`, Date.now() - t9inv);
+
+    // Confirm Payment Verification (simulate Razorpay verification hook setting paymentStatus to 'paid')
+    await Order.findByIdAndUpdate(dbOrderId, { paymentStatus: 'paid', overallStatus: 'Confirmed' });
 
     // SYNC CHECK 1: Customer My-Orders API
     const t9a = Date.now();
@@ -554,9 +565,6 @@ async function runAllApiTests() {
 
   } catch (err) {
     console.error('❌ Critical Test Error:', err.message, err.stack);
-  } finally {
-    await mongoose.disconnect();
-    console.log('🔌 MongoDB connection closed.');
   }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);

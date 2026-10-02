@@ -851,7 +851,7 @@ export const createOrder = async (req, res) => {
     const orderIdVal = id || orderId || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
 
       const isCodOrder = paymentMethod && String(paymentMethod).toUpperCase().includes("COD");
-      const initialPaymentStatus = isCodOrder ? "pending" : "paid";
+      const initialPaymentStatus = req.body.paymentStatus || (req.body.razorpayPaymentId || req.body.isPaid ? "paid" : "pending");
 
       const rawDeliveryMode = req.body.deliveryMode || req.body.deliveryType || "";
       let topDeliveryMode = "pending_choice";
@@ -1235,32 +1235,16 @@ export const downloadInvoice = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed
-    const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
-    const confirmedStatuses = [
-      "confirmed",
-      "packed",
-      "shipped",
-      "out_for_delivery",
-      "out for delivery",
-      "delivered",
-      "completed"
-    ];
-
-    if (!confirmedStatuses.includes(status)) {
-      return res.status(400).json({
-        message: "Tax Invoice & Certificate can only be generated strictly after the order is confirmed by the seller or admin."
-      });
-    }
-
     // Access control: User who placed order, Admin, or Seller involved in order
     if (req.user) {
-      const isOwner = order.userId && order.userId.toString() === req.user.id;
+      const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
+      const orderUserIdStr = order.userId ? (order.userId._id ? order.userId._id.toString() : order.userId.toString()) : "";
+      const isOwner = Boolean(orderUserIdStr && reqUserIdStr && orderUserIdStr === reqUserIdStr);
       const isAdmin = req.user.role === "admin";
       const isSeller =
         req.user.role === "seller" &&
         order.items.some(
-          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
+          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === reqUserIdStr
         );
 
       if (!isOwner && !isAdmin && !isSeller) {
@@ -1280,6 +1264,14 @@ export const downloadInvoice = async (req, res) => {
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       const pdfDoc = generateCreditNotePDF(enrichedOrder);
       return pdfDoc.pipe(res);
+    }
+
+    // STRICT PAYMENT STATUS VERIFICATION CHECK: Invoice only created after payment status is verified & confirmed ("paid")
+    const paymentStatus = String(enrichedOrder.paymentStatus || "").toLowerCase().trim();
+    if (paymentStatus !== "paid") {
+      return res.status(400).json({
+        message: `Tax Invoice cannot be created until payment status is verified and confirmed. Current payment status: ${enrichedOrder.paymentStatus || "pending"}.`
+      });
     }
 
     const filename = `Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
