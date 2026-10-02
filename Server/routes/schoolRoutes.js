@@ -259,6 +259,8 @@ import {
   getAdminSchoolOrders,
   distributeSchoolOrder,
   approveSellerQuotation,
+  confirmSellerAcceptance,
+  confirmBuyerAcceptance,
   updateItemSellerPrices,
   downloadAdvanceReceipt,
   recordAdvancePayment,
@@ -292,6 +294,12 @@ router.post("/bulk-orders/:id/quotations/:quoteId/accept-counter", acceptBuyerCo
 
 // POST Buyer Approve Specific Seller Quotation (Winning Quote)
 router.post("/bulk-orders/:id/approve-quote", approveSellerQuotation);
+
+// POST Seller Confirm Acceptance of Buyer-Accepted Quotation & Request Prepayment
+router.post("/bulk-orders/:id/confirm-seller-acceptance", confirmSellerAcceptance);
+
+// POST Buyer Confirm Seller's Acceptance of Counter-Demand & Proceed with Prepayment
+router.post("/bulk-orders/:id/confirm-buyer-acceptance", confirmBuyerAcceptance);
 
 // POST Create Online Razorpay Prepayment Order for Bulk Order
 router.post("/bulk-orders/:id/advance-payment/create-order", createSchoolBulkPrepaymentOrder);

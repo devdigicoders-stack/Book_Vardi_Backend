@@ -442,6 +442,13 @@ productSchema.pre("save", function (next) {
   } else if (this.offer) {
     this.offer.offerPrice = this.price;
   }
+
+  // 4. Ensure clean SKU format (SC-XXXX)
+  if (!this.sku || !String(this.sku).trim() || String(this.sku).includes("6ab") || String(this.sku).length > 20) {
+    const idStr = String(this._id || this.id || "");
+    const numericSuffix = idStr.length >= 6 ? (parseInt(idStr.slice(-6), 16) % 9000 + 1000) : Math.floor(1000 + Math.random() * 9000);
+    this.sku = `SC-${numericSuffix}`;
+  }
   next();
 });
 

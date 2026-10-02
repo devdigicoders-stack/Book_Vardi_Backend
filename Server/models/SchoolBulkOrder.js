@@ -30,6 +30,9 @@ const negotiationRoundSchema = new mongoose.Schema(
         itemName: { type: String, default: "" },
         quantity: { type: Number, default: 1 },
         sellerPrice: { type: Number, default: 0 },
+        pricePerUnit: { type: Number, default: 0 },
+        sellerPricePerUnit: { type: Number, default: 0 },
+        targetUnitPrice: { type: Number, default: 0 },
         totalPrice: { type: Number, default: 0 },
         discountTierNote: { type: String, default: "" }
       }

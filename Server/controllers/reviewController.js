@@ -60,10 +60,10 @@ export const addReview = async (req, res) => {
 
     const userId =
       req.user?.id ||
-      req.headers["x-user-id"] ||
-      req.headers["x-user-phone"] ||
-      req.body.phone ||
-      req.body.userId ||
+      req.headers?.["x-user-id"] ||
+      req.headers?.["x-user-phone"] ||
+      req.body?.phone ||
+      req.body?.userId ||
       `anon_${Date.now()}`;
 
     const displayName = userName || name || req.user?.name || "Verified Customer";

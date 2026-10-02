@@ -35,6 +35,14 @@ export const getSellerOffers = async (req, res) => {
       endDate: o.endDate,
       validUntil: o.endDate ? new Date(o.endDate).toISOString().split("T")[0] : "",
       status: o.status,
+      applicableScope: o.applicableScope || "storewide",
+      applicableProducts: o.applicableProducts || [],
+      applicableKits: o.applicableKits || [],
+      specificProductId: o.specificProductId || "",
+      specificProductName: o.specificProductName || "",
+      specificKitId: o.specificKitId || "",
+      specificKitTitle: o.specificKitTitle || "",
+      specificKitImage: o.specificKitImage || "",
       createdAt: o.createdAt
     }));
 
@@ -62,8 +70,14 @@ export const createSellerOffer = async (req, res) => {
       validFrom,
       endDate,
       validUntil,
+      applicableScope,
       specificProductId,
-      applicableProducts
+      specificProductName,
+      specificKitId,
+      specificKitTitle,
+      specificKitImage,
+      applicableProducts,
+      applicableKits
     } = req.body;
 
     let targetApplicableProducts = [];
@@ -71,6 +85,13 @@ export const createSellerOffer = async (req, res) => {
       targetApplicableProducts = applicableProducts.map(String);
     } else if (specificProductId) {
       targetApplicableProducts = [String(specificProductId)];
+    }
+
+    let targetApplicableKits = [];
+    if (Array.isArray(applicableKits)) {
+      targetApplicableKits = applicableKits.map(String);
+    } else if (specificKitId) {
+      targetApplicableKits = [String(specificKitId)];
     }
 
     const couponCode = code || req.body.couponCode;
@@ -88,6 +109,7 @@ export const createSellerOffer = async (req, res) => {
     const finalEndDate = rawEndDate ? new Date(rawEndDate) : new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
     const finalMinAmount = Number(minOrderAmount ?? minOrderValue ?? 0);
     const finalMaxDiscount = Number(maxDiscount ?? 0);
+    const scope = applicableScope || "storewide";
 
     let offer = null;
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
@@ -107,7 +129,14 @@ export const createSellerOffer = async (req, res) => {
       offer.endDate = finalEndDate;
       offer.status = "active";
       offer.createdRole = "seller";
-      if (targetApplicableProducts.length > 0) offer.applicableProducts = targetApplicableProducts;
+      offer.applicableScope = scope;
+      offer.applicableProducts = targetApplicableProducts;
+      offer.applicableKits = targetApplicableKits;
+      if (specificProductId !== undefined) offer.specificProductId = specificProductId;
+      if (specificProductName !== undefined) offer.specificProductName = specificProductName;
+      if (specificKitId !== undefined) offer.specificKitId = specificKitId;
+      if (specificKitTitle !== undefined) offer.specificKitTitle = specificKitTitle;
+      if (specificKitImage !== undefined) offer.specificKitImage = specificKitImage;
       await offer.save();
     } else {
       const targetSellerId = (sellerId && mongoose.Types.ObjectId.isValid(sellerId))
@@ -127,7 +156,14 @@ export const createSellerOffer = async (req, res) => {
         endDate: finalEndDate,
         status: "active",
         createdRole: "seller",
-        applicableProducts: targetApplicableProducts
+        applicableScope: scope,
+        applicableProducts: targetApplicableProducts,
+        applicableKits: targetApplicableKits,
+        specificProductId: specificProductId || "",
+        specificProductName: specificProductName || "",
+        specificKitId: specificKitId || "",
+        specificKitTitle: specificKitTitle || "",
+        specificKitImage: specificKitImage || ""
       });
       await offer.save();
     }
@@ -146,7 +182,14 @@ export const createSellerOffer = async (req, res) => {
           storeId: offer.sellerId || null,
           sellerId: offer.sellerId || null,
           createdRole: "seller",
-          applicableProducts: targetApplicableProducts
+          applicableScope: scope,
+          applicableProducts: targetApplicableProducts,
+          applicableKits: targetApplicableKits,
+          specificProductId: offer.specificProductId || "",
+          specificProductName: offer.specificProductName || "",
+          specificKitId: offer.specificKitId || "",
+          specificKitTitle: offer.specificKitTitle || "",
+          specificKitImage: offer.specificKitImage || ""
         },
         { upsert: true, new: true }
       );
@@ -193,7 +236,15 @@ export const updateSellerOffer = async (req, res) => {
       validFrom,
       endDate,
       validUntil,
-      status
+      status,
+      applicableScope,
+      applicableProducts,
+      applicableKits,
+      specificProductId,
+      specificProductName,
+      specificKitId,
+      specificKitTitle,
+      specificKitImage
     } = req.body;
 
     if (title) offer.title = title;
@@ -208,6 +259,14 @@ export const updateSellerOffer = async (req, res) => {
     if (startDate || validFrom) offer.startDate = new Date(startDate || validFrom);
     if (endDate || validUntil) offer.endDate = new Date(endDate || validUntil);
     if (status) offer.status = status;
+    if (applicableScope) offer.applicableScope = applicableScope;
+    if (applicableProducts !== undefined) offer.applicableProducts = Array.isArray(applicableProducts) ? applicableProducts.map(String) : [];
+    if (applicableKits !== undefined) offer.applicableKits = Array.isArray(applicableKits) ? applicableKits.map(String) : [];
+    if (specificProductId !== undefined) offer.specificProductId = specificProductId;
+    if (specificProductName !== undefined) offer.specificProductName = specificProductName;
+    if (specificKitId !== undefined) offer.specificKitId = specificKitId;
+    if (specificKitTitle !== undefined) offer.specificKitTitle = specificKitTitle;
+    if (specificKitImage !== undefined) offer.specificKitImage = specificKitImage;
 
     await offer.save();
 
@@ -221,7 +280,15 @@ export const updateSellerOffer = async (req, res) => {
           type: (offer.discountType === "flat" || offer.discountType === "fixed") ? "fixed" : "percentage",
           minAmount: offer.minOrderAmount,
           expiryDate: offer.endDate,
-          status: offer.status === "active" ? "active" : "inactive"
+          status: offer.status === "active" ? "active" : "inactive",
+          applicableScope: offer.applicableScope,
+          applicableProducts: offer.applicableProducts,
+          applicableKits: offer.applicableKits,
+          specificProductId: offer.specificProductId,
+          specificProductName: offer.specificProductName,
+          specificKitId: offer.specificKitId,
+          specificKitTitle: offer.specificKitTitle,
+          specificKitImage: offer.specificKitImage
         },
         { upsert: true }
       );

@@ -943,10 +943,10 @@ export const trackOrder = async (req, res) => {
       { key: "delivered", label: "Delivered", stepNumber: 6 }
     ];
 
-    const currentStatus = order.overallStatus;
+    const currentStatus = (order.overallStatus || order.status || "").toLowerCase();
     const currentStepIndex = standardSteps.findIndex((s) => s.key === currentStatus);
 
-    const isCancelled = order.overallStatus === "cancelled" || order.status === "cancelled";
+    const isCancelled = currentStatus === "cancelled";
 
     const trackingSummary = {
       orderId: order.orderId,
@@ -965,7 +965,7 @@ export const trackOrder = async (req, res) => {
       cancelledAt: order.cancelledAt || null,
       refundStatus: order.refundStatus || "",
       message: isCancelled ? "Fulfillment and shipping tracking closed due to order cancellation." : "Tracking active",
-      isDelivered: order.overallStatus === "delivered",
+      isDelivered: currentStatus === "delivered",
       currentStepIndex: isCancelled ? -1 : (currentStepIndex > -1 ? currentStepIndex : (currentStatus === "processing" ? 1 : 0)),
       deliveryMode: order.deliveryMode || (order.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (order.courierName ? "third_party" : (order.items?.[0]?.deliveryType === "self" || order.items?.[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
       courierName: order.courierName || order.carrier || order.items?.[0]?.thirdPartyDetails?.courierName || "",
@@ -1350,6 +1350,62 @@ export const downloadCreditNote = async (req, res) => {
   }
 };
 
+// 7c. Dedicated Download Exchange Invoice Endpoint
+export const downloadExchangeInvoice = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let order = isMongoId
+      ? await Order.findById(id)
+          .populate("userId", "name email phone addresses")
+          .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
+      : null;
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+        .populate("userId", "name email phone addresses")
+        .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
+    }
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (req.user) {
+      const isOwner =
+        order.user?.toString() === req.user.id ||
+        order.userId?.toString() === req.user.id ||
+        order.customer?.phone === req.user.phone ||
+        order.customer?.email === req.user.email;
+      const isAdmin = req.user.role === "admin";
+      const isSeller =
+        req.user.role === "seller" &&
+        order.items.some(
+          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
+        );
+
+      if (!isOwner && !isAdmin && !isSeller) {
+        return res.status(403).json({ message: "Not authorized to download this exchange invoice" });
+      }
+    }
+
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const { generateExchangeInvoicePDF } = await import("../services/invoiceService.js");
+    const filename = `ExchangeInvoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateExchangeInvoicePDF(enrichedOrder);
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error("Download exchange invoice error:", error);
+    res.status(500).json({ message: "Failed to generate exchange invoice", error: error.message });
+  }
+};
+
+
 // 8. Cancel Order Endpoint (Customer / User initiated before shipment)
 export const cancelOrder = async (req, res) => {
   try {
@@ -1417,18 +1473,19 @@ export const cancelOrder = async (req, res) => {
 
     // Append timeline checkpoint
     let timelineDesc = `Order cancelled by customer (${cancelledByName}). Reason: ${order.cancellationReason}`;
-    if (isPaidOnline) {
+    if (isPaid) {
       const modeStr = order.refundDetails?.method === "UPI" ? `UPI (${order.refundDetails.upiId})` : (order.refundDetails?.method === "BANK" ? `Bank Transfer (${order.refundDetails.bankName})` : "Submitted Details");
       timelineDesc += ` • Online refund requested via ${modeStr}.`;
     }
 
     order.timeline.push({
       status: "cancelled",
-      title: isPaidOnline ? "Order Cancelled & Refund Requested" : "Order Cancelled",
+      title: isPaid ? "Order Cancelled & Refund Requested" : "Order Cancelled",
       description: timelineDesc,
       timestamp: new Date(),
       updatedBy: "Customer"
     });
+
 
     await order.save();
     return res.json({ success: true, message: "Order cancelled successfully", order });

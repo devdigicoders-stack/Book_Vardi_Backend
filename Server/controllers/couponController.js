@@ -25,7 +25,14 @@ const formatCouponResponse = (c) => ({
   createdRole: c.createdRole || "admin",
   sellerId: c.sellerId || null,
   storeId: c.storeId || null,
+  applicableScope: c.applicableScope || "storewide",
   applicableProducts: c.applicableProducts || [],
+  applicableKits: c.applicableKits || [],
+  specificProductId: c.specificProductId || "",
+  specificProductName: c.specificProductName || "",
+  specificKitId: c.specificKitId || "",
+  specificKitTitle: c.specificKitTitle || "",
+  specificKitImage: c.specificKitImage || "",
   createdAt: c.createdAt,
   updatedAt: c.updatedAt
 });
@@ -65,7 +72,14 @@ export const applyCoupon = async (req, res) => {
           expiryDate: offer.endDate,
           sellerId: offer.sellerId,
           createdRole: "seller",
-          applicableProducts: offer.applicableProducts || []
+          applicableScope: offer.applicableScope || "storewide",
+          applicableProducts: offer.applicableProducts || [],
+          applicableKits: offer.applicableKits || [],
+          specificProductId: offer.specificProductId || "",
+          specificProductName: offer.specificProductName || "",
+          specificKitId: offer.specificKitId || "",
+          specificKitTitle: offer.specificKitTitle || "",
+          specificKitImage: offer.specificKitImage || ""
         };
       }
     }
@@ -97,11 +111,19 @@ export const applyCoupon = async (req, res) => {
       return String(val).trim();
     };
 
-    // Determine coupon seller & product scoping
+    // Determine coupon seller & product/kit scoping
     const targetSellerId = extractId(coupon.sellerId) || extractId(coupon.storeId);
     const isSellerScoped = Boolean(coupon.createdRole === "seller" || targetSellerId);
+    const scope = coupon.applicableScope || "storewide";
+
     const applicableProds = (coupon.applicableProducts || [])
+      .concat(coupon.specificProductId ? [coupon.specificProductId] : [])
       .map(p => extractId(p))
+      .filter(Boolean);
+
+    const applicableKits = (coupon.applicableKits || [])
+      .concat(coupon.specificKitId ? [coupon.specificKitId] : [])
+      .map(k => extractId(k))
       .filter(Boolean);
 
     let eligibleSubtotal = totalNum;
@@ -110,24 +132,48 @@ export const applyCoupon = async (req, res) => {
       const eligibleItems = cartItems.filter((item) => {
         const itemSellerId = extractId(item.sellerId) || extractId(item.seller) || extractId(item.storeId) || extractId(item.userId);
         const itemProductId = extractId(item.id) || extractId(item._id) || extractId(item.productId);
+        const itemKitId = extractId(item.kitId) || extractId(item.bundleId) || extractId(item.id) || extractId(item._id);
+        const isKit = Boolean(item.isKit || item.category === 'kits' || item.bundleType === 'kit' || item.kitId);
 
         if (isSellerScoped) {
           // Seller-created coupon applies ONLY to items from that seller
           if (targetSellerId && itemSellerId && itemSellerId.toLowerCase() !== targetSellerId.toLowerCase()) {
             return false;
           }
-          // If seller chose specific products, check product match
-          if (applicableProds.length > 0) {
-            return itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
-          }
-          return true;
-        } else {
-          // Admin-created coupon applies to every product (unless admin set specific applicableProducts)
-          if (applicableProds.length > 0) {
-            return itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
-          }
-          return true;
         }
+
+        if (scope === "all_kits") {
+          return isKit;
+        }
+
+        if (scope === "specific_kit") {
+          if (!isKit) return false;
+          if (applicableKits.length === 0) return true;
+          return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase() || (itemProductId && k.toLowerCase() === itemProductId.toLowerCase()));
+        }
+
+        if (scope === "specific_product") {
+          if (isKit) return false;
+          if (applicableProds.length === 0) return true;
+          return itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
+        }
+
+        // Storewide / fallback logic
+        if (applicableProds.length > 0) {
+          const prodMatch = itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
+          if (prodMatch) return true;
+          if (applicableKits.length > 0 && isKit) {
+            return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase());
+          }
+          return false;
+        }
+
+        if (applicableKits.length > 0) {
+          if (!isKit) return false;
+          return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase());
+        }
+
+        return true;
       });
 
       if (eligibleItems.length === 0) {
@@ -172,6 +218,9 @@ export const applyCoupon = async (req, res) => {
       }
     } else {
       discountAmount = Math.min(eligibleSubtotal, coupon.discount);
+      if (coupon.maxDiscount && coupon.maxDiscount > 0) {
+        discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+      }
     }
 
     const finalPayable = Math.max(0, Math.round((totalNum - discountAmount) * 100) / 100);
@@ -255,7 +304,14 @@ export const getActiveCoupons = async (req, res) => {
           createdRole: "seller",
           sellerId: offer.sellerId || null,
           storeId: offer.sellerId || null,
+          applicableScope: offer.applicableScope || "storewide",
           applicableProducts: offer.applicableProducts || [],
+          applicableKits: offer.applicableKits || [],
+          specificProductId: offer.specificProductId || "",
+          specificProductName: offer.specificProductName || "",
+          specificKitId: offer.specificKitId || "",
+          specificKitTitle: offer.specificKitTitle || "",
+          specificKitImage: offer.specificKitImage || "",
           createdAt: offer.createdAt,
           updatedAt: offer.updatedAt
         });
@@ -303,7 +359,14 @@ export const createCoupon = async (req, res) => {
     const storeId = req.body.storeId || req.body.sellerId || null;
     const sellerId = req.body.sellerId || req.body.storeId || null;
     const createdRole = req.body.createdRole || (sellerId || storeId ? "seller" : "admin");
-    const applicableProducts = Array.isArray(req.body.applicableProducts) ? req.body.applicableProducts.map(String) : [];
+    const applicableScope = req.body.applicableScope || "storewide";
+    const applicableProducts = Array.isArray(req.body.applicableProducts) ? req.body.applicableProducts.map(String) : (req.body.specificProductId ? [String(req.body.specificProductId)] : []);
+    const applicableKits = Array.isArray(req.body.applicableKits) ? req.body.applicableKits.map(String) : (req.body.specificKitId ? [String(req.body.specificKitId)] : []);
+    const specificProductId = req.body.specificProductId || "";
+    const specificProductName = req.body.specificProductName || "";
+    const specificKitId = req.body.specificKitId || "";
+    const specificKitTitle = req.body.specificKitTitle || "";
+    const specificKitImage = req.body.specificKitImage || "";
 
     let coupon = await Coupon.findOne({ code: cleanCode });
     if (coupon) {
@@ -319,7 +382,14 @@ export const createCoupon = async (req, res) => {
       if (storeId) coupon.storeId = storeId;
       if (sellerId) coupon.sellerId = sellerId;
       coupon.createdRole = createdRole;
-      if (applicableProducts.length > 0) coupon.applicableProducts = applicableProducts;
+      coupon.applicableScope = applicableScope;
+      coupon.applicableProducts = applicableProducts;
+      coupon.applicableKits = applicableKits;
+      coupon.specificProductId = specificProductId;
+      coupon.specificProductName = specificProductName;
+      coupon.specificKitId = specificKitId;
+      coupon.specificKitTitle = specificKitTitle;
+      coupon.specificKitImage = specificKitImage;
       await coupon.save();
     } else {
       coupon = await Coupon.create({
@@ -337,7 +407,14 @@ export const createCoupon = async (req, res) => {
         storeId,
         sellerId,
         createdRole,
-        applicableProducts
+        applicableScope,
+        applicableProducts,
+        applicableKits,
+        specificProductId,
+        specificProductName,
+        specificKitId,
+        specificKitTitle,
+        specificKitImage
       });
     }
 
@@ -384,7 +461,14 @@ export const getAllCouponsAdmin = async (req, res) => {
           createdRole: "seller",
           sellerId: offer.sellerId || null,
           storeId: offer.sellerId || null,
+          applicableScope: offer.applicableScope || "storewide",
           applicableProducts: offer.applicableProducts || [],
+          applicableKits: offer.applicableKits || [],
+          specificProductId: offer.specificProductId || "",
+          specificProductName: offer.specificProductName || "",
+          specificKitId: offer.specificKitId || "",
+          specificKitTitle: offer.specificKitTitle || "",
+          specificKitImage: offer.specificKitImage || "",
           createdAt: offer.createdAt,
           updatedAt: offer.updatedAt
         });
@@ -455,6 +539,14 @@ export const updateCoupon = async (req, res) => {
     if (req.body.expiryDate || req.body.validUntil) {
       coupon.expiryDate = new Date(req.body.expiryDate || req.body.validUntil);
     }
+    if (req.body.applicableScope) coupon.applicableScope = req.body.applicableScope;
+    if (req.body.applicableProducts !== undefined) coupon.applicableProducts = Array.isArray(req.body.applicableProducts) ? req.body.applicableProducts.map(String) : [];
+    if (req.body.applicableKits !== undefined) coupon.applicableKits = Array.isArray(req.body.applicableKits) ? req.body.applicableKits.map(String) : [];
+    if (req.body.specificProductId !== undefined) coupon.specificProductId = req.body.specificProductId;
+    if (req.body.specificProductName !== undefined) coupon.specificProductName = req.body.specificProductName;
+    if (req.body.specificKitId !== undefined) coupon.specificKitId = req.body.specificKitId;
+    if (req.body.specificKitTitle !== undefined) coupon.specificKitTitle = req.body.specificKitTitle;
+    if (req.body.specificKitImage !== undefined) coupon.specificKitImage = req.body.specificKitImage;
 
     await coupon.save();
     res.json({ message: "Coupon updated successfully", coupon: formatCouponResponse(coupon) });

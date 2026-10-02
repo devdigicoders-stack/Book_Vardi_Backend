@@ -868,3 +868,265 @@ export const generateCreditNotePDF = (order, filterSellerId = null) => {
   doc.end();
   return doc;
 };
+
+/**
+ * Generate a professional GST Exchange Tax Invoice & Replacement Slip PDF
+ * @param {Object} order - Order object from MongoDB
+ * @param {Object} [filterSellerId] - Optional seller ID
+ * @returns {PDFDocument} - Streaming PDF document
+ */
+export const generateExchangeInvoicePDF = (order, filterSellerId = null) => {
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+
+  const primaryColor = "#0f172a"; // Slate 900
+  const tealColor = "#0d9488"; // Teal 600
+  const mutedColor = "#64748b"; // Slate 500
+  const borderColor = "#e2e8f0"; // Slate 200
+
+  const orderIdStr = order.orderId || (order._id ? order._id.toString().substring(0, 8).toUpperCase() : "ORDER");
+  const exchangeInvoiceNo = `EXCH-${orderIdStr}`;
+  const originalInvoiceNo = `INV-${orderIdStr}`;
+  const exchangeDateStr = new Date(order.returnRequest?.updatedAt || order.updatedAt || order.createdAt).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  });
+
+  // 1. HEADER SECTION (Brand & Exchange Invoice Title)
+  doc
+    .fillColor(tealColor)
+    .fontSize(22)
+    .font("Helvetica-Bold")
+    .text("BookVardi", 40, 40)
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("India's Premier School & Education Marketplace", 40, 68)
+    .text("GSTIN: 09AAACS1429B1Z2 | support@bookvardi.com", 40, 80);
+
+  doc
+    .fillColor(tealColor)
+    .fontSize(15)
+    .font("Helvetica-Bold")
+    .text("EXCHANGE TAX INVOICE", 380, 40, { align: "right" })
+    .fontSize(8.5)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text(`Exchange Ref: ${exchangeInvoiceNo}`, 380, 60, { align: "right" })
+    .text(`Original Invoice Ref: ${originalInvoiceNo}`, 380, 72, { align: "right" })
+    .text(`Date of Exchange: ${exchangeDateStr}`, 380, 84, { align: "right" });
+
+  // Divider Line
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 102).lineTo(555, 102).stroke();
+
+  // 2. SELLER & CUSTOMER SECTION
+  const resolvedSeller = resolveInvoiceSellerDetails(order, filterSellerId);
+  const resolvedConsumer = resolveInvoiceConsumerDetails(order);
+
+  // Left Column: Sold By
+  doc
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Sold By / Exchange Merchant:", 40, 112)
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedSeller.storeName, 40, 125, { width: 260 })
+    .font("Helvetica")
+    .fontSize(8.5)
+    .fillColor(mutedColor);
+
+  let exSY = 138;
+  if (resolvedSeller.ownerName && resolvedSeller.ownerName !== resolvedSeller.storeName) {
+    doc.text(`Contact: ${resolvedSeller.ownerName}`, 40, exSY, { width: 260 });
+    exSY += 12;
+  }
+  const exLocStr = [resolvedSeller.address, resolvedSeller.city, resolvedSeller.state, resolvedSeller.pincode].filter(Boolean).join(", ");
+  doc.text(exLocStr ? `Address: ${exLocStr}` : "Location: India", 40, exSY, { width: 260 });
+  exSY += 12;
+
+  const exSellerContactStr = [
+    resolvedSeller.phone ? `Helpline: ${resolvedSeller.phone}` : null,
+    resolvedSeller.email ? `Email: ${resolvedSeller.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (exSellerContactStr) {
+    doc.text(exSellerContactStr, 40, exSY, { width: 260 });
+    exSY += 12;
+  }
+  doc.text(resolvedSeller.gstNumber ? `GSTIN: ${resolvedSeller.gstNumber}` : "GST Category: Regular Taxpayer", 40, exSY, { width: 260 });
+
+  // Right Column: Customer Details
+  doc
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Issued To (Customer):", 320, 112)
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text(resolvedConsumer.name, 320, 125, { width: 235 })
+    .font("Helvetica")
+    .fontSize(8.5)
+    .fillColor(mutedColor)
+    .text(resolvedConsumer.street, 320, 138, { width: 235 })
+    .text(resolvedConsumer.cityStatePin, 320, 150, { width: 235 });
+
+  const exCustContactStr = [
+    resolvedConsumer.phone ? `Phone: ${resolvedConsumer.phone}` : null,
+    resolvedConsumer.email ? `Email: ${resolvedConsumer.email}` : null
+  ].filter(Boolean).join(" | ");
+  if (exCustContactStr) {
+    doc.text(exCustContactStr, 320, 162, { width: 235 });
+  }
+
+  // Divider Line
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 182).lineTo(555, 182).stroke();
+
+  // 3. EXCHANGE SUMMARY BOX
+  doc.rect(40, 190, 515, 34).fill("#ccfbf1"); // Light teal background
+  const exchangeReason = order.returnRequest?.reason || "Size / Variant Replacement Request";
+  const targetSize = order.returnRequest?.exchangeSize || "Requested Size Variant";
+  const awbStr = order.returnRequest?.exchangeAwb ? `AWB: ${order.returnRequest.exchangeAwb} (${order.returnRequest.exchangeCourier || "Express Logistics"})` : "Dispatched via Express Logistics Fleet";
+
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(tealColor)
+    .text("PRODUCT EXCHANGE CONFIRMED & REPLACEMENT DISPATCHED", 50, 196)
+    .font("Helvetica")
+    .fillColor(primaryColor)
+    .text(`Reason: ${exchangeReason} | Replacement Variant: Size ${targetSize} | ${awbStr}`, 50, 208, { width: 495 });
+
+  // 4. RETURNED ITEM VS REPLACEMENT ITEM TABLE
+  const tableTop = 232;
+
+  // Section 4A: Item Returned
+  doc.rect(40, tableTop, 515, 20).fill("#f1f5f9");
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("1. Item Returned by Customer", 45, tableTop + 5)
+    .text("Qty", 345, tableTop + 5, { align: "center" })
+    .text("Original Value", 450, tableTop + 5, { align: "right" });
+
+  let y = tableTop + 24;
+  let itemsToRender = order.items || [];
+  if (filterSellerId) {
+    itemsToRender = itemsToRender.filter(
+      (item) => item.sellerId && item.sellerId._id?.toString() === filterSellerId.toString()
+    );
+  }
+
+  let totalReturnedVal = 0;
+  itemsToRender.forEach((item, index) => {
+    const itemTotal = (item.finalPrice || item.price || 0) * (item.quantity || 1);
+    totalReturnedVal += itemTotal;
+
+    doc
+      .fontSize(8.5)
+      .font("Helvetica")
+      .fillColor(primaryColor)
+      .text(`${index + 1}. ${item.name || "Product Item"} (Original Size: ${item.size || "Standard"})`, 45, y, { width: 280 })
+      .text(`${item.quantity || 1}`, 345, y, { align: "center" })
+      .font("Helvetica-Bold")
+      .text(`₹${itemTotal.toLocaleString("en-IN")}`, 450, y, { align: "right" });
+
+    y += 18;
+  });
+
+  // Section 4B: Replacement Item Issued
+  y += 6;
+  doc.rect(40, y, 515, 20).fill("#e0f2fe"); // Sky light
+  doc
+    .fontSize(9)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("2. Replacement Item Issued & Delivered", 45, y + 5)
+    .text("Qty", 345, y + 5, { align: "center" })
+    .text("New Invoice Value", 450, y + 5, { align: "right" });
+
+  y += 24;
+  itemsToRender.forEach((item, index) => {
+    const itemTotal = (item.finalPrice || item.price || 0) * (item.quantity || 1);
+
+    doc
+      .fontSize(8.5)
+      .font("Helvetica-Bold")
+      .fillColor(tealColor)
+      .text(`${index + 1}. ${item.name || "Product Item"} (New Replacement Size: ${targetSize})`, 45, y, { width: 280 })
+      .font("Helvetica")
+      .fillColor(primaryColor)
+      .text(`${item.quantity || 1}`, 345, y, { align: "center" })
+      .font("Helvetica-Bold")
+      .text(`₹${itemTotal.toLocaleString("en-IN")}`, 450, y, { align: "right" });
+
+    y += 18;
+  });
+
+  // 5. SETTLEMENT & TAX ADJUSTMENT SUMMARY
+  y += 10;
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, y).lineTo(555, y).stroke();
+  y += 10;
+
+  doc
+    .fontSize(8.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Exchange Tax & Price Adjustment Summary:", 45, y)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("1. Equal Value Exchange — Original GST liability transferred to replacement unit.", 45, y + 14)
+    .text("2. Zero additional price difference payable by customer.", 45, y + 26)
+    .text(`3. Replacement AWB: ${order.returnRequest?.exchangeAwb || "Hand Delivered"}`, 45, y + 38);
+
+  let rightY = y;
+  doc
+    .fontSize(9)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("Returned Item Credit:", 330, rightY, { align: "right", width: 140 })
+    .text(`-₹${totalReturnedVal.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+
+  rightY += 14;
+  doc
+    .text("Replacement Item Value:", 330, rightY, { align: "right", width: 140 })
+    .text(`+₹${totalReturnedVal.toLocaleString("en-IN")}`, 480, rightY, { align: "right" });
+
+  rightY += 14;
+  doc
+    .text("Doorstep Exchange Fee:", 330, rightY, { align: "right", width: 140 })
+    .text("FREE", 480, rightY, { align: "right" });
+
+  // Net Balance Payable Banner
+  const bannerY = Math.max(y + 54, rightY + 18);
+  doc.rect(340, bannerY, 215, 26).fill("#ccfbf1");
+  doc
+    .fontSize(10)
+    .font("Helvetica-Bold")
+    .fillColor(tealColor)
+    .text("Net Balance Payable:", 350, bannerY + 7)
+    .text("₹0.00 (Fully Settled)", 460, bannerY + 7, { align: "right" });
+
+  // 6. FOOTER
+  const footerY = 730;
+  doc.strokeColor(borderColor).lineWidth(1).moveTo(40, footerY).lineTo(555, footerY).stroke();
+
+  doc
+    .fontSize(8)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("Terms & Conditions:", 40, footerY + 10)
+    .font("Helvetica")
+    .fillColor(mutedColor)
+    .text("1. This Exchange Tax Invoice serves as the official proof of replacement delivery under BookVardi policy.", 40, footerY + 22)
+    .text("2. Replaced items are subject to statutory warranty and school uniform replacement guidelines.", 40, footerY + 32)
+    .font("Helvetica-Bold")
+    .fillColor(tealColor)
+    .text("BookVardi Customer Support Helpline: support@bookvardi.com", 40, footerY + 50, { align: "center" });
+
+  doc.end();
+  return doc;
+};
+

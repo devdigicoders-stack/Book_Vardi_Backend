@@ -183,18 +183,34 @@ export const getProducts = async (req, res) => {
         const fallbackFilter = (req.query.all === "true" || req.query.includePending === "true")
           ? { isDeleted: { $ne: true } }
           : { status: { $nin: ["deleted", "out-of-stock-removed"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
-        products = await Product.find(fallbackFilter).sort(sortOption).skip(skip).limit(limitNum).lean();
+        products = await Product.find(fallbackFilter).sort(sortOption).limit(limitNum).lean();
         totalProducts = products.length;
       } catch (err) {}
     }
 
+    const normalizedProducts = (products || []).map(p => {
+      const idStr = String(p._id || p.id || "");
+      let cleanSku = p.sku;
+      if (!cleanSku || !String(cleanSku).trim() || String(cleanSku).includes("6ab") || String(cleanSku).length > 20) {
+        const numericSuffix = idStr.length >= 6 ? (parseInt(idStr.slice(-6), 16) % 9000 + 1000) : Math.floor(1000 + Math.random() * 9000);
+        cleanSku = `SC-${numericSuffix}`;
+      } else {
+        cleanSku = String(cleanSku).trim().toUpperCase();
+      }
+      return {
+        ...p,
+        sku: cleanSku,
+        displayId: cleanSku
+      };
+    });
+
     res.json({
-      total: totalProducts || products.length,
+      total: totalProducts || normalizedProducts.length,
       page: pageNum,
-      totalPages: Math.ceil((totalProducts || products.length) / limitNum) || 1,
+      totalPages: Math.ceil((totalProducts || normalizedProducts.length) / limitNum) || 1,
       limit: limitNum,
-      count: products.length,
-      products
+      count: normalizedProducts.length,
+      products: normalizedProducts
     });
   } catch (error) {
     if (mongoose.connection.readyState !== 1) {

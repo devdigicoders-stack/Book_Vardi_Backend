@@ -121,13 +121,13 @@ export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
 // GET School Bulk Orders for the authenticated/requesting Customer (Strictly Private)
 export const getCustomerSchoolOrders = async (req, res) => {
   try {
-    let userId = req.user?.id || req.user?._id || req.headers["x-user-id"] || req.query.userId || req.query.customerId;
-    let rawPhone = req.headers["x-user-phone"] || req.query.phone || req.query.userPhone || req.user?.phone || "";
-    let rawEmail = req.headers["x-user-email"] || req.query.email || req.query.userEmail || req.user?.email || "";
-    const rawRefIds = req.query.referenceIds || req.query.referenceId || req.headers["x-reference-ids"] || "";
+    let userId = req.user?.id || req.user?._id || req.headers?.["x-user-id"] || req.query?.userId || req.query?.customerId;
+    let rawPhone = req.headers?.["x-user-phone"] || req.query?.phone || req.query?.userPhone || req.user?.phone || "";
+    let rawEmail = req.headers?.["x-user-email"] || req.query?.email || req.query?.userEmail || req.user?.email || "";
+    const rawRefIds = req.query?.referenceIds || req.query?.referenceId || req.headers?.["x-reference-ids"] || "";
 
     // 1. Decode JWT token if present
-    const authHeader = req.headers["authorization"] || "";
+    const authHeader = req.headers?.["authorization"] || "";
     if (authHeader && authHeader.startsWith("Bearer ")) {
       try {
         const rawToken = authHeader.split(" ")[1]?.trim();
@@ -281,9 +281,9 @@ export const getSchoolOrderById = async (req, res) => {
 // GET all School Bulk Orders for Admin (or delegates to Customer view if requested by customer)
 export const getAdminSchoolOrders = async (req, res) => {
   try {
-    const rawPhone = req.headers["x-user-phone"] || req.query.phone || "";
-    const rawUserId = req.headers["x-user-id"] || req.query.userId || "";
-    const authHeader = req.headers["authorization"] || "";
+    const rawPhone = req.headers?.["x-user-phone"] || req.query?.phone || "";
+    const rawUserId = req.headers?.["x-user-id"] || req.query?.userId || "";
+    const authHeader = req.headers?.["authorization"] || "";
     let isAdmin = req.user?.role === "admin" || req.user?.role === "super_admin" || authHeader.includes("admin");
 
     if (!isAdmin && authHeader && authHeader.startsWith("Bearer ")) {
@@ -806,6 +806,9 @@ export const submitBuyerCounterDemand = async (req, res) => {
         itemName: fd.itemName,
         quantity: fd.quantity,
         sellerPrice: fd.targetUnitPrice,
+        pricePerUnit: fd.targetUnitPrice,
+        sellerPricePerUnit: fd.targetUnitPrice,
+        targetUnitPrice: fd.targetUnitPrice,
         totalPrice: fd.targetTotalPrice,
         discountTierNote: fd.notes
       })),
@@ -918,7 +921,7 @@ export const acceptBuyerCounterDemand = async (req, res) => {
     }
 
     quote.negotiationStage = "seller_accepted_counter";
-    quote.status = "approved";
+    quote.status = "seller_accepted";
 
     // Mark other competing quotations as rejected
     if (Array.isArray(bulkOrder.quotations)) {
@@ -932,14 +935,14 @@ export const acceptBuyerCounterDemand = async (req, res) => {
 
     bulkOrder.acceptedQuoteId = quote._id;
     bulkOrder.sellerId = quoteSellerId;
-    bulkOrder.status = "accepted";
+    bulkOrder.status = "seller_accepted_counter";
     bulkOrder.deliveryMode = "self_delivery";
     bulkOrder.targetBudgetPerKit = String(quote.quoteAmount);
     bulkOrder.overallBudget = quote.quoteAmount;
 
-    // Prepayment Requirement Setup
-    const advPct = Number(quote.prepaymentPercentage || quote.sellerAdvancePercentage || 0);
-    const advAmt = Number(quote.prepaymentAmount || quote.sellerAdvanceAmount || 0) || (advPct > 0 ? Math.round((quote.quoteAmount * advPct) / 100) : 0);
+    // Prepayment Requirement Setup using set percentage
+    const advPct = Number(counter.proposedAdvancePercentage || quote.prepaymentPercentage || quote.sellerAdvancePercentage || 20);
+    const advAmt = Math.round((quote.quoteAmount * advPct) / 100);
     const advType = quote.prepaymentType || quote.sellerAdvanceType || "percentage";
     const advTerms = quote.prepaymentTerms || quote.sellerAdvanceTerms || "";
 
@@ -972,7 +975,7 @@ export const acceptBuyerCounterDemand = async (req, res) => {
       prepaymentAmount: quote.prepaymentAmount,
       prepaymentRaised: false,
       deliveryDaysRaised: false,
-      notes: notes || `Seller accepted buyer's counter-demand terms (v${quote.currentVersion || 2}). ${advAmt > 0 ? `Required online advance prepayment: ₹${advAmt.toLocaleString()} (${advPct}%). Awaiting buyer online payment to proceed with fulfillment.` : "Confirmed and ready for fulfillment."}`,
+      notes: notes || `Seller accepted buyer's counter-demand terms (v${quote.currentVersion || 2}). ${advAmt > 0 ? `Required online advance prepayment: ₹${advAmt.toLocaleString()} (${advPct}%). Awaiting buyer's confirmation & online prepayment.` : "Awaiting buyer confirmation."}`,
       createdAt: new Date()
     });
 
@@ -982,12 +985,55 @@ export const acceptBuyerCounterDemand = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Buyer's counter-demand accepted successfully! Quotation approved as winning quote.${advAmt > 0 ? ` Online prepayment of ₹${advAmt.toLocaleString()} required from buyer.` : ""}`,
+      message: `Buyer's counter-demand accepted by seller! Awaiting buyer confirmation and prepayment.${advAmt > 0 ? ` Online prepayment of ₹${advAmt.toLocaleString()} (${advPct}%) required.` : ""}`,
       order: sanitizeOrderForSeller(bulkOrder, { candidateIds, candidatePhones }),
       quotation: quote
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Failed to accept counter demand", error: error.message });
+  }
+};
+
+// POST Buyer Confirm Seller's Acceptance of Counter-Demand & Proceed with Prepayment
+export const confirmBuyerAcceptance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "seller_accepted"
+    );
+
+    if (!winningQuote) {
+      return res.status(404).json({ success: false, message: "Accepted quotation not found" });
+    }
+
+    winningQuote.status = "approved";
+    winningQuote.negotiationStage = "approved";
+    bulkOrder.status = "accepted";
+
+    const advPct = Number(bulkOrder.sellerAdvancePercentage || winningQuote.prepaymentPercentage || winningQuote.sellerAdvancePercentage || 20);
+    const advAmt = Math.round((Number(bulkOrder.overallBudget || winningQuote.quoteAmount || 0) * advPct) / 100);
+
+    bulkOrder.sellerAdvancePercentage = advPct;
+    bulkOrder.sellerAdvanceAmount = advAmt;
+    bulkOrder.prepaymentPercentage = advPct;
+    bulkOrder.prepaymentAmount = advAmt;
+    bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
+
+    await bulkOrder.save();
+
+    return res.json({
+      success: true,
+      message: `Buyer confirmed acceptance! Order ready for prepayment of ₹${advAmt.toLocaleString()} (${advPct}%).`,
+      order: bulkOrder,
+      quotation: winningQuote
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to confirm buyer acceptance", error: error.message });
   }
 };
 
@@ -1165,8 +1211,8 @@ export const approveSellerQuotation = async (req, res) => {
     // Mark all quotes status & negotiation stages
     bulkOrder.quotations.forEach(q => {
       if (String(q._id) === String(effectiveQuoteId)) {
-        q.status = "approved";
-        q.negotiationStage = "approved";
+        q.status = "buyer_accepted";
+        q.negotiationStage = "buyer_accepted_quote";
       } else {
         q.status = "rejected";
         q.negotiationStage = "rejected";
@@ -1189,7 +1235,7 @@ export const approveSellerQuotation = async (req, res) => {
       prepaymentAmount: winningQuote.prepaymentAmount,
       prepaymentRaised: false,
       deliveryDaysRaised: false,
-      notes: "Quotation officially accepted and approved by the buyer as the WINNING quote.",
+      notes: "Quotation accepted by buyer. Awaiting seller confirmation and prepayment request.",
       createdAt: new Date()
     });
 
@@ -1197,8 +1243,8 @@ export const approveSellerQuotation = async (req, res) => {
     if (winningQuote.sellerId) {
       bulkOrder.sellerId = winningQuote.sellerId;
     }
-    // Set status to accepted / quote_accepted
-    bulkOrder.status = "accepted";
+    // Set status to buyer_accepted (awaiting seller confirmation)
+    bulkOrder.status = "buyer_accepted";
     bulkOrder.deliveryMode = "self_delivery";
 
     // Handle Buyer updating order size / item counts upon quote acceptance
@@ -1253,37 +1299,79 @@ export const approveSellerQuotation = async (req, res) => {
     bulkOrder.targetBudgetPerKit = String(finalAmount);
     bulkOrder.overallBudget = finalAmount;
 
-    const advPct = Number(req.body.prepaymentPercentage ?? req.body.sellerAdvancePercentage ?? winningQuote.prepaymentPercentage ?? winningQuote.sellerAdvancePercentage ?? 0);
-    const advAmt = Number(req.body.prepaymentAmount ?? req.body.sellerAdvanceAmount ?? winningQuote.prepaymentAmount ?? winningQuote.sellerAdvanceAmount ?? 0) || (advPct > 0 ? Math.round((finalAmount * advPct) / 100) : 0);
+    // Calculate prepayment using set percentage
+    const advPct = Number(req.body.prepaymentPercentage ?? req.body.sellerAdvancePercentage ?? winningQuote.prepaymentPercentage ?? winningQuote.sellerAdvancePercentage ?? 20);
+    const advAmt = Math.round((finalAmount * advPct) / 100);
     const advType = winningQuote.prepaymentType || winningQuote.sellerAdvanceType || "percentage";
     const advTerms = winningQuote.prepaymentTerms || winningQuote.sellerAdvanceTerms || "";
 
-    if (advPct > 0 || advAmt > 0) {
-      winningQuote.prepaymentPercentage = advPct;
-      winningQuote.prepaymentAmount = advAmt;
-      winningQuote.sellerAdvancePercentage = advPct;
-      winningQuote.sellerAdvanceAmount = advAmt;
+    winningQuote.prepaymentPercentage = advPct;
+    winningQuote.prepaymentAmount = advAmt;
+    winningQuote.sellerAdvancePercentage = advPct;
+    winningQuote.sellerAdvanceAmount = advAmt;
 
-      bulkOrder.sellerAdvanceType = advType;
-      bulkOrder.sellerAdvancePercentage = advPct;
-      bulkOrder.sellerAdvanceAmount = advAmt;
-      bulkOrder.sellerAdvanceTerms = advTerms;
-      bulkOrder.prepaymentPercentage = advPct;
-      bulkOrder.prepaymentAmount = advAmt;
-      bulkOrder.prepaymentType = advType;
-      bulkOrder.prepaymentTerms = advTerms;
-      bulkOrder.advancePaymentStatus = "agreed";
-    }
+    bulkOrder.sellerAdvanceType = advType;
+    bulkOrder.sellerAdvancePercentage = advPct;
+    bulkOrder.sellerAdvanceAmount = advAmt;
+    bulkOrder.sellerAdvanceTerms = advTerms;
+    bulkOrder.prepaymentPercentage = advPct;
+    bulkOrder.prepaymentAmount = advAmt;
+    bulkOrder.prepaymentType = advType;
+    bulkOrder.prepaymentTerms = advTerms;
+    bulkOrder.advancePaymentStatus = "agreed";
 
     await bulkOrder.save();
 
     res.json({
       success: true,
-      message: `Approved quotation from ${winningQuote.sellerStoreName || winningQuote.sellerName}! Order accepted and assigned to vendor.`,
+      message: `Quotation from ${winningQuote.sellerStoreName || winningQuote.sellerName} accepted by buyer! Awaiting seller confirmation & prepayment request.`,
       order: bulkOrder
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to approve seller quotation", error: error.message });
+  }
+};
+
+// POST Seller Confirm Acceptance of Buyer-Accepted Quotation & Request Prepayment
+export const confirmSellerAcceptance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.status === "buyer_accepted" || q.negotiationStage === "buyer_accepted_quote" || q.status === "approved"
+    );
+
+    if (!winningQuote) {
+      return res.status(404).json({ success: false, message: "Accepted quotation not found" });
+    }
+
+    winningQuote.status = "approved";
+    winningQuote.negotiationStage = "approved";
+    bulkOrder.status = "accepted";
+
+    const advPct = Number(bulkOrder.sellerAdvancePercentage || winningQuote.prepaymentPercentage || winningQuote.sellerAdvancePercentage || 20);
+    const advAmt = Math.round((Number(bulkOrder.overallBudget || winningQuote.quoteAmount || 0) * advPct) / 100);
+
+    bulkOrder.sellerAdvancePercentage = advPct;
+    bulkOrder.sellerAdvanceAmount = advAmt;
+    bulkOrder.prepaymentPercentage = advPct;
+    bulkOrder.prepaymentAmount = advAmt;
+    bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
+
+    await bulkOrder.save();
+
+    return res.json({
+      success: true,
+      message: `Seller confirmed acceptance! Online prepayment of ₹${advAmt.toLocaleString()} (${advPct}%) requested from buyer.`,
+      order: bulkOrder,
+      quotation: winningQuote
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to confirm seller acceptance", error: error.message });
   }
 };
 
@@ -1619,27 +1707,39 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
     const winningQuote = (bulkOrder.quotations || []).find(
       q => String(q._id) === String(bulkOrder.acceptedQuoteId) ||
            q.status === "approved" ||
+           q.status === "seller_accepted" ||
+           q.status === "buyer_accepted" ||
            q.negotiationStage === "seller_accepted_counter"
     );
 
     // Mutual Verification Guard: Both buyer and seller must have agreed/verified terms
     const isVerifiedByBoth = winningQuote && (
       winningQuote.status === "approved" ||
-      winningQuote.negotiationStage === "seller_accepted_counter"
+      winningQuote.negotiationStage === "approved" ||
+      bulkOrder.status === "accepted" ||
+      bulkOrder.status === "quote_accepted" ||
+      bulkOrder.status === "seller_accepted_counter" ||
+      bulkOrder.status === "buyer_accepted"
     ) && bulkOrder.negotiationStage !== "buyer_countered";
 
     if (!isVerifiedByBoth) {
       return res.status(400).json({
         success: false,
-        message: "Bulk order quotation must be mutually verified and agreed by both the buyer and seller before online prepayment can proceed."
+        message: "Bulk order quotation must be mutually verified and confirmed by both buyer and seller before online prepayment can proceed."
       });
     }
 
-    const requiredAdvance = Number(bulkOrder.sellerAdvanceAmount) || (
-      bulkOrder.sellerAdvancePercentage > 0
-        ? Math.round((Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || 0) * bulkOrder.sellerAdvancePercentage) / 100)
-        : 0
+    const setPct = Number(
+      bulkOrder.sellerAdvancePercentage ||
+      bulkOrder.prepaymentPercentage ||
+      winningQuote?.prepaymentPercentage ||
+      winningQuote?.sellerAdvancePercentage ||
+      20
     );
+
+    const requiredAdvance = (bulkOrder.sellerAdvanceAmount > 0 && (!bulkOrder.sellerAdvancePercentage || bulkOrder.sellerAdvancePercentage <= 0))
+      ? Number(bulkOrder.sellerAdvanceAmount)
+      : Math.round((Number(bulkOrder.overallBudget || winningQuote?.quoteAmount || bulkOrder.targetBudgetPerKit || 0) * setPct) / 100);
 
     if (requiredAdvance <= 0) {
       return res.status(400).json({ success: false, message: "No advance prepayment required for this bulk order." });

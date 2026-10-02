@@ -34,10 +34,24 @@ const couponSchema = new mongoose.Schema({
     enum: ['admin', 'seller'],
     default: 'admin'
   },
+  applicableScope: {
+    type: String,
+    enum: ['storewide', 'all', 'specific_product', 'specific_kit', 'all_kits', 'category'],
+    default: 'storewide'
+  },
   applicableProducts: {
     type: [String],
     default: []
-  }
+  },
+  applicableKits: {
+    type: [String],
+    default: []
+  },
+  specificProductId: { type: String, default: "" },
+  specificProductName: { type: String, default: "" },
+  specificKitId: { type: String, default: "" },
+  specificKitTitle: { type: String, default: "" },
+  specificKitImage: { type: String, default: "" }
 }, {
   timestamps: true
 });

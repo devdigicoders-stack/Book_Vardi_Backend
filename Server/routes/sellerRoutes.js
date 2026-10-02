@@ -116,6 +116,7 @@ import {
   acceptSchoolOrderDirect,
   submitSellerQuotation,
   acceptBuyerCounterDemand,
+  confirmSellerAcceptance,
   reviseSellerQuotation
 } from "../controllers/schoolBulkOrderController.js";
 
@@ -143,6 +144,7 @@ router.patch("/school-orders/:id/status", authenticateSeller, updateSellerSchool
 router.delete("/school-orders/:id", authenticateSeller, deleteSellerSchoolOrder);
 router.post("/school-orders/:id/accept", authenticateSeller, acceptSchoolOrderDirect);
 router.post("/school-orders/:id/quote", authenticateSeller, submitSellerQuotation);
+router.post("/school-orders/:id/confirm-seller-acceptance", authenticateSeller, confirmSellerAcceptance);
 router.post("/school-orders/:id/quotations/:quoteId/accept-counter", authenticateSeller, acceptBuyerCounterDemand);
 router.post("/school-orders/:id/quotations/:quoteId/revise", authenticateSeller, reviseSellerQuotation);
 

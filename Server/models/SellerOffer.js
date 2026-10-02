@@ -60,10 +60,23 @@ const sellerOfferSchema = new mongoose.Schema(
       enum: ["admin", "seller"],
       default: "seller"
     },
+    applicableScope: {
+      type: String,
+      default: "storewide"
+    },
     applicableProducts: {
       type: [String],
       default: []
-    }
+    },
+    applicableKits: {
+      type: [String],
+      default: []
+    },
+    specificProductId: { type: String, default: "" },
+    specificProductName: { type: String, default: "" },
+    specificKitId: { type: String, default: "" },
+    specificKitTitle: { type: String, default: "" },
+    specificKitImage: { type: String, default: "" }
   },
   {
     timestamps: true
