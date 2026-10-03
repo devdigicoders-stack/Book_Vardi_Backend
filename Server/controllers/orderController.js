@@ -57,6 +57,36 @@ export const normalizeOrderStatus = (raw) => {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
 
+// Helper to safely locate an Order document by Mongo _id, orderId, custom id, or SC- format
+export const findOrderById = async (searchId) => {
+  if (!searchId) return null;
+  const cleanId = String(searchId).trim().replace(/^#+/, '');
+  const isMongoId = mongoose.Types.ObjectId.isValid(cleanId);
+  const query = isMongoId
+    ? { $or: [{ _id: cleanId }, { orderId: cleanId }, { id: cleanId }] }
+    : { $or: [{ orderId: cleanId }, { id: cleanId }] };
+
+  try {
+    let order = await Order.findOne(query);
+    if (order) return order;
+
+    if (cleanId.startsWith('SC-')) {
+      const num = cleanId.replace(/^SC-/, '');
+      if (num) {
+        order = await Order.findOne({
+          $or: [
+            { orderId: new RegExp(num, 'i') },
+            { id: new RegExp(num, 'i') }
+          ]
+        });
+      }
+    }
+    return order;
+  } catch (err) {
+    return null;
+  }
+};
+
 // Helper to safely locate a Product document without throwing CastError on non-ObjectId search IDs
 const findProductByIdOrCustomId = async (searchId) => {
   if (!searchId) return null;
@@ -848,7 +878,11 @@ export const createOrder = async (req, res) => {
       item.gstRate = resolvedGst;
     }
 
-    const orderIdVal = id || orderId || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
+    const orderIdVal = (orderId && !/^[0-9a-fA-F]{24}$/.test(orderId))
+      ? orderId
+      : ((id && !/^[0-9a-fA-F]{24}$/.test(id) && String(id).startsWith("SC-"))
+          ? id
+          : `SC-${Math.floor(1000 + Math.random() * 9000)}`);
 
       const isCodOrder = paymentMethod && String(paymentMethod).toUpperCase().includes("COD");
       const initialPaymentStatus = req.body.paymentStatus || (req.body.razorpayPaymentId || req.body.isPaid ? "paid" : "pending");
@@ -1644,9 +1678,7 @@ export const updateReturnExchangeStatus = async (req, res) => {
       return res.status(400).json({ message: "Status is required" });
     }
 
-    const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
-    const query = isMongoId ? { _id: id } : { $or: [{ orderId: id }, { id: id }] };
-    const order = await Order.findOne(query);
+    const order = await findOrderById(id);
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });

@@ -3,7 +3,7 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
-import { enrichOrdersWithSellerAndConsumer } from "./orderController.js";
+import { enrichOrdersWithSellerAndConsumer, findOrderById } from "./orderController.js";
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw) => {
@@ -214,9 +214,9 @@ export const getSellerOrders = async (req, res) => {
       const itemsList = Array.isArray(o.items) ? o.items : [];
 
       const relevantItems = itemsList.filter((item) => {
-        if (!strExpandedSellerIds || !strExpandedSellerIds.length) return false;
-        const itemSellerIdStr = item.sellerId ? String(item.sellerId) : "";
-        const itemSellerStr = item.seller ? String(item.seller) : "";
+        if (!strExpandedSellerIds || !strExpandedSellerIds.length) return true;
+        const itemSellerIdStr = item.sellerId ? String(item.sellerId._id || item.sellerId) : "";
+        const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
         const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
 
         const matchSeller = strExpandedSellerIds.some((sId) => {
@@ -229,27 +229,53 @@ export const getSellerOrders = async (req, res) => {
           );
         });
 
-        const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId || item.id || item._id));
+        const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId?._id || item.productId || item.id || item._id));
         const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
         return matchSeller || matchProduct || matchName;
       });
 
-      const orderItems = relevantItems.length > 0 ? relevantItems : (strExpandedSellerIds.length > 0 ? itemsList : []);
-      if (orderItems.length === 0 && itemsList.length > 0) {
+      // STRICT SELLER PRODUCT ISOLATION: Exclude order completely if none of its items belong to this seller
+      if (relevantItems.length === 0) {
         return null;
       }
 
-      const computedTotal = orderItems.reduce(
+      const orderItems = relevantItems;
+      const isMultiSeller = itemsList.length > orderItems.length;
+
+      const computedItemsSubtotal = orderItems.reduce(
         (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
         0
       );
 
-      const formattedStatus = normalizeOrderStatus(o.overallStatus || o.status || "Pending");
+      const storedOrderTotal = Number(o.totalAmount || o.total || 0);
+      const storedSubtotal = Number(o.subtotal || 0);
+      const shippingFee = Number(o.shippingFee ?? o.shippingCost ?? 0);
+      const discountAmount = Number(o.discountAmount ?? o.discount ?? 0);
+      const codFee = Number(o.codFee ?? o.codCharges ?? 0);
+
+      // For multi-seller orders, seller order total reflects ONLY their items' subtotal
+      const resolvedOrderTotal = isMultiSeller
+        ? computedItemsSubtotal
+        : (storedOrderTotal > 0 ? storedOrderTotal : Math.max(0, computedItemsSubtotal + shippingFee + codFee - discountAmount));
+
+      const resolvedSubtotal = computedItemsSubtotal;
+
+      const rawStatus = (o.returnRequest && o.returnRequest.status && !['none', 'n/a', 'no_request'].includes(String(o.returnRequest.status).toLowerCase()))
+        ? o.returnRequest.status
+        : (o.overallStatus || o.status || "Pending");
+
+      const formattedStatus = normalizeOrderStatus(rawStatus);
+
+      let rawOrderId = o.orderId || o.id;
+      if (!rawOrderId || /^[0-9a-fA-F]{24}$/.test(rawOrderId)) {
+        rawOrderId = `SC-${(parseInt(String(o._id || '').slice(-4), 16) % 9000) + 1000}`;
+        Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
+      }
 
       return {
-        id: o.orderId || o.id || String(o._id),
+        id: rawOrderId,
         _id: o._id,
-        orderId: o.orderId || o.id || String(o._id),
+        orderId: rawOrderId,
         customerName: customerObj.name || o.userName || "Customer",
         customerEmail: customerObj.email || o.userEmail || "",
         customerPhone: customerObj.phone || o.userPhone || "",
@@ -262,11 +288,18 @@ export const getSellerOrders = async (req, res) => {
             })
           : (o.date || "Recently"),
         createdAt: o.createdAt || new Date(),
-        total: computedTotal > 0 ? computedTotal : Number(o.totalAmount || o.subtotal || o.total || 0),
-        sellerSubtotal: computedTotal > 0 ? computedTotal : Number(o.totalAmount || o.subtotal || o.total || 0),
+        total: resolvedOrderTotal,
+        totalAmount: resolvedOrderTotal,
+        subtotal: resolvedSubtotal,
+        sellerSubtotal: computedItemsSubtotal,
+        shippingFee: isMultiSeller ? 0 : shippingFee,
+        shippingCost: isMultiSeller ? 0 : shippingFee,
+        discountAmount: isMultiSeller ? 0 : discountAmount,
+        discount: isMultiSeller ? 0 : discountAmount,
+        codFee: isMultiSeller ? 0 : codFee,
         itemsCount: orderItems.length,
         status: formattedStatus,
-        rawStatus: o.overallStatus || o.status || "Pending",
+        rawStatus: rawStatus,
         paymentMethod: o.paymentMethod || "UPI",
         paymentStatus: o.paymentStatus || (String(o.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "Paid"),
         cancellationReason: o.cancellationReason || "",
@@ -442,13 +475,7 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       sellerDetails
     } = req.body;
 
-    let order = null;
-    if (mongoose.Types.ObjectId.isValid(orderId)) {
-      order = await Order.findById(orderId);
-    }
-    if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] });
-    }
+    const order = await findOrderById(orderId);
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
@@ -543,13 +570,7 @@ export const updateSellerOrderStatus = async (req, res) => {
       sellerDetails
     } = req.body;
 
-    let order = null;
-    if (mongoose.Types.ObjectId.isValid(orderId)) {
-      order = await Order.findById(orderId);
-    }
-    if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] });
-    }
+    const order = await findOrderById(orderId);
 
     if (!order) return res.status(404).json({ message: "Order not found" });
 
@@ -675,16 +696,10 @@ export const downloadSellerInvoice = async (req, res) => {
     const { orderId } = req.params;
     const sellerId = resolveSellerId(req);
 
-    let order = null;
-    if (mongoose.Types.ObjectId.isValid(orderId)) {
-      order = await Order.findById(orderId)
-        .populate("items.productId", "name price images mrp")
-        .populate("items.sellerId", "storeName name phone city");
-    }
-    if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: orderId }, { id: orderId }] })
-        .populate("items.productId", "name price images mrp")
-        .populate("items.sellerId", "storeName name phone city");
+    const order = await findOrderById(orderId);
+    if (order) {
+      await order.populate("items.productId", "name price images mrp");
+      await order.populate("items.sellerId", "storeName name phone city");
     }
 
     if (!order) {
