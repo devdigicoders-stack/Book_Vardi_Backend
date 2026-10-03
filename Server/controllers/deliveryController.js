@@ -170,6 +170,12 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       status: order.overallStatus || order.status || "Processing",
       date: order.date || (order.createdAt ? new Date(order.createdAt).toLocaleDateString("en-IN") : ""),
       totalAmount: order.totalAmount || order.total || 0,
+      subtotal: order.subtotal || (order.items || []).reduce((s, it) => s + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)), 0),
+      shippingFee: order.shippingFee !== undefined ? order.shippingFee : (order.shippingCost !== undefined ? order.shippingCost : 0),
+      shippingCost: order.shippingCost !== undefined ? order.shippingCost : (order.shippingFee !== undefined ? order.shippingFee : 0),
+      discount: order.discount || order.discountAmount || 0,
+      discountAmount: order.discountAmount || order.discount || 0,
+      gst: order.gst || order.taxAmount || 0,
       paymentMethod: order.paymentMethod || "COD",
       paymentStatus: order.paymentStatus
         ? order.paymentStatus

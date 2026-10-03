@@ -295,8 +295,9 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
           const sId = item.sellerId._id ? item.sellerId._id.toString() : item.sellerId.toString();
           if (mongoose.Types.ObjectId.isValid(sId)) sellerIds.add(sId);
         }
-        if (item.productId) {
-          const pId = item.productId._id ? item.productId._id.toString() : item.productId.toString();
+        const rawPId = item.productId || item.id || item._id;
+        if (rawPId) {
+          const pId = rawPId._id ? rawPId._id.toString() : rawPId.toString();
           if (mongoose.Types.ObjectId.isValid(pId)) productIds.add(pId);
         }
       });
@@ -436,11 +437,20 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         const sId = item.sellerId ? (item.sellerId._id ? item.sellerId._id.toString() : item.sellerId.toString()) : null;
         let matchedSeller = sId ? sellerMap.get(sId) : null;
 
-        if (!matchedSeller && item.productId) {
-          const pId = item.productId._id ? item.productId._id.toString() : item.productId.toString();
-          const pDoc = productMap.get(pId);
-          if (pDoc) {
-            const pSellerId = pDoc.sellerId ? pDoc.sellerId.toString() : null;
+        const rawPId = item.productId || item.id || item._id;
+        const itemPId = rawPId ? (rawPId._id ? rawPId._id.toString() : rawPId.toString()) : null;
+        const pDoc = itemPId ? productMap.get(itemPId) : null;
+
+        if (pDoc) {
+          item.isReturnable = (pDoc.returnPolicy === 'non_returnable' || pDoc.isReturnable === false) ? false : (item.isReturnable ?? pDoc.isReturnable ?? true);
+          item.isExchangeable = (pDoc.returnPolicy === 'non_returnable' || pDoc.isExchangeable === false) ? false : (item.isExchangeable ?? pDoc.isExchangeable ?? true);
+          item.isRefundable = (pDoc.returnPolicy === 'non_returnable' || pDoc.isRefundable === false) ? false : (item.isRefundable ?? pDoc.isRefundable ?? true);
+          item.returnWindowDays = item.returnWindowDays || pDoc.returnWindowDays || 7;
+          item.returnPolicy = item.returnPolicy || pDoc.returnPolicy || ((item.isReturnable === false && item.isExchangeable === false) ? 'non_returnable' : '');
+        }
+
+        if (!matchedSeller && pDoc) {
+          const pSellerId = pDoc.sellerId ? pDoc.sellerId.toString() : null;
             if (pSellerId && sellerMap.has(pSellerId)) {
               matchedSeller = sellerMap.get(pSellerId);
             } else if (pDoc.sellerStoreName || pDoc.storeName) {
@@ -459,7 +469,6 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
               };
             }
           }
-        }
 
         if (matchedSeller) {
           item.sellerId = matchedSeller;
@@ -559,7 +568,8 @@ export const getMyOrders = async (req, res) => {
 
     let orders = [];
     if (query.length > 0) {
-      orders = await Order.find({ $or: query }).sort({ createdAt: -1 });
+      orders = await Order.find({ $or: query }).sort({ createdAt: -1 }).lean();
+      await enrichOrdersWithSellerAndConsumer(orders);
     }
 
     const formattedOrders = orders.map((ord) => {
@@ -601,6 +611,7 @@ export const getMyOrders = async (req, res) => {
         return {
           id: it._id || it.id,
           _id: it._id || it.id,
+          productId: it.productId || it.id || it._id,
           name: it.name,
           price: it.finalPrice || it.price,
           quantity: it.quantity || 1,
@@ -616,7 +627,12 @@ export const getMyOrders = async (req, res) => {
           sellerDetails: itemSellerDetails,
           selfDeliveryDetails: itemSelfDelivery,
           thirdPartyDetails: itemThirdParty,
-          status: normalizeOrderStatus(it.status || canonicalStatus)
+          status: normalizeOrderStatus(it.status || canonicalStatus),
+          isReturnable: (it.returnPolicy === 'non_returnable' || it.isReturnable === false) ? false : (it.isReturnable ?? true),
+          isExchangeable: (it.returnPolicy === 'non_returnable' || it.isExchangeable === false) ? false : (it.isExchangeable ?? true),
+          isRefundable: (it.returnPolicy === 'non_returnable' || it.isRefundable === false) ? false : (it.isRefundable ?? true),
+          returnWindowDays: it.returnWindowDays || 7,
+          returnPolicy: it.returnPolicy || ""
         };
       });
 
@@ -791,6 +807,11 @@ export const createOrder = async (req, res) => {
         if (!sellerStoreName && prod.storeName && !isPlaceholder(prod.storeName)) sellerStoreName = prod.storeName;
         if (!sellerStoreName && prod.sellerName && !isPlaceholder(prod.sellerName)) sellerStoreName = prod.sellerName;
         if (!sellerStoreName && prod.legalBusinessName && !isPlaceholder(prod.legalBusinessName)) sellerStoreName = prod.legalBusinessName;
+        item.isReturnable = (prod.returnPolicy === 'non_returnable' || prod.isReturnable === false) ? false : (item.isReturnable ?? prod.isReturnable ?? true);
+        item.isExchangeable = (prod.returnPolicy === 'non_returnable' || prod.isExchangeable === false) ? false : (item.isExchangeable ?? prod.isExchangeable ?? true);
+        item.isRefundable = (prod.returnPolicy === 'non_returnable' || prod.isRefundable === false) ? false : (item.isRefundable ?? prod.isRefundable ?? true);
+        item.returnWindowDays = item.returnWindowDays || prod.returnWindowDays || 7;
+        item.returnPolicy = item.returnPolicy || prod.returnPolicy || "";
       }
 
       let sellerPhone = item.sellerPhone || "";
@@ -1122,6 +1143,11 @@ export const updateOrder = async (req, res) => {
     if (canonicalStatus && newStatusKey !== previousStatusKey) {
       existingOrder.overallStatus = canonicalStatus;
       existingOrder.status = canonicalStatus;
+      if (Array.isArray(existingOrder.items)) {
+        existingOrder.items.forEach(item => {
+          item.status = canonicalStatus;
+        });
+      }
 
       // Restock item inventory on cancellation or when product return is received / completed
       const restockStatuses = ["cancelled", "returned", "product_return_received", "return_completed"];
@@ -1153,6 +1179,7 @@ export const updateOrder = async (req, res) => {
 
       // If order is delivered, verify payment status for COD and credit seller wallet balance
       if (newStatusKey === "delivered" && previousStatusKey !== "delivered") {
+        existingOrder.deliveredAt = existingOrder.deliveredAt || new Date();
         const isCodOrder = String(existingOrder.paymentMethod || "").toUpperCase().includes("COD") || existingOrder.paymentStatus !== "paid";
         if (isCodOrder) {
           existingOrder.paymentStatus = "paid";
@@ -1538,17 +1565,42 @@ export const requestReturnExchange = async (req, res) => {
       return res.status(400).json({ message: "Request type must be either 'return' or 'exchange'" });
     }
 
-    const isMongoId = /^[0-9a-fA-F]{24}$/.test(id);
-    const query = isMongoId ? { _id: id } : { $or: [{ orderId: id }, { id: id }] };
-    const order = await Order.findOne(query);
+    let order = await findOrderById(id);
+
+    if (!order) {
+      try {
+        const SchoolBulkOrder = (await import("../models/SchoolBulkOrder.js")).default;
+        const cleanId = String(id).trim().replace(/^#+/, '');
+        const isMongoId = mongoose.Types.ObjectId.isValid(cleanId);
+        const query = isMongoId
+          ? { $or: [{ _id: cleanId }, { orderId: cleanId }, { id: cleanId }] }
+          : { $or: [{ orderId: cleanId }, { id: cleanId }] };
+        order = await SchoolBulkOrder.findOne(query);
+      } catch (err) {
+        console.warn('SchoolBulkOrder lookup fallback failed:', err.message);
+      }
+    }
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    const currentStatus = String(order.overallStatus || order.status || "").toLowerCase().trim();
-    if (currentStatus !== "delivered" && currentStatus !== "completed") {
-      return res.status(400).json({ message: "Return or Exchange is only available for delivered orders." });
+    const statusLower = String(order.status || "").toLowerCase().trim();
+    const overallStatusLower = String(order.overallStatus || "").toLowerCase().trim();
+    const validDeliveredStatuses = ["delivered", "completed", "fulfilled", "received", "delivered_to_customer", "order_delivered"];
+    const isDeliveredState = 
+      validDeliveredStatuses.includes(statusLower) || 
+      validDeliveredStatuses.includes(overallStatusLower) || 
+      statusLower.includes("delivered") || 
+      statusLower.includes("completed") || 
+      statusLower.includes("fulfilled") || 
+      statusLower.includes("received") || 
+      Boolean(order.deliveredAt || order.deliveryDetails?.deliveredAt);
+
+    if (!isDeliveredState) {
+      return res.status(400).json({ 
+        message: `Return or Exchange is only available for delivered orders. Current status: '${order.status || order.overallStatus || 'Pending'}'` 
+      });
     }
 
     // Check product return window days, returnability, and exchangability
@@ -1583,7 +1635,8 @@ export const requestReturnExchange = async (req, res) => {
       return res.status(400).json({ message: "This product is marked as non-exchangeable." });
     }
 
-    const deliveredDate = order.deliveredAt || new Date(order.updatedAt || order.createdAt);
+    // Use deliveredAt timestamp if recorded, otherwise fallback to updatedAt or current time if status is delivered
+    const deliveredDate = order.deliveredAt || order.deliveryDetails?.deliveredAt || (isDeliveredState ? new Date(order.updatedAt || Date.now()) : new Date(order.createdAt || Date.now()));
     const returnEligibleUntil = new Date(deliveredDate.getTime() + returnWindowDays * 24 * 60 * 60 * 1000);
 
     if (new Date() > returnEligibleUntil) {

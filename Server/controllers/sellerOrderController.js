@@ -666,6 +666,9 @@ export const updateSellerOrderStatus = async (req, res) => {
     if (status) {
       order.status = formattedStatus;
       order.overallStatus = formattedStatus;
+      if (formattedStatus.toLowerCase().includes("delivered")) {
+        order.deliveredAt = order.deliveredAt || new Date();
+      }
     }
 
     if (status) {

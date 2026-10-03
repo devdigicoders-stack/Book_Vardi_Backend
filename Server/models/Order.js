@@ -39,6 +39,11 @@ const orderItemSchema = new mongoose.Schema({
   finalPrice: { type: Number, default: function () { return this.price; } },
   quantity: { type: Number, required: true, min: 1, default: 1 },
   total: { type: Number, default: function () { return (this.price || 0) * (this.quantity || 1); } },
+  isReturnable: { type: Boolean, default: true },
+  isRefundable: { type: Boolean, default: true },
+  isExchangeable: { type: Boolean, default: true },
+  returnWindowDays: { type: Number, default: 7 },
+  returnPolicy: { type: String, default: "" },
   deliveryType: {
     type: String,
     default: "pending_choice"
@@ -259,8 +264,8 @@ const orderSchema = new mongoose.Schema(
       exchangeCourier: { type: String, default: "" },
       status: {
         type: String,
-        enum: ["requested", "approved", "rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"],
-        default: "requested"
+        enum: ["no_request","requested", "approved", "rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"],
+        default: "no_request"
       },
       returnEligibleUntil: { type: Date, default: null }
     },
