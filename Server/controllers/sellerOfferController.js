@@ -30,6 +30,8 @@ export const getSellerOffers = async (req, res) => {
       minOrderAmount: o.minOrderAmount,
       minOrderValue: o.minOrderAmount,
       maxDiscount: o.maxDiscount,
+      usageLimit: o.usageLimit || 0,
+      usageCount: o.usageCount || 0,
       startDate: o.startDate,
       validFrom: o.startDate ? new Date(o.startDate).toISOString().split("T")[0] : "",
       endDate: o.endDate,
@@ -66,6 +68,7 @@ export const createSellerOffer = async (req, res) => {
       minOrderAmount,
       minOrderValue,
       maxDiscount,
+      usageLimit,
       startDate,
       validFrom,
       endDate,
@@ -109,6 +112,7 @@ export const createSellerOffer = async (req, res) => {
     const finalEndDate = rawEndDate ? new Date(rawEndDate) : new Date(Date.now() + 60 * 24 * 60 * 60 * 1000);
     const finalMinAmount = Number(minOrderAmount ?? minOrderValue ?? 0);
     const finalMaxDiscount = Number(maxDiscount ?? 0);
+    const finalUsageLimit = Number(usageLimit ?? 0);
     const scope = applicableScope || "storewide";
 
     let offer = null;
@@ -125,6 +129,7 @@ export const createSellerOffer = async (req, res) => {
       offer.discountValue = Number(discountValue);
       offer.minOrderAmount = finalMinAmount;
       offer.maxDiscount = finalMaxDiscount;
+      offer.usageLimit = finalUsageLimit;
       offer.startDate = finalStartDate;
       offer.endDate = finalEndDate;
       offer.status = "active";
@@ -152,6 +157,8 @@ export const createSellerOffer = async (req, res) => {
         discountValue: Number(discountValue),
         minOrderAmount: finalMinAmount,
         maxDiscount: finalMaxDiscount,
+        usageLimit: finalUsageLimit,
+        usageCount: 0,
         startDate: finalStartDate,
         endDate: finalEndDate,
         status: "active",
@@ -177,6 +184,8 @@ export const createSellerOffer = async (req, res) => {
           discount: Number(discountValue),
           type: (discountType === "flat" || discountType === "fixed") ? "fixed" : "percentage",
           minAmount: finalMinAmount,
+          maxDiscount: finalMaxDiscount,
+          usageLimit: finalUsageLimit,
           expiryDate: finalEndDate,
           status: "active",
           storeId: offer.sellerId || null,
@@ -232,6 +241,7 @@ export const updateSellerOffer = async (req, res) => {
       minOrderAmount,
       minOrderValue,
       maxDiscount,
+      usageLimit,
       startDate,
       validFrom,
       endDate,
@@ -256,6 +266,7 @@ export const updateSellerOffer = async (req, res) => {
       offer.minOrderAmount = Number(minOrderAmount ?? minOrderValue);
     }
     if (maxDiscount !== undefined) offer.maxDiscount = Number(maxDiscount);
+    if (usageLimit !== undefined) offer.usageLimit = Number(usageLimit);
     if (startDate || validFrom) offer.startDate = new Date(startDate || validFrom);
     if (endDate || validUntil) offer.endDate = new Date(endDate || validUntil);
     if (status) offer.status = status;
@@ -279,6 +290,8 @@ export const updateSellerOffer = async (req, res) => {
           discount: offer.discountValue,
           type: (offer.discountType === "flat" || offer.discountType === "fixed") ? "fixed" : "percentage",
           minAmount: offer.minOrderAmount,
+          maxDiscount: offer.maxDiscount || 0,
+          usageLimit: offer.usageLimit || 0,
           expiryDate: offer.endDate,
           status: offer.status === "active" ? "active" : "inactive",
           applicableScope: offer.applicableScope,

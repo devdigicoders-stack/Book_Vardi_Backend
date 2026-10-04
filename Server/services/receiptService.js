@@ -70,7 +70,6 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
   // Right: Supplier (Assigned Seller or Marketplace Desk)
   const sellerInfo = order.sellerId && typeof order.sellerId === "object" ? order.sellerId : null;
   const supplierName = sellerInfo?.storeName || sellerInfo?.businessName || sellerInfo?.name || "Bookvardi Institutional Seller Network";
-  const supplierPhone = sellerInfo?.phone || "+91 9876543210";
   const supplierCity = sellerInfo?.city || order.city || "New Delhi, India";
 
   doc
@@ -82,9 +81,8 @@ export const generatePartialAdvanceReceiptPDF = (order) => {
     .fontSize(9)
     .fillColor(mutedColor)
     .text(supplierName, 320, 129, { width: 235 })
-    .text("Verified Institutional Vendor Hub", 320, 141)
-    .text(`Contact: ${supplierPhone}`, 320, 153)
-    .text(`Location: ${supplierCity}`, 320, 165);
+    .text("Verified Institutional Vendor Hub", 320, 143)
+    .text(`Location: ${supplierCity}`, 320, 157);
 
   // Divider
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 202).lineTo(555, 202).stroke();

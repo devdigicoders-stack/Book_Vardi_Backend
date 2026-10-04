@@ -3,6 +3,8 @@ import Product from "../models/Product.js";
 import Kit from "../models/Kit.js";
 import User from "../models/User.js";
 import Seller from "../models/Seller.js";
+import Coupon from "../models/Coupon.js";
+import SellerOffer from "../models/SellerOffer.js";
 import mongoose from "mongoose";
 
 // Helper to locate user document by ID, email, or phone
@@ -70,19 +72,46 @@ export const findOrderById = async (searchId) => {
     let order = await Order.findOne(query);
     if (order) return order;
 
-    if (cleanId.startsWith('SC-')) {
-      const num = cleanId.replace(/^SC-/, '');
-      if (num) {
-        order = await Order.findOne({
-          $or: [
-            { orderId: new RegExp(num, 'i') },
-            { id: new RegExp(num, 'i') }
-          ]
+    // Case-insensitive exact string match
+    const escapedClean = cleanId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    order = await Order.findOne({
+      $or: [
+        { orderId: new RegExp(`^${escapedClean}$`, 'i') },
+        { id: new RegExp(`^${escapedClean}$`, 'i') }
+      ]
+    });
+    if (order) return order;
+
+    // Digits extraction for SC-XXXX codes or numeric identifiers
+    const digits = cleanId.replace(/\D/g, '');
+    if (digits) {
+      order = await Order.findOne({
+        $or: [
+          { orderId: new RegExp(digits, 'i') },
+          { id: new RegExp(digits, 'i') }
+        ]
+      });
+      if (order) return order;
+
+      // Dynamic SC- code matching fallback
+      const numCode = parseInt(digits, 10);
+      if (!isNaN(numCode)) {
+        const candidateOrders = await Order.find().sort({ createdAt: -1 }).limit(500);
+        const match = candidateOrders.find(o => {
+          const derivedNum = (parseInt(String(o._id || '').slice(-4), 16) % 9000) + 1000;
+          return derivedNum === numCode;
         });
+        if (match) {
+          const rawOrderId = `SC-${numCode}`;
+          Order.updateOne({ _id: match._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
+          return match;
+        }
       }
     }
-    return order;
+
+    return null;
   } catch (err) {
+    console.error("Error in findOrderById:", err);
     return null;
   }
 };
@@ -962,6 +991,24 @@ export const createOrder = async (req, res) => {
       }
     } catch (stockErr) {
       console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
+    }
+
+    // Auto-increment coupon redemption count on Coupon and SellerOffer models
+    try {
+      const appliedCode = req.body.couponCode || req.body.coupon?.code || req.body.appliedCoupon?.code || req.body.coupon || req.body.promoCode;
+      if (appliedCode) {
+        const cleanCode = String(appliedCode).toUpperCase().trim();
+        await Coupon.findOneAndUpdate(
+          { code: cleanCode },
+          { $inc: { usageCount: 1 } }
+        ).catch(() => {});
+        await SellerOffer.findOneAndUpdate(
+          { code: cleanCode },
+          { $inc: { usageCount: 1 } }
+        ).catch(() => {});
+      }
+    } catch (couponErr) {
+      console.warn("⚠️ Coupon redemption increment warning:", couponErr.message);
     }
 
     return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });

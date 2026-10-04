@@ -494,8 +494,11 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       return res.status(404).json({ message: "Order item not found" });
     }
 
-    const formattedStatus = status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : item.status;
-    const resolvedMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
+    let rawMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
+    if (rawMode === "self") rawMode = "self_delivery";
+    if (rawMode === "courier") rawMode = "third_party";
+    const validModes = ["third_party", "self_delivery", "pending_choice", "standard", "express", ""];
+    const resolvedMode = validModes.includes(rawMode) ? rawMode : "pending_choice";
 
     if (status) item.status = formattedStatus;
     if (deliveryType || deliveryMode) item.deliveryType = resolvedMode;
@@ -581,7 +584,11 @@ export const updateSellerOrderStatus = async (req, res) => {
     const sellerInfo = await resolveSellerProfileDetails(req, order);
     order.sellerDetails = sellerInfo;
 
-    const resolvedMode = deliveryMode || deliveryType || (selfDeliveryDetails ? "self_delivery" : (courierName || trackingNumber ? "third_party" : (order.deliveryMode || "")));
+    let rawMode = deliveryMode || deliveryType || (selfDeliveryDetails ? "self_delivery" : (courierName || trackingNumber ? "third_party" : (order.deliveryMode || "")));
+    if (rawMode === "self") rawMode = "self_delivery";
+    if (rawMode === "courier") rawMode = "third_party";
+    const validModes = ["third_party", "self_delivery", "pending_choice", "standard", "express", ""];
+    const resolvedMode = validModes.includes(rawMode) ? rawMode : "pending_choice";
     order.deliveryMode = resolvedMode;
 
     let computedTrackingUrl = trackingUrl || "";
@@ -640,56 +647,77 @@ export const updateSellerOrderStatus = async (req, res) => {
       order.trackingNumber = tokenVal;
     }
 
-    if (order.items && Array.isArray(order.items)) {
-      order.items.forEach(item => {
-        if (status) item.status = formattedStatus;
-        item.deliveryType = resolvedMode;
-        item.sellerDetails = sellerInfo;
-        item.sellerName = sellerInfo.sellerName;
-        item.storeName = sellerInfo.storeName;
-        item.sellerPhone = sellerInfo.phone;
+    // Build update object
+    const updatePayload = {
+      status: formattedStatus,
+      overallStatus: formattedStatus,
+      deliveryMode: resolvedMode,
+      sellerDetails: sellerInfo
+    };
 
-        if (resolvedMode === "third_party") {
-          item.thirdPartyDetails = {
+    if (formattedStatus.toLowerCase().includes("delivered")) {
+      updatePayload.deliveredAt = order.deliveredAt || new Date();
+    }
+
+    if (resolvedMode === "third_party") {
+      if (courierName) updatePayload.courierName = courierName;
+      if (effectiveAwb) updatePayload.trackingNumber = effectiveAwb;
+      if (computedTrackingUrl) updatePayload.trackingUrl = computedTrackingUrl;
+    } else if (resolvedMode === "self_delivery" && mergedSelf) {
+      updatePayload.selfDeliveryDetails = mergedSelf;
+      updatePayload.trackingUrl = mergedSelf.trackingUrl;
+      updatePayload.trackingNumber = mergedSelf.deliveryPartnerToken;
+    }
+
+    // Build timeline event
+    const newTimeline = Array.isArray(order.timeline) ? [...order.timeline] : [];
+    const deliveryDesc = resolvedMode === "self_delivery"
+      ? `Direct Self-Delivery by ${sellerInfo.storeName} ${mergedSelf?.deliveryPersonName ? `(Rider: ${mergedSelf.deliveryPersonName})` : ''}`
+      : (effectiveAwb ? `Courier: ${courierName || order.courierName || 'Express'} (AWB: ${effectiveAwb})` : 'Dispatched via Courier');
+
+    newTimeline.push({
+      status: formattedStatus,
+      title: `Order ${formattedStatus}`,
+      description: `Status updated to ${formattedStatus} by seller (${sellerInfo.storeName}). ${deliveryDesc}`,
+      timestamp: new Date(),
+      updatedBy: sellerInfo.storeName || "Seller"
+    });
+    updatePayload.timeline = newTimeline;
+
+    // Update MongoDB directly using updateOne
+    await Order.updateOne({ _id: order._id }, { $set: updatePayload });
+
+    // Also update item statuses in items array
+    if (Array.isArray(order.items) && order.items.length > 0) {
+      const updatedItems = order.items.map(item => ({
+        ...(item.toObject ? item.toObject() : item),
+        status: formattedStatus,
+        deliveryType: resolvedMode,
+        sellerDetails: sellerInfo,
+        sellerName: sellerInfo.sellerName,
+        storeName: sellerInfo.storeName,
+        sellerPhone: sellerInfo.phone,
+        ...(resolvedMode === "third_party" ? {
+          thirdPartyDetails: {
             ...item.thirdPartyDetails,
             courierName: courierName || item.thirdPartyDetails?.courierName || order.courierName,
-            trackingNumber: trackingNumber || item.thirdPartyDetails?.trackingNumber || order.trackingNumber,
+            trackingNumber: effectiveAwb || item.thirdPartyDetails?.trackingNumber || order.trackingNumber,
             trackingUrl: computedTrackingUrl || item.thirdPartyDetails?.trackingUrl,
             estimatedDeliveryDate: estimatedDeliveryDate || item.thirdPartyDetails?.estimatedDeliveryDate
-          };
-        } else if (resolvedMode === "self_delivery" && mergedSelf) {
-          item.selfDeliveryDetails = mergedSelf;
-        }
-      });
+          }
+        } : {}),
+        ...(resolvedMode === "self_delivery" && mergedSelf ? { selfDeliveryDetails: mergedSelf } : {})
+      }));
+
+      await Order.updateOne({ _id: order._id }, { $set: { items: updatedItems } });
     }
 
-    if (status) {
-      order.status = formattedStatus;
-      order.overallStatus = formattedStatus;
-      if (formattedStatus.toLowerCase().includes("delivered")) {
-        order.deliveredAt = order.deliveredAt || new Date();
-      }
-    }
-
-    if (status) {
-      order.timeline = order.timeline || [];
-      const deliveryDesc = resolvedMode === "self_delivery"
-        ? `Direct Self-Delivery by ${sellerInfo.storeName} ${mergedSelf?.deliveryPersonName ? `(Rider: ${mergedSelf.deliveryPersonName})` : ''}`
-        : (trackingNumber ? `Courier: ${courierName || order.courierName || 'Express'} (AWB: ${trackingNumber})` : 'Dispatched via Courier');
-
-      order.timeline.push({
-        status: formattedStatus,
-        title: `Order ${formattedStatus}`,
-        description: `Status updated to ${formattedStatus} by seller (${sellerInfo.storeName}). ${deliveryDesc}`,
-        timestamp: new Date(),
-        updatedBy: sellerInfo.storeName || "Seller"
-      });
-    }
-
-    await order.save();
-    res.json({ success: true, message: `Order status updated to ${formattedStatus}`, order });
+    // Fetch updated document to return in response
+    const updatedOrder = await Order.findById(order._id);
+    res.json({ success: true, message: `Order status updated to ${formattedStatus}`, order: updatedOrder || order });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update order status", error: error.message });
+    console.error("Error in updateSellerOrderStatus:", error);
+    res.status(500).json({ success: false, message: "Failed to update order status", error: error.message });
   }
 };
 

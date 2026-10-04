@@ -128,9 +128,15 @@ router.get("/orders", authenticateSeller, getSellerOrders);
 router.get("/orders/export", authenticateSeller, exportSellerOrders);
 router.get("/orders/:orderId/invoice", authenticateSeller, downloadSellerInvoice);
 router.patch("/orders/:orderId/status", authenticateSeller, updateSellerOrderStatus);
+router.put("/orders/:orderId/status", authenticateSeller, updateSellerOrderStatus);
 router.patch("/orders/:id/return-exchange/status", authenticateSeller, updateReturnExchangeStatus);
 router.put("/orders/:id/return-exchange/status", authenticateSeller, updateReturnExchangeStatus);
 router.put(
+  "/orders/:orderId/items/:itemId/status",
+  authenticateSeller,
+  updateSellerOrderItemStatus
+);
+router.patch(
   "/orders/:orderId/items/:itemId/status",
   authenticateSeller,
   updateSellerOrderItemStatus
@@ -157,6 +163,7 @@ router.get("/promotions", authenticateSeller, getSellerOffers);
 router.post("/offers", authenticateSeller, createSellerOffer);
 router.post("/promotions", authenticateSeller, createSellerOffer);
 router.put("/offers/:id", authenticateSeller, updateSellerOffer);
+router.put("/promotions/:id", authenticateSeller, updateSellerOffer);
 router.delete("/offers/:id", authenticateSeller, deleteSellerOffer);
 router.delete("/promotions/:id", authenticateSeller, deleteSellerOffer);
 router.patch("/offers/:id/status", authenticateSeller, toggleSellerOfferStatus);

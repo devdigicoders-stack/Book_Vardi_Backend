@@ -1568,12 +1568,22 @@ export const updateSellerSchoolOrder = async (req, res) => {
     // Auto-generate delivery OTP if dispatched and none exists
     const resolvedOtp = existingDetails.deliveryOtp || (isOutForDelivery ? Math.floor(1000 + Math.random() * 9000).toString() : "");
 
-    const token = (deliveryDetails && deliveryDetails.deliveryPartnerToken) || existingDetails.deliveryPartnerToken || `BV-SLF-${bulkOrder.referenceId}`;
+    const token = (deliveryDetails && (deliveryDetails.deliveryPartnerToken || deliveryDetails.trackingId)) || existingDetails.deliveryPartnerToken || `BV-SLF-${bulkOrder.referenceId}`;
     const trackingUrl = (deliveryDetails && deliveryDetails.trackingUrl) || existingDetails.trackingUrl || `/#delivery-partner?token=${token}`;
 
+    const riderName = (deliveryDetails && (deliveryDetails.deliveryBoyName || deliveryDetails.deliveryPersonName)) !== undefined 
+      ? (deliveryDetails.deliveryBoyName || deliveryDetails.deliveryPersonName || "")
+      : (existingDetails.deliveryBoyName || existingDetails.deliveryPersonName || "");
+
+    const riderPhone = (deliveryDetails && (deliveryDetails.deliveryBoyPhone || deliveryDetails.deliveryPersonPhone)) !== undefined
+      ? (deliveryDetails.deliveryBoyPhone || deliveryDetails.deliveryPersonPhone || "")
+      : (existingDetails.deliveryBoyPhone || existingDetails.deliveryPersonPhone || "");
+
     bulkOrder.deliveryDetails = {
-      deliveryBoyName: (deliveryDetails && deliveryDetails.deliveryBoyName) !== undefined ? deliveryDetails.deliveryBoyName : (existingDetails.deliveryBoyName || ""),
-      deliveryBoyPhone: (deliveryDetails && deliveryDetails.deliveryBoyPhone) !== undefined ? deliveryDetails.deliveryBoyPhone : (existingDetails.deliveryBoyPhone || ""),
+      deliveryBoyName: riderName,
+      deliveryPersonName: riderName,
+      deliveryBoyPhone: riderPhone,
+      deliveryPersonPhone: riderPhone,
       vehicleNumber: (deliveryDetails && deliveryDetails.vehicleNumber) !== undefined ? deliveryDetails.vehicleNumber : (existingDetails.vehicleNumber || ""),
       trackingId: (deliveryDetails && deliveryDetails.trackingId) || existingDetails.trackingId || token,
       trackingUrl,

@@ -69,6 +69,9 @@ export const applyCoupon = async (req, res) => {
           discount: offer.discountValue,
           type: (offer.discountType === "flat" || offer.discountType === "fixed") ? "fixed" : "percentage",
           minAmount: offer.minOrderAmount || 0,
+          maxDiscount: offer.maxDiscount || 0,
+          usageLimit: offer.usageLimit || 0,
+          usageCount: offer.usageCount || 0,
           expiryDate: offer.endDate,
           sellerId: offer.sellerId,
           createdRole: "seller",
@@ -103,6 +106,20 @@ export const applyCoupon = async (req, res) => {
       }
     }
 
+    // Check usage limit / redemptions count
+    const usageLimit = Number(coupon.usageLimit || 0);
+    const usageCount = Number(coupon.usageCount || 0);
+    if (usageLimit > 0 && usageCount >= usageLimit) {
+      if (typeof coupon.save === "function" && coupon.status === "active") {
+        coupon.status = "expired";
+        await coupon.save().catch(() => {});
+      }
+      return res.json({
+        success: false,
+        message: "This coupon code has reached its maximum usage limit."
+      });
+    }
+
     const extractId = (val) => {
       if (!val) return null;
       if (typeof val === 'object') {
@@ -133,7 +150,7 @@ export const applyCoupon = async (req, res) => {
         const itemSellerId = extractId(item.sellerId) || extractId(item.seller) || extractId(item.storeId) || extractId(item.userId);
         const itemProductId = extractId(item.id) || extractId(item._id) || extractId(item.productId);
         const itemKitId = extractId(item.kitId) || extractId(item.bundleId) || extractId(item.id) || extractId(item._id);
-        const isKit = Boolean(item.isKit || item.category === 'kits' || item.bundleType === 'kit' || item.kitId);
+        const isCustomized = Boolean(item.isCustomized || (item.name && item.name.includes('(Custom Bundle)')));
 
         if (isSellerScoped) {
           // Seller-created coupon applies ONLY to items from that seller
@@ -143,11 +160,14 @@ export const applyCoupon = async (req, res) => {
         }
 
         if (scope === "all_kits") {
-          return isKit;
+          if (!isKit) return false;
+          if (isCustomized) return false;
+          return true;
         }
 
         if (scope === "specific_kit") {
           if (!isKit) return false;
+          if (isCustomized) return false;
           if (applicableKits.length === 0) return true;
           return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase() || (itemProductId && k.toLowerCase() === itemProductId.toLowerCase()));
         }
@@ -162,14 +182,14 @@ export const applyCoupon = async (req, res) => {
         if (applicableProds.length > 0) {
           const prodMatch = itemProductId ? applicableProds.some(p => p.toLowerCase() === itemProductId.toLowerCase()) : false;
           if (prodMatch) return true;
-          if (applicableKits.length > 0 && isKit) {
+          if (applicableKits.length > 0 && isKit && !isCustomized) {
             return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase());
           }
           return false;
         }
 
         if (applicableKits.length > 0) {
-          if (!isKit) return false;
+          if (!isKit || isCustomized) return false;
           return applicableKits.some(k => k.toLowerCase() === itemKitId.toLowerCase());
         }
 
@@ -177,6 +197,14 @@ export const applyCoupon = async (req, res) => {
       });
 
       if (eligibleItems.length === 0) {
+        const hasCustomizedKitInCart = cartItems.some(i => i.isCustomized || (i.name && i.name.includes('(Custom Bundle)')));
+        if ((scope === "specific_kit" || scope === "all_kits") && hasCustomizedKitInCart) {
+          return res.json({
+            success: false,
+            message: "This coupon is only applicable when purchasing the full bundle of the kit."
+          });
+        }
+
         if (isSellerScoped) {
           return res.json({
             success: false,
@@ -211,15 +239,24 @@ export const applyCoupon = async (req, res) => {
 
     // Calculate discount
     let discountAmount = 0;
-    if (coupon.type === "percentage") {
-      discountAmount = Math.round(((eligibleSubtotal * coupon.discount) / 100) * 100) / 100;
-      if (coupon.maxDiscount && coupon.maxDiscount > 0) {
-        discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+    let isCapped = false;
+    let uncappedDiscount = 0;
+    const isPercent = coupon.type === "percentage" || coupon.type === "percent" || coupon.discountType === "percentage";
+    const maxCap = Number(coupon.maxDiscount || coupon.maxDiscountAmount || coupon.maxCap || 0);
+
+    if (isPercent) {
+      uncappedDiscount = Math.round(((eligibleSubtotal * coupon.discount) / 100) * 100) / 100;
+      discountAmount = uncappedDiscount;
+      if (maxCap > 0 && discountAmount > maxCap) {
+        discountAmount = maxCap;
+        isCapped = true;
       }
     } else {
-      discountAmount = Math.min(eligibleSubtotal, coupon.discount);
-      if (coupon.maxDiscount && coupon.maxDiscount > 0) {
-        discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+      uncappedDiscount = Math.min(eligibleSubtotal, coupon.discount);
+      discountAmount = uncappedDiscount;
+      if (maxCap > 0 && discountAmount > maxCap) {
+        discountAmount = maxCap;
+        isCapped = true;
       }
     }
 
@@ -227,13 +264,17 @@ export const applyCoupon = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Coupon applied successfully",
+      message: isCapped
+        ? `Coupon applied successfully (Capped at Max ₹${coupon.maxDiscount})`
+        : "Coupon applied successfully",
       coupon: {
         code: coupon.code,
         discount: coupon.discount,
         type: coupon.type,
         minAmount: coupon.minAmount,
         maxDiscount: coupon.maxDiscount || 0,
+        usageLimit: coupon.usageLimit || 0,
+        usageCount: coupon.usageCount || 0,
         createdRole: coupon.createdRole || (targetSellerId ? "seller" : "admin"),
         sellerId: targetSellerId,
         applicableProducts: applicableProds
@@ -241,6 +282,8 @@ export const applyCoupon = async (req, res) => {
       cartTotal: totalNum,
       eligibleSubtotal,
       discountAmount,
+      isCapped,
+      maxDiscount: coupon.maxDiscount || 0,
       finalPayable
     });
   } catch (error) {
@@ -254,7 +297,7 @@ export const getActiveCoupons = async (req, res) => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    const coupons = await Coupon.find({
+    const rawCoupons = await Coupon.find({
       status: "active",
       $or: [
         { expiryDate: { $gte: todayStart } },
@@ -263,10 +306,17 @@ export const getActiveCoupons = async (req, res) => {
       ]
     }).sort({ createdAt: -1 });
 
+    // Exclude coupons that reached max redemptions limit
+    const coupons = rawCoupons.filter(c => {
+      const uLimit = Number(c.usageLimit || 0);
+      const uCount = Number(c.usageCount || 0);
+      return !(uLimit > 0 && uCount >= uLimit);
+    });
+
     const couponCodes = new Set(coupons.map(c => String(c.code).toUpperCase().trim()));
 
     // Also pull active seller offers that may not yet be in Coupon collection
-    const sellerOffers = await SellerOffer.find({
+    const rawSellerOffers = await SellerOffer.find({
       status: "active",
       $or: [
         { endDate: { $gte: todayStart } },
@@ -274,6 +324,12 @@ export const getActiveCoupons = async (req, res) => {
         { endDate: { $exists: false } }
       ]
     }).sort({ createdAt: -1 });
+
+    const sellerOffers = rawSellerOffers.filter(o => {
+      const uLimit = Number(o.usageLimit || 0);
+      const uCount = Number(o.usageCount || 0);
+      return !(uLimit > 0 && uCount >= uLimit);
+    });
 
     const formattedList = coupons.map(formatCouponResponse);
 
@@ -296,8 +352,8 @@ export const getActiveCoupons = async (req, res) => {
           minOrderValue: offer.minOrderAmount || 0,
           minOrderAmount: offer.minOrderAmount || 0,
           maxDiscount: offer.maxDiscount || 0,
-          usageLimit: 0,
-          usageCount: 0,
+          usageLimit: offer.usageLimit || 0,
+          usageCount: offer.usageCount || 0,
           status: offer.status || "active",
           expiryDate: offer.endDate,
           validUntil: offer.endDate ? new Date(offer.endDate).toISOString().split("T")[0] : "",
@@ -535,6 +591,9 @@ export const updateCoupon = async (req, res) => {
     }
     if (req.body.minAmount !== undefined || req.body.minOrderValue !== undefined) {
       coupon.minAmount = Number(req.body.minAmount ?? req.body.minOrderValue);
+    }
+    if (req.body.maxDiscount !== undefined) {
+      coupon.maxDiscount = Number(req.body.maxDiscount || 0);
     }
     if (req.body.expiryDate || req.body.validUntil) {
       coupon.expiryDate = new Date(req.body.expiryDate || req.body.validUntil);

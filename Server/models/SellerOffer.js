@@ -76,7 +76,15 @@ const sellerOfferSchema = new mongoose.Schema(
     specificProductName: { type: String, default: "" },
     specificKitId: { type: String, default: "" },
     specificKitTitle: { type: String, default: "" },
-    specificKitImage: { type: String, default: "" }
+    specificKitImage: { type: String, default: "" },
+    usageLimit: {
+      type: Number,
+      default: 0
+    },
+    usageCount: {
+      type: Number,
+      default: 0
+    }
   },
   {
     timestamps: true
