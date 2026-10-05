@@ -260,9 +260,10 @@ export const getSellerOrders = async (req, res) => {
 
       const resolvedSubtotal = computedItemsSubtotal;
 
+      const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
       const rawStatus = (o.returnRequest && o.returnRequest.status && !['none', 'n/a', 'no_request'].includes(String(o.returnRequest.status).toLowerCase()))
         ? o.returnRequest.status
-        : (o.overallStatus || o.status || "Pending");
+        : (o.overallStatus || o.status || sellerItemStatus || "Pending");
 
       const formattedStatus = normalizeOrderStatus(rawStatus);
 
@@ -500,24 +501,37 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     const validModes = ["third_party", "self_delivery", "pending_choice", "standard", "express", ""];
     const resolvedMode = validModes.includes(rawMode) ? rawMode : "pending_choice";
 
-    if (status) item.status = formattedStatus;
-    if (deliveryType || deliveryMode) item.deliveryType = resolvedMode;
+    const formattedStatus = status
+      ? normalizeOrderStatus(status)
+      : normalizeOrderStatus(item.status || order.status || "Pending");
+
+    if (status) {
+      item.status = formattedStatus;
+      order.status = formattedStatus;
+      order.overallStatus = formattedStatus;
+    }
+    if (deliveryType || deliveryMode) {
+      item.deliveryType = resolvedMode;
+      order.deliveryMode = resolvedMode;
+    }
 
     const sellerInfo = await resolveSellerProfileDetails(req, order);
     item.sellerDetails = sellerInfo;
     item.storeName = sellerInfo.storeName;
     item.sellerName = sellerInfo.sellerName;
     item.sellerPhone = sellerInfo.phone;
+    order.sellerDetails = sellerInfo;
 
     if (selfDeliveryDetails) {
       const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
       const tokenVal = String(
         selfDeliveryDetails.deliveryPartnerToken ||
         item.selfDeliveryDetails?.deliveryPartnerToken ||
+        order.selfDeliveryDetails?.deliveryPartnerToken ||
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      const otpVal = selfDeliveryDetails.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
 
       item.selfDeliveryDetails = {
         ...item.selfDeliveryDetails,
@@ -526,6 +540,9 @@ export const updateSellerOrderItemStatus = async (req, res) => {
         trackingUrl: trackingLink,
         deliveryOtp: otpVal
       };
+      order.selfDeliveryDetails = item.selfDeliveryDetails;
+      order.trackingUrl = trackingLink;
+      order.trackingNumber = tokenVal;
     }
 
     if (thirdPartyDetails) {
@@ -535,6 +552,9 @@ export const updateSellerOrderItemStatus = async (req, res) => {
         ...thirdPartyDetails,
         trackingUrl: carrierUrl
       };
+      if (thirdPartyDetails.courierName) order.courierName = thirdPartyDetails.courierName;
+      if (thirdPartyDetails.trackingNumber) order.trackingNumber = thirdPartyDetails.trackingNumber;
+      if (carrierUrl) order.trackingUrl = carrierUrl;
     }
 
     order.timeline = order.timeline || [];
@@ -549,8 +569,12 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     await order.save();
 
     res.json({
+      success: true,
       message: `Item status updated to ${formattedStatus}`,
-      item
+      status: formattedStatus,
+      overallStatus: formattedStatus,
+      item,
+      order
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to update item delivery & status", error: error.message });
@@ -737,21 +761,28 @@ export const downloadSellerInvoice = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed
+    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed (Pending orders are locked)
     const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const paymentStatus = String(order.paymentStatus || "").toLowerCase().trim();
+    const isPending = !status || status === "pending" || status === "unconfirmed" || status === "placed";
+
     const confirmedStatuses = [
       "confirmed",
+      "processing",
       "packed",
       "shipped",
+      "dispatched",
       "out_for_delivery",
       "out for delivery",
       "delivered",
       "completed"
     ];
 
-    if (!confirmedStatuses.includes(status)) {
+    const isConfirmed = !isPending && (confirmedStatuses.includes(status) || paymentStatus === "paid");
+
+    if (!isConfirmed) {
       return res.status(400).json({
-        message: "Tax Invoice & Certificate can only be generated strictly after the order is confirmed."
+        message: `Tax Invoice & Certificate can only be generated strictly after the order is confirmed by seller/platform. Current status: '${order.overallStatus || order.status || "Pending"}'.`
       });
     }
 
@@ -759,14 +790,6 @@ export const downloadSellerInvoice = async (req, res) => {
 
     const orderObj = order.toObject ? order.toObject() : order;
     const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
-
-    // STRICT PAYMENT STATUS VERIFICATION CHECK: Seller Invoice only created after payment status is verified & confirmed ("paid")
-    const paymentStatus = String(enrichedOrder.paymentStatus || "").toLowerCase().trim();
-    if (paymentStatus !== "paid") {
-      return res.status(400).json({
-        message: `Tax Invoice cannot be created until payment status is verified and confirmed. Current payment status: ${enrichedOrder.paymentStatus || "pending"}.`
-      });
-    }
 
     const filename = `Seller_Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 

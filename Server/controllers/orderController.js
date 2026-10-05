@@ -968,8 +968,8 @@ export const createOrder = async (req, res) => {
         shippingAddress: shippingAddress || { street: address || "" },
         paymentMethod: paymentMethod || "UPI",
         paymentStatus: initialPaymentStatus,
-        overallStatus: "Processing",
-        status: "Processing",
+        overallStatus: "Pending",
+        status: "Pending",
         deliveryMode: topDeliveryMode,
         courierName: req.body.courierName || "",
         trackingNumber: trackingNumber || "",
@@ -1339,29 +1339,158 @@ export const downloadInvoice = async (req, res) => {
         .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
     }
 
+    let isBulkOrder = false;
+    let bulkOrderDoc = null;
+
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
-    }
-
-    // Access control: User who placed order, Admin, or Seller involved in order
-    if (req.user) {
-      const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
-      const orderUserIdStr = order.userId ? (order.userId._id ? order.userId._id.toString() : order.userId.toString()) : "";
-      const isOwner = Boolean(orderUserIdStr && reqUserIdStr && orderUserIdStr === reqUserIdStr);
-      const isAdmin = req.user.role === "admin";
-      const isSeller =
-        req.user.role === "seller" &&
-        order.items.some(
-          (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === reqUserIdStr
-        );
-
-      if (!isOwner && !isAdmin && !isSeller) {
-        return res.status(403).json({ message: "Not authorized to download this invoice" });
+      const SchoolBulkOrder = (await import("../models/SchoolBulkOrder.js")).default;
+      const bulkQuery = [
+        { referenceId: id },
+        { "deliveryDetails.deliveryPartnerToken": id },
+        { "deliveryDetails.trackingId": id }
+      ];
+      if (isMongoId) {
+        bulkQuery.push({ _id: id });
+      }
+      bulkOrderDoc = await SchoolBulkOrder.findOne({ $or: bulkQuery });
+      if (bulkOrderDoc) {
+        isBulkOrder = true;
       }
     }
 
-    const orderObj = order.toObject ? order.toObject() : order;
-    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+    if (!order && !bulkOrderDoc) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    let enrichedOrder = null;
+
+    if (isBulkOrder && bulkOrderDoc) {
+      if (req.user) {
+        const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
+        const bulkUserIdStr = bulkOrderDoc.userId ? bulkOrderDoc.userId.toString() : "";
+        const bulkSellerIdStr = bulkOrderDoc.sellerId ? bulkOrderDoc.sellerId.toString() : "";
+        const isOwner = Boolean(bulkUserIdStr && reqUserIdStr && bulkUserIdStr === reqUserIdStr);
+        const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
+        const isAwardedSeller = Boolean(bulkSellerIdStr && reqUserIdStr && bulkSellerIdStr === reqUserIdStr);
+
+        if (!isOwner && !isAdmin && !isAwardedSeller) {
+          return res.status(403).json({ message: "Not authorized to download this invoice" });
+        }
+      }
+
+      const winningQuote = (bulkOrderDoc.quotations || []).find(
+        q => String(q._id) === String(bulkOrderDoc.acceptedQuoteId) ||
+             q.negotiationStage === "seller_accepted_counter" ||
+             q.status === "approved" ||
+             q.status === "buyer_accepted"
+      );
+
+      const totalQty = Number(bulkOrderDoc.totalQuantity || (Array.isArray(bulkOrderDoc.requirements) ? bulkOrderDoc.requirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0) : 100));
+      const totalAmount = Number(bulkOrderDoc.overallBudget || bulkOrderDoc.targetBudgetPerKit || winningQuote?.quoteAmount || 0);
+      const avgPrice = totalQty > 0 ? Math.round(totalAmount / totalQty) : 0;
+      const advancePaid = Number(bulkOrderDoc.advancePaidAmount || 0);
+      const remainingAmount = Math.max(0, totalAmount - advancePaid);
+      const isPaid = bulkOrderDoc.remainingPaymentStatus === "paid" || bulkOrderDoc.status === "completed" || bulkOrderDoc.status === "delivered";
+
+      const items = Array.isArray(bulkOrderDoc.requirements) && bulkOrderDoc.requirements.length > 0
+        ? bulkOrderDoc.requirements.map((r, i) => {
+            const q = Number(r.quantity || 1);
+            const p = Number(r.sellerPricePerUnit || (winningQuote?.itemPrices?.find(ip => String(ip.itemId || ip.itemName) === String(r._id || r.itemName))?.pricePerUnit) || avgPrice || 100);
+            return {
+              id: r._id || i + 1,
+              name: r.itemName || "Institutional Uniform / Supply Kit",
+              price: p,
+              finalPrice: p,
+              quantity: q,
+              total: p * q,
+              size: r.size || "",
+              category: r.category || "School Uniform",
+              gst: 5,
+              gstPercent: 5,
+              sellerName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "BookVardi Verified Seller",
+              storeName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "BookVardi Verified Seller"
+            };
+          })
+        : [{
+            id: 1,
+            name: "Institutional Bulk Supply Kit",
+            price: avgPrice || totalAmount,
+            finalPrice: avgPrice || totalAmount,
+            quantity: totalQty || 1,
+            total: totalAmount,
+            category: "School Uniform",
+            gst: 5,
+            gstPercent: 5,
+            sellerName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "BookVardi Verified Seller",
+            storeName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "BookVardi Verified Seller"
+          }];
+
+      const formattedStatus = (bulkOrderDoc.status === "completed" || bulkOrderDoc.status === "delivered")
+        ? "Delivered"
+        : (bulkOrderDoc.status === "out_for_delivery" ? "Out for Delivery" : (bulkOrderDoc.status === "confirmed" ? "Confirmed" : (bulkOrderDoc.status || "Confirmed")));
+
+      enrichedOrder = {
+        _id: bulkOrderDoc._id,
+        orderId: bulkOrderDoc.referenceId || String(bulkOrderDoc._id),
+        id: bulkOrderDoc.referenceId || String(bulkOrderDoc._id),
+        isBulkOrder: true,
+        createdAt: bulkOrderDoc.createdAt || new Date(),
+        date: bulkOrderDoc.createdAt ? new Date(bulkOrderDoc.createdAt).toLocaleDateString("en-IN") : new Date().toLocaleDateString("en-IN"),
+        overallStatus: formattedStatus,
+        status: formattedStatus,
+        paymentStatus: isPaid ? "paid" : (bulkOrderDoc.advancePaymentStatus === "paid" ? "partially_paid" : "pending"),
+        paymentMethod: "Online / UPI (Razorpay)",
+        customerName: bulkOrderDoc.institutionName || bulkOrderDoc.contactName || "School Representative",
+        customerPhone: bulkOrderDoc.contactPhone || bulkOrderDoc.userPhone || "",
+        customerEmail: bulkOrderDoc.contactEmail || bulkOrderDoc.userEmail || "",
+        customer: {
+          name: bulkOrderDoc.institutionName || bulkOrderDoc.contactName || "School Representative",
+          phone: bulkOrderDoc.contactPhone || bulkOrderDoc.userPhone || "",
+          email: bulkOrderDoc.contactEmail || bulkOrderDoc.userEmail || ""
+        },
+        shippingAddress: {
+          name: bulkOrderDoc.institutionName || bulkOrderDoc.contactName || "School Representative",
+          street: bulkOrderDoc.address || "Campus Address",
+          city: bulkOrderDoc.city || "",
+          state: bulkOrderDoc.state || "",
+          pincode: bulkOrderDoc.pincode || "",
+          phone: bulkOrderDoc.contactPhone || bulkOrderDoc.userPhone || ""
+        },
+        items,
+        totalAmount,
+        total: totalAmount,
+        subtotal: totalAmount,
+        advancePaidAmount: advancePaid,
+        remainingAmount: remainingAmount,
+        sellerDetails: {
+          sellerId: winningQuote?.sellerId || bulkOrderDoc.sellerId || null,
+          storeName: winningQuote?.sellerStoreName || winningQuote?.sellerName || "BookVardi Verified Seller",
+          sellerName: winningQuote?.sellerName || winningQuote?.sellerStoreName || "BookVardi Verified Seller",
+          phone: winningQuote?.sellerPhone || "",
+          email: winningQuote?.sellerEmail || "",
+          address: winningQuote?.sellerCity || ""
+        }
+      };
+    } else {
+      if (req.user) {
+        const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
+        const orderUserIdStr = order.userId ? (order.userId._id ? order.userId._id.toString() : order.userId.toString()) : "";
+        const isOwner = Boolean(orderUserIdStr && reqUserIdStr && orderUserIdStr === reqUserIdStr);
+        const isAdmin = req.user.role === "admin";
+        const isSeller =
+          req.user.role === "seller" &&
+          order.items.some(
+            (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === reqUserIdStr
+          );
+
+        if (!isOwner && !isAdmin && !isSeller) {
+          return res.status(403).json({ message: "Not authorized to download this invoice" });
+        }
+      }
+
+      const orderObj = order.toObject ? order.toObject() : order;
+      enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+    }
 
     const orderStatusVal = String(enrichedOrder.overallStatus || enrichedOrder.status || "").toLowerCase().trim();
     const { generateTaxInvoicePDF, generateCreditNotePDF } = await import("../services/invoiceService.js");
@@ -1374,11 +1503,27 @@ export const downloadInvoice = async (req, res) => {
       return pdfDoc.pipe(res);
     }
 
-    // STRICT PAYMENT STATUS VERIFICATION CHECK: Invoice only created after payment status is verified & confirmed ("paid")
+    // STRICT ORDER CONFIRMATION CHECK: Invoice is generated ONLY when order is confirmed by seller/platform (Pending orders are locked)
     const paymentStatus = String(enrichedOrder.paymentStatus || "").toLowerCase().trim();
-    if (paymentStatus !== "paid") {
+    const isPending = !orderStatusVal || orderStatusVal === "pending" || orderStatusVal === "unconfirmed" || orderStatusVal === "placed";
+
+    const confirmedStatuses = [
+      "confirmed",
+      "processing",
+      "packed",
+      "shipped",
+      "dispatched",
+      "out_for_delivery",
+      "out for delivery",
+      "delivered",
+      "completed"
+    ];
+
+    const isConfirmed = !isPending && (confirmedStatuses.includes(orderStatusVal) || paymentStatus === "paid" || paymentStatus === "partially_paid" || enrichedOrder.isBulkOrder);
+
+    if (!isConfirmed) {
       return res.status(400).json({
-        message: `Tax Invoice cannot be created until payment status is verified and confirmed. Current payment status: ${enrichedOrder.paymentStatus || "pending"}.`
+        message: `Tax Invoice can only be generated strictly after the order is confirmed by the seller/platform. Current order status: '${enrichedOrder.overallStatus || enrichedOrder.status || "Pending"}'.`
       });
     }
 

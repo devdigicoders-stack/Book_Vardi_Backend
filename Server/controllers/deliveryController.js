@@ -93,7 +93,7 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       const totalAmount = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || winningQuote?.quoteAmount || 0);
       const advancePaidAmount = Number(bulkOrder.advancePaidAmount || 0);
       const remainingAmount = Math.max(0, totalAmount - advancePaidAmount);
-      const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed";
+      const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed" || bulkOrder.status === "delivered";
 
       const sanitizedSelfDetails = {
         deliveryPersonName: bulkOrder.deliveryDetails?.deliveryBoyName || "Store Fleet Rider",
@@ -219,6 +219,11 @@ export const getDeliveryPartnerOrder = async (req, res) => {
 export const resendCustomerDeliveryOtp = async (req, res) => {
   try {
     const { token } = req.params;
+    const isCashCollected = Boolean(
+      req.body?.isCashCollected ||
+      req.query?.isCashCollected === 'true' ||
+      req.body?.isPaymentVerified
+    );
     const lookup = await findOrderByTokenOrId(token);
 
     if (!lookup) {
@@ -229,6 +234,15 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
 
     if (lookup.isBulk) {
       const bulkOrder = lookup.order;
+      const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed" || bulkOrder.status === "delivered";
+
+      if (!isPaid) {
+        return res.status(400).json({
+          success: false,
+          message: "🔒 Remaining balance for School Bulk Order must be paid online via Razorpay / UPI before sending OTP."
+        });
+      }
+
       if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
       bulkOrder.deliveryDetails.deliveryOtp = freshOtp;
       await bulkOrder.save();
@@ -244,6 +258,14 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     }
 
     const order = lookup.order;
+    const isPaid = order.paymentStatus === "paid" || order.paymentStatus === "Paid" || isCashCollected;
+
+    if (!isPaid) {
+      return res.status(400).json({
+        success: false,
+        message: "🔒 Cash payment must be collected & verified by executive before sending OTP."
+      });
+    }
 
     if (!order.selfDeliveryDetails) {
       order.selfDeliveryDetails = {};
@@ -277,7 +299,7 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
 export const verifyDeliveryOtp = async (req, res) => {
   try {
     const { token } = req.params;
-    const { otp } = req.body;
+    const { otp, isCashCollected, isPaymentVerified } = req.body;
 
     if (!otp) {
       return res.status(400).json({ success: false, message: "4-digit Delivery OTP is required." });
@@ -289,8 +311,19 @@ export const verifyDeliveryOtp = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
 
+    const hasConfirmedPayment = Boolean(isCashCollected || isPaymentVerified);
+
     if (lookup.isBulk) {
       const bulkOrder = lookup.order;
+      const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed" || bulkOrder.status === "delivered";
+
+      if (!isPaid) {
+        return res.status(400).json({
+          success: false,
+          message: "🔒 Remaining balance for School Bulk Order must be paid online via Razorpay / UPI before delivery OTP can be verified."
+        });
+      }
+
       const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || "4829").trim();
       const providedOtp = String(otp).trim();
 
@@ -301,24 +334,36 @@ export const verifyDeliveryOtp = async (req, res) => {
         });
       }
 
-      bulkOrder.status = "completed";
+      bulkOrder.status = "delivered";
+      bulkOrder.overallStatus = "Delivered";
+      bulkOrder.deliveryStatus = "Delivered";
       if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
       bulkOrder.deliveryDetails.deliveredAt = new Date();
+      bulkOrder.deliveryDetails.status = "Delivered";
       if (bulkOrder.remainingPaymentStatus !== "paid") {
         bulkOrder.remainingPaymentStatus = "paid";
         bulkOrder.remainingPaidAt = new Date();
-        bulkOrder.remainingPaymentMode = "Handover / Delivery Verified";
+        bulkOrder.remainingPaymentMode = "Razorpay / UPI Verified";
       }
       await bulkOrder.save();
 
       return res.json({
         success: true,
-        message: "🎉 Delivery OTP verified successfully! Bulk order marked as Completed.",
-        orderId: bulkOrder.referenceId
+        message: "🎉 Delivery OTP verified successfully! Bulk order marked as Delivered.",
+        orderId: bulkOrder.referenceId,
+        status: "delivered"
       });
     }
 
     const order = lookup.order;
+    const isPaid = order.paymentStatus === "paid" || order.paymentStatus === "Paid" || hasConfirmedPayment;
+
+    if (!isPaid) {
+      return res.status(400).json({
+        success: false,
+        message: "🔒 Payment must be collected & verified before delivery OTP can be verified."
+      });
+    }
 
     const expectedOtp = String(
       order.selfDeliveryDetails?.deliveryOtp ||
@@ -339,16 +384,26 @@ export const verifyDeliveryOtp = async (req, res) => {
     const previousStatus = order.overallStatus;
     const isCodOrder = String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid";
     const deliveryExecName = order.selfDeliveryDetails?.deliveryPersonName || "Delivery Executive";
+    const now = new Date();
 
     order.overallStatus = "Delivered";
     order.status = "Delivered";
+    order.deliveryStatus = "Delivered";
     order.paymentStatus = "paid";
-    order.codCollectedAt = new Date();
+    order.deliveredAt = now;
+    order.codCollectedAt = now;
     order.codCollectedBy = deliveryExecName;
+
+    if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
+    order.selfDeliveryDetails.deliveredAt = now;
+    order.selfDeliveryDetails.status = "Delivered";
 
     if (Array.isArray(order.items)) {
       order.items.forEach((it) => {
         it.status = "Delivered";
+        if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+        it.selfDeliveryDetails.deliveredAt = now;
+        it.selfDeliveryDetails.status = "Delivered";
       });
     }
 
@@ -360,7 +415,8 @@ export const verifyDeliveryOtp = async (req, res) => {
       description: isCodOrder
         ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
         : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`,
-      timestamp: new Date(),
+      location: order.shippingAddress?.city || order.shippingAddress?.town || "Destination Address",
+      timestamp: now,
       updatedBy: "Delivery Executive"
     });
 

@@ -160,7 +160,7 @@ const orderSchema = new mongoose.Schema(
     },
     overallStatus: {
       type: String,
-      default: "Processing"
+      default: "Pending"
     },
     deliveryMode: {
       type: String,

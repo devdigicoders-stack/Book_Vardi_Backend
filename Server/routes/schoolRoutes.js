@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import School from "../models/School.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { cacheMiddleware, clearCache } from "../utils/cache.js";
+import { downloadInvoice } from "../controllers/orderController.js";
 
 const router = express.Router();
 
@@ -258,6 +259,7 @@ import {
   getSchoolOrderById,
   getAdminSchoolOrders,
   distributeSchoolOrder,
+  setBulkOrderPrepaymentPercentage,
   approveSellerQuotation,
   confirmSellerAcceptance,
   confirmBuyerAcceptance,
@@ -285,6 +287,9 @@ router.get("/bulk-orders/:id", getSchoolOrderById);
 
 // PATCH Admin Distribute Bulk Order (Direct, Selected, Broadcast)
 router.patch("/bulk-orders/:id/distribute", distributeSchoolOrder);
+
+// PATCH Admin Set Bulk Order Prepayment Percentage
+router.patch("/bulk-orders/:id/prepayment-percentage", setBulkOrderPrepaymentPercentage);
 
 // POST Buyer Submit 2nd Version / Counter-Demand on a Seller Quotation
 router.post("/bulk-orders/:id/quotations/:quoteId/counter", submitBuyerCounterDemand);
@@ -321,6 +326,9 @@ router.patch("/bulk-orders/:id/item-prices", updateItemSellerPrices);
 
 // GET Download PDF Partial Advance Payment Receipt
 router.get("/bulk-orders/:id/advance-receipt", downloadAdvanceReceipt);
+
+// GET Download PDF Official Bulk Order Tax Invoice & PO Certificate
+router.get("/bulk-orders/:id/invoice", downloadInvoice);
 
 // PATCH/POST Record / Confirm Partial Advance Payment
 router.patch("/bulk-orders/:id/advance-payment", recordAdvancePayment);

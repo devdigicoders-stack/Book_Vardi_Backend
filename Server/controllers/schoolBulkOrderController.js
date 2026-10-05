@@ -267,6 +267,35 @@ export const getSchoolOrderById = async (req, res) => {
     }
 
     if (isSellerReq && sellerAuthInfo) {
+      const requestingSellerId = String(sellerAuthInfo.id || sellerAuthInfo._id || "").trim();
+
+      // Verify if requesting seller is authorized to access this order
+      const assignedSellerIdStr = order.sellerId ? String(order.sellerId._id || order.sellerId.id || order.sellerId) : "";
+      const isAssignedSeller = Boolean(assignedSellerIdStr && requestingSellerId && assignedSellerIdStr === requestingSellerId);
+
+      const isInvitedSeller = Array.isArray(order.invitedSellerIds) && order.invitedSellerIds.some(s => {
+        const sId = String(s._id || s.id || s);
+        return sId && sId === requestingSellerId;
+      });
+
+      const isUnassignedBroadcast = (!order.assignmentMode || order.assignmentMode === "broadcast") &&
+        !assignedSellerIdStr &&
+        !order.acceptedQuoteId &&
+        ["published", "pending", "quoted", "unassigned", "open", "under_review"].includes(String(order.status || "").toLowerCase());
+
+      const sellerQuoted = Array.isArray(order.quotations) && order.quotations.some(q => {
+        const qSellerId = String(q.sellerId?._id || q.sellerId?.id || q.sellerId || "");
+        return qSellerId && qSellerId === requestingSellerId;
+      });
+      const notAwardedToAnother = !assignedSellerIdStr || assignedSellerIdStr === requestingSellerId;
+      const isAuthorizedSellerQuoted = sellerQuoted && notAwardedToAnother;
+
+      const isAuthorized = isAssignedSeller || isInvitedSeller || isUnassignedBroadcast || isAuthorizedSellerQuoted;
+
+      if (!isAuthorized) {
+        return res.status(403).json({ success: false, message: "Access denied. This bulk order is private to another seller." });
+      }
+
       const sanitized = sanitizeOrderForSeller(order, sellerAuthInfo);
       return res.json({ success: true, order: sanitized });
     }
@@ -403,16 +432,30 @@ export const getSellerSchoolOrders = async (req, res) => {
       req.headers["x-user-phone"]
     ].filter(Boolean);
 
+    const matchIds = [...validObjectIds, ...stringIds];
+
+    // Open broadcast orders (unassigned to any specific seller yet)
+    const openBroadcastCondition = {
+      $or: [
+        { assignmentMode: "broadcast" },
+        { assignmentMode: { $exists: false } }
+      ],
+      $and: [
+        { $or: [{ sellerId: { $exists: false } }, { sellerId: null }] },
+        { $or: [{ acceptedQuoteId: { $exists: false } }, { acceptedQuoteId: null }] }
+      ],
+      status: { $in: ["published", "pending", "quoted", "unassigned", "open", "under_review"] }
+    };
+
     const queryConditions = [
-      { assignmentMode: "broadcast" }
+      openBroadcastCondition
     ];
 
-    if (validObjectIds.length > 0 || stringIds.length > 0) {
-      const matchIds = [...validObjectIds, ...stringIds];
+    // Orders explicitly assigned or invited to this seller
+    if (matchIds.length > 0) {
       queryConditions.push(
         { sellerId: { $in: matchIds } },
-        { invitedSellerIds: { $in: matchIds } },
-        { "quotations.sellerId": { $in: matchIds } }
+        { invitedSellerIds: { $in: matchIds } }
       );
     }
 
@@ -442,11 +485,111 @@ export const acceptSchoolOrderDirect = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
+    const assignedSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId.id || bulkOrder.sellerId) : "";
+    if (assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+      return res.status(403).json({ success: false, message: "This bulk order has already been assigned or accepted by another seller." });
+    }
+    if ((bulkOrder.assignmentMode === "direct" || bulkOrder.assignmentMode === "selected") && !assignedSellerIdStr) {
+      const isInvited = Array.isArray(bulkOrder.invitedSellerIds) && bulkOrder.invitedSellerIds.some(s => String(s._id || s.id || s) === String(sellerId));
+      if (!isInvited) {
+        return res.status(403).json({ success: false, message: "This bulk order is private and was not assigned or invited to you." });
+      }
+    }
+
     const seller = await Seller.findById(sellerId);
-    const sellerName = seller ? (seller.storeName || seller.businessName || seller.name || "Seller") : "Seller";
+    const sellerName = seller ? (seller.ownerName || seller.name || "Vendor") : "Vendor";
+    const sellerStoreName = seller ? (seller.storeName || seller.businessName || seller.name || "Store") : "Store";
+    const sellerPhone = seller ? (seller.phone || "") : "";
+    const sellerCity = seller ? (seller.city || "") : "";
 
     bulkOrder.sellerId = sellerId;
-    bulkOrder.status = "assigned";
+
+    // Ensure seller acceptance generates a formal quotation record so quotations.length reflects to Admin & Buyer
+    if (!Array.isArray(bulkOrder.quotations)) {
+      bulkOrder.quotations = [];
+    }
+
+    const existingIndex = bulkOrder.quotations.findIndex(
+      q => String(q.sellerId) === String(sellerId)
+    );
+
+    const totalQty = Array.isArray(bulkOrder.requirements)
+      ? bulkOrder.requirements.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0)
+      : (bulkOrder.totalQuantity || 100);
+
+    const targetBudgetNum = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || 0);
+    const calculatedQuoteAmount = targetBudgetNum > 0 ? targetBudgetNum : 50000;
+    const avgUnitPrice = totalQty > 0 ? Math.round(calculatedQuoteAmount / totalQty) : 500;
+
+    const advPct = Number(bulkOrder.prepaymentPercentage || bulkOrder.sellerAdvancePercentage || 20);
+    const advAmt = Math.round((calculatedQuoteAmount * advPct) / 100);
+
+    const formattedItemPrices = Array.isArray(bulkOrder.requirements) && bulkOrder.requirements.length > 0
+      ? bulkOrder.requirements.map((r, idx) => ({
+          itemId: String(r._id || idx),
+          itemName: r.itemName || "Bulk Item",
+          category: r.category || "General Bulk Procurement",
+          quantity: Number(r.quantity || 1),
+          customerBudget: Number(r.budgetPerUnit || 0),
+          pricePerUnit: Number(r.sellerPricePerUnit || r.budgetPerUnit || avgUnitPrice),
+          totalPrice: Number(r.quantity || 1) * Number(r.sellerPricePerUnit || r.budgetPerUnit || avgUnitPrice),
+          discountTierNote: "Accepted direct fulfillment offer"
+        }))
+      : [];
+
+    if (existingIndex >= 0) {
+      bulkOrder.quotations[existingIndex].status = "submitted";
+      bulkOrder.quotations[existingIndex].negotiationStage = "seller_quoted";
+    } else {
+      const initialRound = {
+        round: 1,
+        version: 1,
+        senderRole: "seller",
+        senderName: sellerStoreName,
+        senderId: String(sellerId),
+        quoteAmount: calculatedQuoteAmount,
+        unitPrice: avgUnitPrice,
+        itemPrices: formattedItemPrices,
+        estimatedDeliveryDays: 7,
+        prepaymentType: "percentage",
+        prepaymentPercentage: advPct,
+        prepaymentAmount: advAmt,
+        prepaymentRaised: false,
+        deliveryDaysRaised: false,
+        notes: "Seller directly accepted bulk order request",
+        createdAt: new Date()
+      };
+
+      bulkOrder.quotations.push({
+        sellerId,
+        sellerName,
+        sellerStoreName,
+        sellerPhone,
+        sellerCity,
+        quoteAmount: calculatedQuoteAmount,
+        unitPrice: avgUnitPrice,
+        itemPrices: formattedItemPrices,
+        volumeDiscountNote: "Direct Seller Acceptance - Full Fleet Availability",
+        estimatedDeliveryDays: 7,
+        notes: "Accepted direct fulfillment for institution bulk requirement",
+        sellerAdvanceType: "percentage",
+        sellerAdvancePercentage: advPct,
+        sellerAdvanceAmount: advAmt,
+        prepaymentType: "percentage",
+        prepaymentPercentage: advPct,
+        prepaymentAmount: advAmt,
+        currentVersion: 1,
+        negotiationStage: "seller_quoted",
+        negotiationHistory: [initialRound],
+        status: "submitted",
+        submittedAt: new Date()
+      });
+    }
+
+    if (bulkOrder.status === "pending" || bulkOrder.status === "published" || bulkOrder.status === "unassigned" || bulkOrder.status === "assigned") {
+      bulkOrder.status = "quoted";
+    }
+
     await bulkOrder.save();
 
     const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers["x-seller-id"]].filter(Boolean).map(String);
@@ -459,6 +602,50 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to accept school bulk order", error: error.message });
+  }
+};
+
+// PATCH Set Admin Prepayment Percentage on Bulk Order
+export const setBulkOrderPrepaymentPercentage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { prepaymentPercentage } = req.body;
+
+    const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
+    if (!bulkOrder) {
+      return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const pct = Math.max(0, Math.min(100, Number(prepaymentPercentage) || 0));
+    bulkOrder.prepaymentPercentage = pct;
+    bulkOrder.sellerAdvancePercentage = pct;
+
+    const baseAmount = Number(bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || 0);
+    const orderPrepayAmt = baseAmount > 0 ? Math.round((baseAmount * pct) / 100) : 0;
+    bulkOrder.prepaymentAmount = orderPrepayAmt;
+    bulkOrder.sellerAdvanceAmount = orderPrepayAmt;
+
+    // Recalculate advance prepayment amount for each quotation
+    if (Array.isArray(bulkOrder.quotations)) {
+      bulkOrder.quotations.forEach(quote => {
+        quote.prepaymentPercentage = pct;
+        quote.sellerAdvancePercentage = pct;
+        const qAmt = Number(quote.quoteAmount || 0);
+        const qPrepayAmt = qAmt > 0 ? Math.round((qAmt * pct) / 100) : 0;
+        quote.prepaymentAmount = qPrepayAmt;
+        quote.sellerAdvanceAmount = qPrepayAmt;
+      });
+    }
+
+    await bulkOrder.save();
+
+    return res.json({
+      success: true,
+      message: `Admin set bulk order prepayment to ${pct}% (₹${orderPrepayAmt.toLocaleString()})`,
+      order: bulkOrder
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to set prepayment percentage", error: error.message });
   }
 };
 
@@ -488,6 +675,17 @@ export const submitSellerQuotation = async (req, res) => {
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const assignedSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId.id || bulkOrder.sellerId) : "";
+    if (assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+      return res.status(403).json({ success: false, message: "This bulk order has already been awarded to another seller." });
+    }
+    if ((bulkOrder.assignmentMode === "direct" || bulkOrder.assignmentMode === "selected") && !assignedSellerIdStr) {
+      const isInvited = Array.isArray(bulkOrder.invitedSellerIds) && bulkOrder.invitedSellerIds.some(s => String(s._id || s.id || s) === String(sellerId));
+      if (!isInvited) {
+        return res.status(403).json({ success: false, message: "This bulk order is private and was not assigned or invited to you." });
+      }
     }
 
     const seller = await Seller.findById(sellerId);
@@ -1523,13 +1721,11 @@ export const updateSellerSchoolOrder = async (req, res) => {
     const currentUserId = String(req.user?.id || req.seller?._id || req.user?._id || "");
     const orderSellerId = String(bulkOrder.sellerId?._id || bulkOrder.sellerId || "");
 
-    if (orderSellerId && currentUserId && orderSellerId !== currentUserId && req.user?.role !== "admin") {
-      const hasQuote = Array.isArray(bulkOrder.quotations) && bulkOrder.quotations.some(
-        q => String(q.sellerId) === currentUserId
-      );
-      if (!hasQuote) {
-        return res.status(403).json({ message: "Access denied. You can only update your own school bulk orders." });
-      }
+    if (orderSellerId && currentUserId && orderSellerId !== currentUserId && req.user?.role !== "admin" && req.user?.role !== "super_admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Only the assigned fulfilling seller can update fulfillment details for this bulk order."
+      });
     }
 
     // Status progression: packed, out for delivery, received
@@ -1654,6 +1850,19 @@ export const downloadAdvanceReceipt = async (req, res) => {
     const bulkOrder = await SchoolBulkOrder.findOne(query).populate("sellerId", "storeName name phone email businessName city");
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    if (req.user) {
+      const reqUserIdStr = String(req.user.id || req.user._id || "");
+      const bulkUserIdStr = bulkOrder.userId ? String(bulkOrder.userId) : "";
+      const bulkSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId) : "";
+      const isOwner = Boolean(bulkUserIdStr && reqUserIdStr && bulkUserIdStr === reqUserIdStr);
+      const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
+      const isAwardedSeller = Boolean(bulkSellerIdStr && reqUserIdStr && bulkSellerIdStr === reqUserIdStr);
+
+      if (!isOwner && !isAdmin && !isAwardedSeller) {
+        return res.status(403).json({ success: false, message: "Not authorized to download advance receipt for this bulk order" });
+      }
     }
 
     const { generatePartialAdvanceReceiptPDF } = await import("../services/receiptService.js");
@@ -2084,12 +2293,10 @@ export const verifySchoolBulkRemainingPayment = async (req, res) => {
     bulkOrder.remainingReceiptNumber = `REC-REM-${bulkOrder.referenceId}`;
     bulkOrder.remainingPaidAt = new Date();
     bulkOrder.remainingPaymentStatus = "paid";
-    bulkOrder.status = "completed"; // Order marked completed when user pays on UPI/Razorpay for remaining payment
-
-    if (!bulkOrder.deliveryDetails) {
-      bulkOrder.deliveryDetails = {};
+    // Keep status as active delivery status until customer OTP verification
+    if (bulkOrder.status === "pending_balance" || bulkOrder.status === "confirmed") {
+      bulkOrder.status = "out_for_delivery";
     }
-    bulkOrder.deliveryDetails.deliveredAt = new Date();
 
     if (winningQuote) {
       if (!Array.isArray(winningQuote.negotiationHistory)) {
