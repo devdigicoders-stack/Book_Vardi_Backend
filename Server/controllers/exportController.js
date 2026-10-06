@@ -42,7 +42,7 @@ export const exportOrdersAdmin = async (req, res) => {
     const json2csvParser = new Parser();
     const csv = json2csvParser.parse(flatData);
 
-    res.header("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv");
     res.attachment(`SchoolKart_Orders_Report_${Date.now()}.csv`);
     return res.send(csv);
   } catch (error) {
@@ -78,7 +78,7 @@ export const exportProductsAdmin = async (req, res) => {
     const json2csvParser = new Parser();
     const csv = json2csvParser.parse(flatData);
 
-    res.header("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv");
     res.attachment(`SchoolKart_Products_Catalog_${Date.now()}.csv`);
     return res.send(csv);
   } catch (error) {
@@ -104,7 +104,7 @@ export const exportUsersAdmin = async (req, res) => {
     const json2csvParser = new Parser();
     const csv = json2csvParser.parse(flatData);
 
-    res.header("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv");
     res.attachment(`SchoolKart_Customers_List_${Date.now()}.csv`);
     return res.send(csv);
   } catch (error) {
@@ -137,7 +137,7 @@ export const exportSellersAdmin = async (req, res) => {
     const json2csvParser = new Parser();
     const csv = json2csvParser.parse(flatData);
 
-    res.header("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv");
     res.attachment(`SchoolKart_Sellers_Report_${Date.now()}.csv`);
     return res.send(csv);
   } catch (error) {
@@ -148,42 +148,59 @@ export const exportSellersAdmin = async (req, res) => {
 // 5. Seller: Export Own Orders to Excel/CSV
 export const exportSellerOrders = async (req, res) => {
   try {
-    const sellerId = req.user.id;
-    const orders = await Order.find({ "items.sellerId": sellerId }).sort({ createdAt: -1 });
+    const sellerId = req.user?.id || req.user?._id || req.seller?._id || req.seller?.id || req.headers["x-seller-id"];
+    const orders = await Order.find({
+      $or: [
+        { "items.sellerId": sellerId },
+        { sellerId: sellerId }
+      ]
+    }).sort({ createdAt: -1 });
 
     const flatData = [];
     orders.forEach((order) => {
-      const sellerItems = order.items.filter(
-        (item) => item.sellerId && item.sellerId.toString() === sellerId
+      const sellerItems = (order.items || []).filter(
+        (item) => !sellerId || (item.sellerId && String(item.sellerId._id || item.sellerId) === String(sellerId))
       );
 
-      sellerItems.forEach((item) => {
+      const itemsToExport = sellerItems.length > 0 ? sellerItems : (order.items || []);
+
+      itemsToExport.forEach((item) => {
         flatData.push({
           "Order ID": order.orderId || order._id.toString(),
-          "Order Date": new Date(order.createdAt).toISOString().split("T")[0],
-          "Customer Name": order.customer?.name || "Customer",
-          "Customer Phone": order.customer?.phone || "N/A",
-          "Delivery Address": `${order.shippingAddress?.street || order.address || ""}, ${order.shippingAddress?.city || ""}`,
-          "Product Name": item.name,
+          "Order Date": order.createdAt ? new Date(order.createdAt).toISOString().split("T")[0] : "N/A",
+          "Customer Name": order.customer?.name || order.userName || "Customer",
+          "Customer Phone": order.customer?.phone || order.userPhone || "N/A",
+          "Delivery Address": typeof order.shippingAddress === "string" ? order.shippingAddress : `${order.shippingAddress?.street || order.address || ""}, ${order.shippingAddress?.city || ""}`,
+          "Product Name": item.name || "Product Item",
           "Size": item.size || "Standard",
           "Age": item.age || "Standard",
-          "Quantity": item.quantity,
-          "Unit Price (INR)": item.finalPrice || item.price,
-          "Total Revenue (INR)": (item.finalPrice || item.price) * item.quantity,
-          "Fulfillment Type": item.deliveryType || "Standard",
-          "Item Status": item.status.toUpperCase(),
-          "Payment Status": order.paymentStatus.toUpperCase()
+          "Quantity": item.quantity || 1,
+          "Unit Price (INR)": item.finalPrice || item.price || 0,
+          "Total Revenue (INR)": (item.finalPrice || item.price || 0) * (item.quantity || 1),
+          "Fulfillment Type": item.deliveryType || order.deliveryMode || "Standard",
+          "Item Status": String(item.status || order.overallStatus || order.status || "Pending").toUpperCase(),
+          "Payment Status": String(order.paymentStatus || "Pending").toUpperCase()
         });
       });
     });
 
-    const json2csvParser = new Parser();
+    const fields = [
+      "Order ID", "Order Date", "Customer Name", "Customer Phone", "Delivery Address",
+      "Product Name", "Size", "Age", "Quantity", "Unit Price (INR)", "Total Revenue (INR)",
+      "Fulfillment Type", "Item Status", "Payment Status"
+    ];
+    const json2csvParser = new Parser({ fields });
     const csv = json2csvParser.parse(flatData);
 
-    res.header("Content-Type", "text/csv");
-    res.attachment(`My_Store_Orders_${Date.now()}.csv`);
+    const filename = `My_Store_Orders_${Date.now()}.csv`;
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    if (typeof res.attachment === "function") {
+      res.attachment(filename);
+    }
     return res.send(csv);
   } catch (error) {
+    console.error("Export seller orders error:", error);
     res.status(500).json({ message: "Failed to export seller orders", error: error.message });
   }
 };

@@ -278,10 +278,10 @@ export const getSchoolOrderById = async (req, res) => {
         return sId && sId === requestingSellerId;
       });
 
-      const isUnassignedBroadcast = (!order.assignmentMode || order.assignmentMode === "broadcast") &&
+      const isUnassignedBroadcast = (order.assignmentMode === "broadcast" || order.isGlobalRfq || order.isGlobal || order.isPublic) &&
         !assignedSellerIdStr &&
         !order.acceptedQuoteId &&
-        ["published", "pending", "quoted", "unassigned", "open", "under_review"].includes(String(order.status || "").toLowerCase());
+        !["completed", "fulfilled", "cancelled", "rejected"].includes(String(order.status || "").toLowerCase());
 
       const sellerQuoted = Array.isArray(order.quotations) && order.quotations.some(q => {
         const qSellerId = String(q.sellerId?._id || q.sellerId?.id || q.sellerId || "");
@@ -371,6 +371,9 @@ export const distributeSchoolOrder = async (req, res) => {
       }
       bulkOrder.sellerId = sellerId;
       bulkOrder.invitedSellerIds = [];
+      bulkOrder.isGlobalRfq = false;
+      bulkOrder.isGlobal = false;
+      bulkOrder.isPublic = false;
       bulkOrder.status = "assigned";
     } else if (assignmentMode === "selected") {
       if (!Array.isArray(invitedSellerIds) || invitedSellerIds.length === 0) {
@@ -378,14 +381,23 @@ export const distributeSchoolOrder = async (req, res) => {
       }
       bulkOrder.invitedSellerIds = invitedSellerIds;
       bulkOrder.sellerId = null;
+      bulkOrder.isGlobalRfq = false;
+      bulkOrder.isGlobal = false;
+      bulkOrder.isPublic = false;
       bulkOrder.status = "published";
     } else if (assignmentMode === "broadcast") {
       bulkOrder.sellerId = null;
       bulkOrder.invitedSellerIds = [];
+      bulkOrder.isGlobalRfq = true;
+      bulkOrder.isGlobal = true;
+      bulkOrder.isPublic = true;
       bulkOrder.status = "published";
     } else if (assignmentMode === "admin_direct") {
       bulkOrder.sellerId = null;
       bulkOrder.invitedSellerIds = [];
+      bulkOrder.isGlobalRfq = false;
+      bulkOrder.isGlobal = false;
+      bulkOrder.isPublic = false;
       bulkOrder.status = "assigned_to_admin";
       bulkOrder.fulfilledBy = "BookVardi HQ";
     }
@@ -434,17 +446,19 @@ export const getSellerSchoolOrders = async (req, res) => {
 
     const matchIds = [...validObjectIds, ...stringIds];
 
-    // Open broadcast orders (unassigned to any specific seller yet)
+    // Open broadcast / global RFQ orders (unassigned to any specific seller yet)
     const openBroadcastCondition = {
       $or: [
         { assignmentMode: "broadcast" },
-        { assignmentMode: { $exists: false } }
+        { isGlobalRfq: true },
+        { isGlobal: true },
+        { isPublic: true }
       ],
       $and: [
         { $or: [{ sellerId: { $exists: false } }, { sellerId: null }] },
         { $or: [{ acceptedQuoteId: { $exists: false } }, { acceptedQuoteId: null }] }
       ],
-      status: { $in: ["published", "pending", "quoted", "unassigned", "open", "under_review"] }
+      status: { $nin: ["completed", "fulfilled", "cancelled", "rejected", "received"] }
     };
 
     const queryConditions = [
@@ -586,9 +600,19 @@ export const acceptSchoolOrderDirect = async (req, res) => {
       });
     }
 
-    if (bulkOrder.status === "pending" || bulkOrder.status === "published" || bulkOrder.status === "unassigned" || bulkOrder.status === "assigned") {
-      bulkOrder.status = "quoted";
+    const activeQuote = existingIndex >= 0 ? bulkOrder.quotations[existingIndex] : bulkOrder.quotations[bulkOrder.quotations.length - 1];
+    if (activeQuote) {
+      activeQuote.status = "approved";
+      activeQuote.negotiationStage = "approved";
+      bulkOrder.acceptedQuoteId = activeQuote._id;
     }
+
+    bulkOrder.sellerAdvancePercentage = advPct;
+    bulkOrder.sellerAdvanceAmount = advAmt;
+    bulkOrder.prepaymentPercentage = advPct;
+    bulkOrder.prepaymentAmount = advAmt;
+    bulkOrder.status = "accepted";
+    bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
 
     await bulkOrder.save();
 
@@ -1409,8 +1433,8 @@ export const approveSellerQuotation = async (req, res) => {
     // Mark all quotes status & negotiation stages
     bulkOrder.quotations.forEach(q => {
       if (String(q._id) === String(effectiveQuoteId)) {
-        q.status = "buyer_accepted";
-        q.negotiationStage = "buyer_accepted_quote";
+        q.status = "approved";
+        q.negotiationStage = "approved";
       } else {
         q.status = "rejected";
         q.negotiationStage = "rejected";
@@ -1433,7 +1457,7 @@ export const approveSellerQuotation = async (req, res) => {
       prepaymentAmount: winningQuote.prepaymentAmount,
       prepaymentRaised: false,
       deliveryDaysRaised: false,
-      notes: "Quotation accepted by buyer. Awaiting seller confirmation and prepayment request.",
+      notes: "Quotation accepted by buyer! Order approved and ready for buyer online prepayment.",
       createdAt: new Date()
     });
 
@@ -1441,8 +1465,8 @@ export const approveSellerQuotation = async (req, res) => {
     if (winningQuote.sellerId) {
       bulkOrder.sellerId = winningQuote.sellerId;
     }
-    // Set status to buyer_accepted (awaiting seller confirmation)
-    bulkOrder.status = "buyer_accepted";
+    // Set status to accepted so buyer can immediately proceed with online prepayment
+    bulkOrder.status = "accepted";
     bulkOrder.deliveryMode = "self_delivery";
 
     // Handle Buyer updating order size / item counts upon quote acceptance
@@ -1516,13 +1540,13 @@ export const approveSellerQuotation = async (req, res) => {
     bulkOrder.prepaymentAmount = advAmt;
     bulkOrder.prepaymentType = advType;
     bulkOrder.prepaymentTerms = advTerms;
-    bulkOrder.advancePaymentStatus = "agreed";
+    bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
 
     await bulkOrder.save();
 
     res.json({
       success: true,
-      message: `Quotation from ${winningQuote.sellerStoreName || winningQuote.sellerName} accepted by buyer! Awaiting seller confirmation & prepayment request.`,
+      message: `Quotation from ${winningQuote.sellerStoreName || winningQuote.sellerName} accepted by buyer! Order ready for online prepayment.${advAmt > 0 ? ` Required deposit: ₹${advAmt.toLocaleString()} (${advPct}%).` : ""}`,
       order: bulkOrder
     });
   } catch (error) {
@@ -1863,6 +1887,14 @@ export const downloadAdvanceReceipt = async (req, res) => {
       if (!isOwner && !isAdmin && !isAwardedSeller) {
         return res.status(403).json({ success: false, message: "Not authorized to download advance receipt for this bulk order" });
       }
+    }
+
+    const isPrepaymentPaid = bulkOrder.advancePaymentStatus === "paid" || Number(bulkOrder.advancePaidAmount) > 0;
+    if (!isPrepaymentPaid) {
+      return res.status(400).json({
+        success: false,
+        message: "Advance payment receipt cannot be generated before prepayment is completed and verified."
+      });
     }
 
     const { generatePartialAdvanceReceiptPDF } = await import("../services/receiptService.js");

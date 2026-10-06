@@ -227,6 +227,9 @@ const schoolBulkOrderSchema = new mongoose.Schema(
       enum: ["unassigned", "direct", "selected", "broadcast"],
       default: "unassigned"
     },
+    isGlobalRfq: { type: Boolean, default: false },
+    isGlobal: { type: Boolean, default: false },
+    isPublic: { type: Boolean, default: false },
     sellerId: { type: mongoose.Schema.Types.ObjectId, ref: "Seller", index: true }, // Assigned seller
     invitedSellerIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Seller" }],
 

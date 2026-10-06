@@ -17,7 +17,8 @@ const getRazorpayInstance = () => {
 // 1. Create Razorpay Order (POST /api/payments/create-order)
 export const createPayment = async (req, res) => {
   try {
-    const { orderId, amount, currency = "INR", notes = {}, customer } = req.body;
+    const orderId = req.body.orderId || req.body.order_id;
+    const { amount, currency = "INR", notes = {}, customer } = req.body;
 
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ message: "Valid positive amount in INR is required" });
@@ -100,13 +101,11 @@ export const createPayment = async (req, res) => {
 // 2. Verify Razorpay Payment Signature (POST /api/payments/verify)
 export const verifyPayment = async (req, res) => {
   try {
-    const {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
-      orderId,
-      paymentId
-    } = req.body;
+    const razorpay_order_id = req.body.razorpay_order_id || req.body.razorpayOrderId;
+    const razorpay_payment_id = req.body.razorpay_payment_id || req.body.razorpayPaymentId;
+    const razorpay_signature = req.body.razorpay_signature || req.body.razorpaySignature;
+    const orderId = req.body.orderId || req.body.order_id;
+    const paymentId = req.body.paymentId || req.body.paymentDbId;
 
     if (!razorpay_order_id || !razorpay_payment_id) {
       return res.status(400).json({
@@ -115,48 +114,83 @@ export const verifyPayment = async (req, res) => {
       });
     }
 
-    const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";
+    // 1. Check if the payment record exists in the database
+    const payment = await Payment.findOne({
+      $or: [
+        { razorpayOrderId: razorpay_order_id },
+        ...(paymentId ? [{ _id: paymentId }] : [])
+      ]
+    });
 
-    // Cryptographic HMAC SHA256 Signature Verification
-    let isValidSignature = false;
-
-    if (razorpay_signature) {
-      const generatedSignature = crypto
-        .createHmac("sha256", key_secret)
-        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-        .digest("hex");
-
-      isValidSignature = generatedSignature === razorpay_signature;
-    } else {
-      // In development / test environment if signature omitted
-      isValidSignature = process.env.NODE_ENV !== "production";
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: `Payment record not found for Razorpay Order ID '${razorpay_order_id}' in database.`
+      });
     }
 
-    if (!isValidSignature) {
+    if (payment.status === "captured") {
+      return res.status(400).json({
+        success: false,
+        message: "This payment has already been verified and captured."
+      });
+    }
+
+    // 2. Strict Cryptographic HMAC SHA256 Signature Verification
+    const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";
+
+    if (!razorpay_signature) {
+      return res.status(400).json({
+        success: false,
+        message: "razorpay_signature is required for payment verification."
+      });
+    }
+
+    const generatedSignature = crypto
+      .createHmac("sha256", key_secret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    if (generatedSignature !== razorpay_signature) {
       return res.status(400).json({
         success: false,
         message: "Invalid Razorpay payment signature. Verification failed."
       });
     }
 
-    // Update payment record in database
-    const payment = await Payment.findOneAndUpdate(
-      {
-        $or: [
-          { razorpayOrderId: razorpay_order_id },
-          ...(paymentId ? [{ _id: paymentId }] : [])
-        ]
-      },
-      {
-        razorpayPaymentId: razorpay_payment_id,
-        razorpaySignature: razorpay_signature || "",
-        status: "captured"
-      },
-      { new: true }
-    );
+    // 3. Double-check directly with Razorpay API (Ensure payment is genuine on Razorpay)
+    const razorpay = getRazorpayInstance();
+    try {
+      const rzpPayment = await razorpay.payments.fetch(razorpay_payment_id);
+      if (rzpPayment) {
+        if (rzpPayment.order_id && rzpPayment.order_id !== razorpay_order_id) {
+          return res.status(400).json({
+            success: false,
+            message: "Payment ID does not match the Razorpay Order ID on Razorpay servers."
+          });
+        }
+        if (rzpPayment.status !== "captured" && rzpPayment.status !== "authorized") {
+          return res.status(400).json({
+            success: false,
+            message: `Payment status on Razorpay is '${rzpPayment.status}'. Cannot confirm order.`
+          });
+        }
+      }
+    } catch (rzpFetchErr) {
+      return res.status(400).json({
+        success: false,
+        message: `Payment ID '${razorpay_payment_id}' verification failed with Razorpay: ${rzpFetchErr.message}`
+      });
+    }
 
-    // Update main Order status to paid and processing
-    const targetOrderId = orderId || (payment ? payment.orderId : null);
+    // 4. Update payment record in database
+    payment.razorpayPaymentId = razorpay_payment_id;
+    payment.razorpaySignature = razorpay_signature;
+    payment.status = "captured";
+    await payment.save();
+
+    // 5. Update associated main Order status to paid and processing
+    const targetOrderId = orderId || payment.orderId;
     let updatedOrder = null;
 
     if (targetOrderId) {

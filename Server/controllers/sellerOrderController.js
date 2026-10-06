@@ -3,7 +3,7 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
-import { enrichOrdersWithSellerAndConsumer, findOrderById } from "./orderController.js";
+import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus } from "./orderController.js";
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw) => {
@@ -261,9 +261,14 @@ export const getSellerOrders = async (req, res) => {
       const resolvedSubtotal = computedItemsSubtotal;
 
       const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
-      const rawStatus = (o.returnRequest && o.returnRequest.status && !['none', 'n/a', 'no_request'].includes(String(o.returnRequest.status).toLowerCase()))
+      const hasActiveReturnRequest = o.returnRequest &&
+        typeof o.returnRequest === "object" &&
+        Boolean(o.returnRequest.type && !['none', 'n/a', '', 'null'].includes(String(o.returnRequest.type).toLowerCase().trim())) &&
+        Boolean(o.returnRequest.status && !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(o.returnRequest.status).toLowerCase().trim()));
+
+      const rawStatus = hasActiveReturnRequest
         ? o.returnRequest.status
-        : (o.overallStatus || o.status || sellerItemStatus || "Pending");
+        : (o.overallStatus || sellerItemStatus || o.status || "Pending");
 
       const formattedStatus = normalizeOrderStatus(rawStatus);
 
@@ -300,6 +305,7 @@ export const getSellerOrders = async (req, res) => {
         codFee: isMultiSeller ? 0 : codFee,
         itemsCount: orderItems.length,
         status: formattedStatus,
+        overallStatus: formattedStatus,
         rawStatus: rawStatus,
         paymentMethod: o.paymentMethod || "UPI",
         paymentStatus: o.paymentStatus || (String(o.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "Paid"),
@@ -507,8 +513,9 @@ export const updateSellerOrderItemStatus = async (req, res) => {
 
     if (status) {
       item.status = formattedStatus;
-      order.status = formattedStatus;
-      order.overallStatus = formattedStatus;
+      const computedOverall = calculateOverallOrderStatus(order.items);
+      order.status = computedOverall;
+      order.overallStatus = computedOverall;
     }
     if (deliveryType || deliveryMode) {
       item.deliveryType = resolvedMode;
@@ -566,13 +573,14 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       updatedBy: sellerInfo.storeName || "Seller"
     });
 
+    order.markModified('items');
     await order.save();
 
     res.json({
       success: true,
-      message: `Item status updated to ${formattedStatus}`,
+      message: `Item status updated to ${formattedStatus}. Overall order status: ${order.overallStatus}`,
       status: formattedStatus,
-      overallStatus: formattedStatus,
+      overallStatus: order.overallStatus,
       item,
       order
     });
@@ -616,9 +624,10 @@ export const updateSellerOrderStatus = async (req, res) => {
     order.deliveryMode = resolvedMode;
 
     let computedTrackingUrl = trackingUrl || "";
+    let effectiveAwb = "";
     if (resolvedMode === "third_party") {
       if (courierName) order.courierName = courierName;
-      let effectiveAwb = trackingNumber || order.trackingNumber || "";
+      effectiveAwb = trackingNumber || order.trackingNumber || "";
       if (!effectiveAwb && (courierName || order.courierName)) {
         const courierPrefix = String(courierName || order.courierName || "BLUEDART")
           .toUpperCase()
@@ -679,6 +688,10 @@ export const updateSellerOrderStatus = async (req, res) => {
       sellerDetails: sellerInfo
     };
 
+    if (order.returnRequest && (!order.returnRequest.type || ['none', 'n/a', '', 'null'].includes(String(order.returnRequest.type).toLowerCase().trim()))) {
+      updatePayload['returnRequest.status'] = 'no_request';
+    }
+
     if (formattedStatus.toLowerCase().includes("delivered")) {
       updatePayload.deliveredAt = order.deliveredAt || new Date();
     }
@@ -708,33 +721,46 @@ export const updateSellerOrderStatus = async (req, res) => {
     });
     updatePayload.timeline = newTimeline;
 
+    // Also update item statuses in items array for seller's items
+    if (Array.isArray(order.items) && order.items.length > 0) {
+      const sellerIdStr = String(sellerInfo.sellerId || req.user?.id || '').trim();
+      const updatedItems = order.items.map(item => {
+        const itemObj = item.toObject ? item.toObject() : item;
+        const itemSellerId = String(itemObj.sellerId || itemObj.sellerDetails?.sellerId || '').trim();
+        const isBelongingToSeller = !sellerIdStr || !itemSellerId || sellerIdStr === itemSellerId;
+        if (!isBelongingToSeller) {
+          return itemObj;
+        }
+
+        return {
+          ...itemObj,
+          status: formattedStatus,
+          deliveryType: resolvedMode,
+          sellerDetails: sellerInfo,
+          sellerName: sellerInfo.sellerName,
+          storeName: sellerInfo.storeName,
+          sellerPhone: sellerInfo.phone,
+          ...(resolvedMode === "third_party" ? {
+            thirdPartyDetails: {
+              ...itemObj.thirdPartyDetails,
+              courierName: courierName || itemObj.thirdPartyDetails?.courierName || order.courierName,
+              trackingNumber: effectiveAwb || itemObj.thirdPartyDetails?.trackingNumber || order.trackingNumber,
+              trackingUrl: computedTrackingUrl || itemObj.thirdPartyDetails?.trackingUrl,
+              estimatedDeliveryDate: estimatedDeliveryDate || itemObj.thirdPartyDetails?.estimatedDeliveryDate
+            }
+          } : {}),
+          ...(resolvedMode === "self_delivery" && mergedSelf ? { selfDeliveryDetails: mergedSelf } : {})
+        };
+      });
+
+      updatePayload.items = updatedItems;
+      const recomputedOverall = calculateOverallOrderStatus(updatedItems);
+      updatePayload.status = recomputedOverall;
+      updatePayload.overallStatus = recomputedOverall;
+    }
+
     // Update MongoDB directly using updateOne
     await Order.updateOne({ _id: order._id }, { $set: updatePayload });
-
-    // Also update item statuses in items array
-    if (Array.isArray(order.items) && order.items.length > 0) {
-      const updatedItems = order.items.map(item => ({
-        ...(item.toObject ? item.toObject() : item),
-        status: formattedStatus,
-        deliveryType: resolvedMode,
-        sellerDetails: sellerInfo,
-        sellerName: sellerInfo.sellerName,
-        storeName: sellerInfo.storeName,
-        sellerPhone: sellerInfo.phone,
-        ...(resolvedMode === "third_party" ? {
-          thirdPartyDetails: {
-            ...item.thirdPartyDetails,
-            courierName: courierName || item.thirdPartyDetails?.courierName || order.courierName,
-            trackingNumber: effectiveAwb || item.thirdPartyDetails?.trackingNumber || order.trackingNumber,
-            trackingUrl: computedTrackingUrl || item.thirdPartyDetails?.trackingUrl,
-            estimatedDeliveryDate: estimatedDeliveryDate || item.thirdPartyDetails?.estimatedDeliveryDate
-          }
-        } : {}),
-        ...(resolvedMode === "self_delivery" && mergedSelf ? { selfDeliveryDetails: mergedSelf } : {})
-      }));
-
-      await Order.updateOne({ _id: order._id }, { $set: { items: updatedItems } });
-    }
 
     // Fetch updated document to return in response
     const updatedOrder = await Order.findById(order._id);

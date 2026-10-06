@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
+import Order from "../models/Order.js";
+import Product from "../models/Product.js";
+import { generateSellerFinancialStatementPDF } from "../services/invoiceService.js";
 
 // Helper: Safely find seller by MongoDB ObjectId or fallback to email / phone / storeName
 const findSellerByIdOrQuery = async (id, selectFields = "") => {
@@ -325,3 +328,145 @@ export const updateSellerCommission = async (req, res) => {
     res.status(500).json({ message: "Failed to update seller commission", error: error.message });
   }
 };
+
+// Download Official Seller Financial & Settlement Statement PDF
+export const downloadSellerFinancialStatement = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const seller = await findSellerByIdOrQuery(id, "-password");
+    if (!seller) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    // 1. Gather products belonging to this seller for comprehensive matching
+    const sellerProducts = await Product.find({
+      $or: [
+        { sellerId: seller._id },
+        { seller: seller._id },
+        { sellerStoreName: seller.storeName },
+        { storeName: seller.storeName }
+      ]
+    }).select("_id id name").lean();
+
+    const productIds = sellerProducts.map(p => p._id.toString());
+
+    // 2. Fetch all matching orders for this seller
+    const orderConditions = [
+      { sellerId: seller._id },
+      { "items.sellerId": seller._id },
+      { storeName: seller.storeName },
+      { "items.storeName": seller.storeName }
+    ];
+
+    if (productIds.length > 0) {
+      orderConditions.push(
+        { "items.productId": { $in: productIds } },
+        { "items.id": { $in: productIds } }
+      );
+    }
+
+    const rawOrders = await Order.find({ $or: orderConditions }).sort({ createdAt: -1 }).lean();
+
+    // 3. Normalize and enrich matching orders
+    const enrichedOrders = [];
+    let grossSales = 0;
+    let platformCut = 0;
+    let totalGst = 0;
+    let codVolume = 0;
+    let codCount = 0;
+    let upiVolume = 0;
+    let upiCount = 0;
+
+    const commissionRate = Number(seller.commissionRate ?? seller.commissionPercentage ?? 5);
+
+    rawOrders.forEach(o => {
+      const itemsList = Array.isArray(o.items) ? o.items : [];
+      // Filter items that belong to this seller
+      const sellerItems = itemsList.filter(item => {
+        const itemSellerId = String(item.sellerId?._id || item.sellerId || '');
+        const itemStore = String(item.storeName || '').toLowerCase().trim();
+        const itemProdId = String(item.productId?._id || item.productId || item.id || '');
+        return (
+          itemSellerId === String(seller._id) ||
+          (seller.storeName && itemStore === seller.storeName.toLowerCase().trim()) ||
+          productIds.includes(itemProdId)
+        );
+      });
+
+      const relevantItems = sellerItems.length > 0 ? sellerItems : itemsList;
+      const orderSubtotal = relevantItems.reduce((acc, item) => {
+        const lineTotal = Number(item.total) || (Number(item.finalPrice || item.price || 0) * Number(item.quantity || 1));
+        return acc + lineTotal;
+      }, 0);
+
+      const effectiveTotal = orderSubtotal > 0 ? orderSubtotal : Number(o.totalAmount || o.total || 0);
+      const isCancelled = String(o.overallStatus || o.status || '').toLowerCase().includes('cancel');
+
+      const isCod = String(o.paymentMethod || '').toUpperCase().includes('COD');
+
+      const itemGst = relevantItems.reduce((sum, it) => {
+        const itPrice = (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1));
+        const explicitGst = it.gstPercent ?? it.gstPercentage ?? it.gstRate ?? it.gst ?? 5;
+        const rate = !isNaN(Number(explicitGst)) ? Number(explicitGst) : 5;
+        return sum + (itPrice - (itPrice / (1 + rate / 100)));
+      }, 0);
+
+      const orderCut = Math.round(effectiveTotal * (commissionRate / 100) * 100) / 100;
+
+      if (!isCancelled) {
+        grossSales += effectiveTotal;
+        platformCut += orderCut;
+        totalGst += itemGst;
+
+        if (isCod) {
+          codVolume += effectiveTotal;
+          codCount += 1;
+        } else {
+          upiVolume += effectiveTotal;
+          upiCount += 1;
+        }
+      }
+
+      enrichedOrders.push({
+        ...o,
+        orderId: o.orderId || o.id || `SC-${String(o._id).slice(-4)}`,
+        sellerSubtotal: effectiveTotal,
+        total: effectiveTotal,
+        commissionRate,
+        isCod,
+        date: o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : (o.date || 'Recent'),
+        customerName: o.customerName || o.customer?.name || o.shippingAddress?.name || 'Verified Consumer'
+      });
+    });
+
+    const netEarnings = Math.max(0, Math.round((grossSales - platformCut) * 100) / 100);
+
+    const metrics = {
+      grossSales,
+      commissionRate,
+      platformCut,
+      netEarnings,
+      totalGst: Math.round(totalGst * 100) / 100,
+      codVolume,
+      codCount,
+      upiVolume,
+      upiCount,
+      payableBalance: seller.walletBalance || 0,
+      settledVolume: seller.totalWithdrawn || 0
+    };
+
+    const cleanStoreName = (seller.storeName || 'Vendor').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `Financial_Statement_${cleanStoreName}_${Date.now()}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateSellerFinancialStatementPDF(seller, enrichedOrders, metrics);
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error("Error generating seller financial statement PDF:", error);
+    res.status(500).json({ message: "Failed to generate financial statement PDF", error: error.message });
+  }
+};
+

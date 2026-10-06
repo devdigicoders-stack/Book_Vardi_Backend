@@ -59,6 +59,76 @@ export const normalizeOrderStatus = (raw) => {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
 
+// Calculate Overall Order Status across all items in a multi-product order
+export const calculateOverallOrderStatus = (items = []) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return "Pending";
+  }
+
+  // Canonical milestone ranks in standard fulfillment lifecycle:
+  const STAGE_RANK = {
+    pending: 0,
+    placed: 0,
+    processing: 1,
+    confirmed: 2,
+    packed: 3,
+    shipped: 4,
+    in_transit: 4,
+    out_for_delivery: 5,
+    delivered: 6,
+    completed: 6
+  };
+
+  const RANK_TO_STATUS = [
+    "Pending",          // 0
+    "Processing",       // 1
+    "Confirmed",        // 2
+    "Packed",           // 3
+    "Shipped",          // 4
+    "Out for Delivery", // 5
+    "Delivered"         // 6
+  ];
+
+  // Active items are items that have not been cancelled
+  const nonCancelledItems = items.filter(it => {
+    const s = String(it.status || '').toLowerCase().trim();
+    return s !== 'cancelled' && s !== 'canceled';
+  });
+
+  if (nonCancelledItems.length === 0) {
+    return "Cancelled";
+  }
+
+  const normalizedStatuses = nonCancelledItems.map(it => {
+    return normalizeOrderStatus(it.status || 'Pending');
+  });
+
+  // If all active items share the exact same status
+  const firstStatus = normalizedStatuses[0];
+  const allSame = normalizedStatuses.every(s => s.toLowerCase() === firstStatus.toLowerCase());
+  if (allSame) {
+    return firstStatus;
+  }
+
+  // If all active items are in return/exchange governance
+  const isGovernanceStatus = (s) => {
+    const low = s.toLowerCase();
+    return low.startsWith('return') || low.startsWith('refund') || low.startsWith('exchange') || low === 'exchanged';
+  };
+  if (normalizedStatuses.every(isGovernanceStatus)) {
+    return firstStatus;
+  }
+
+  // Determine lowest milestone rank reached/passed by all active products
+  const ranks = nonCancelledItems.map(it => {
+    const key = String(it.status || 'Pending').toLowerCase().trim().replace(/[\s-]+/g, '_');
+    return STAGE_RANK[key] !== undefined ? STAGE_RANK[key] : 0;
+  });
+
+  const minRank = Math.min(...ranks);
+  return RANK_TO_STATUS[minRank] || "Pending";
+};
+
 // Helper to safely locate an Order document by Mongo _id, orderId, custom id, or SC- format
 export const findOrderById = async (searchId) => {
   if (!searchId) return null;
@@ -184,7 +254,7 @@ export const isPlaceholderSeller = (str) => {
 
 // Helper to safely decrement stock and size variant stock for a product or kit on order placement
 const decrementItemStock = async (item) => {
-  const qty = Math.max(1, Number(item.quantity) || 1);
+  const qty = Math.max(0.01, Math.round((Number(item.quantity) || 1) * 100) / 100);
   const searchId = item.productId || item.id || item._id;
   const itemSize = String(item.size || item.selectedSize || "").trim();
 
@@ -199,7 +269,7 @@ const decrementItemStock = async (item) => {
   if (prod) {
     // 1. Decrement top level stock floor at 0
     const currentStock = Number(prod.stockQuantity ?? prod.stock ?? 0);
-    const newStock = Math.max(0, currentStock - qty);
+    const newStock = Math.max(0, Math.round((currentStock - qty) * 100) / 100);
     prod.stock = newStock;
     prod.stockQuantity = newStock;
 
@@ -210,7 +280,7 @@ const decrementItemStock = async (item) => {
       );
       if (variant) {
         const vStock = Number(variant.stockQuantity ?? variant.stock ?? 0);
-        const vNewStock = Math.max(0, vStock - qty);
+        const vNewStock = Math.max(0, Math.round((vStock - qty) * 100) / 100);
         variant.stock = vNewStock;
         variant.stockQuantity = vNewStock;
       }
@@ -242,7 +312,7 @@ const decrementItemStock = async (item) => {
 
 // Helper to safely restore stock and size variant stock on order cancellation or product return
 const incrementItemStock = async (item) => {
-  const qty = Math.max(1, Number(item.quantity) || 1);
+  const qty = Math.max(0.01, Math.round((Number(item.quantity) || 1) * 100) / 100);
   const searchId = item.productId || item.id || item._id;
   const itemSize = String(item.size || item.selectedSize || "").trim();
 
@@ -642,8 +712,9 @@ export const getMyOrders = async (req, res) => {
           _id: it._id || it.id,
           productId: it.productId || it.id || it._id,
           name: it.name,
-          price: it.finalPrice || it.price,
-          quantity: it.quantity || 1,
+          price: Math.round((Number(it.finalPrice || it.price) || 0) * 100) / 100,
+          quantity: Math.round((Number(it.quantity) || 1) * 100) / 100,
+          total: Math.round(((Number(it.finalPrice || it.price) || 0) * (Number(it.quantity) || 1)) * 100) / 100,
           size: it.size || "",
           color: it.color || "",
           image: it.image || "",
@@ -678,6 +749,7 @@ export const getMyOrders = async (req, res) => {
         trackingUrl: ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || '',
         sellerDetails: resolvedSellerDetails,
         selfDeliveryDetails: ord.selfDeliveryDetails || firstItem.selfDeliveryDetails || null,
+        deliveryOtp: ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || firstItem.selfDeliveryDetails?.deliveryOtp || firstItem.deliveryOtp || (ord.orderId ? String(ord.orderId).replace(/\D/g, '').slice(-4) : '') || "4829",
         itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
         items: formattedItems,
         subtotal: ord.subtotal || ord.totalAmount || ord.total || 0,
@@ -976,6 +1048,7 @@ export const createOrder = async (req, res) => {
         trackingUrl: req.body.trackingUrl || "",
         sellerDetails: req.body.sellerDetails || orderItems[0]?.sellerDetails || null,
         selfDeliveryDetails: req.body.selfDeliveryDetails || null,
+        deliveryOtp: req.body.deliveryOtp || req.body.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString(),
         address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
         product: product || (orderItems[0]?.name || ""),
         quantity: quantity || (orderItems[0]?.quantity || 1),
@@ -1082,6 +1155,7 @@ export const trackOrder = async (req, res) => {
         address: order.items[0].sellerId.address || order.items[0].sellerId.city || ""
       } : null),
       selfDeliveryDetails: order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null,
+      deliveryOtp: order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.deliveryOtp || (order.orderId ? String(order.orderId).replace(/\D/g, '').slice(-4) : "") || "4829",
       steps: standardSteps.map((step, idx) => ({
         ...step,
         isCompleted: isCancelled ? false : currentStepIndex >= idx,
@@ -1187,7 +1261,48 @@ export const updateOrder = async (req, res) => {
       product_return_received: { title: "Product Return Received", desc: "Returned product received at facility and inspected." }
     };
 
-    if (canonicalStatus && newStatusKey !== previousStatusKey) {
+    const targetItemId = req.body.itemId;
+
+    if (targetItemId && Array.isArray(existingOrder.items)) {
+      const itemToUpdate = existingOrder.items.find(i => String(i._id) === String(targetItemId) || String(i.id) === String(targetItemId));
+      if (itemToUpdate) {
+        if (canonicalStatus) {
+          itemToUpdate.status = canonicalStatus;
+        }
+        if (req.body.deliveryMode || req.body.deliveryType) {
+          itemToUpdate.deliveryType = req.body.deliveryMode || req.body.deliveryType;
+        }
+        if (req.body.courierName || req.body.trackingNumber !== undefined || req.body.trackingUrl) {
+          itemToUpdate.thirdPartyDetails = {
+            ...itemToUpdate.thirdPartyDetails,
+            courierName: req.body.courierName || itemToUpdate.thirdPartyDetails?.courierName || "",
+            trackingNumber: req.body.trackingNumber !== undefined ? req.body.trackingNumber : (itemToUpdate.thirdPartyDetails?.trackingNumber || ""),
+            trackingUrl: req.body.trackingUrl || itemToUpdate.thirdPartyDetails?.trackingUrl || ""
+          };
+        }
+        if (req.body.selfDeliveryDetails) {
+          itemToUpdate.selfDeliveryDetails = {
+            ...itemToUpdate.selfDeliveryDetails,
+            ...req.body.selfDeliveryDetails
+          };
+        }
+
+        // Recalculate overall status across all items
+        const computedOverall = calculateOverallOrderStatus(existingOrder.items);
+        existingOrder.overallStatus = computedOverall;
+        existingOrder.status = computedOverall;
+
+        // Append item-specific timeline event
+        existingOrder.timeline.push({
+          status: canonicalStatus || computedOverall,
+          title: `Item '${itemToUpdate.name}' updated to ${canonicalStatus || itemToUpdate.status}`,
+          description: statusDescription || `Item status updated to ${canonicalStatus || itemToUpdate.status}. Overall order status: ${computedOverall}.`,
+          location: statusLocation || "",
+          timestamp: new Date(),
+          updatedBy: req.user?.role ? (req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1)) : "Admin"
+        });
+      }
+    } else if (canonicalStatus && newStatusKey !== previousStatusKey) {
       existingOrder.overallStatus = canonicalStatus;
       existingOrder.status = canonicalStatus;
       if (Array.isArray(existingOrder.items)) {
@@ -1283,8 +1398,8 @@ export const updateOrder = async (req, res) => {
     if (req.body.sellerDetails) existingOrder.sellerDetails = req.body.sellerDetails;
     if (req.body.selfDeliveryDetails) existingOrder.selfDeliveryDetails = req.body.selfDeliveryDetails;
 
-    // Propagate status and fulfillment details to all order items
-    if (existingOrder.items && Array.isArray(existingOrder.items)) {
+    // Propagate status and fulfillment details to all order items ONLY if updating entire order
+    if (!targetItemId && existingOrder.items && Array.isArray(existingOrder.items)) {
       existingOrder.items.forEach(item => {
         if (canonicalStatus) item.status = canonicalStatus;
         if (req.body.deliveryMode) item.deliveryType = req.body.deliveryMode;
@@ -1749,6 +1864,10 @@ export const requestReturnExchange = async (req, res) => {
       comment,
       exchangeSize,
       exchangeColor,
+      priceDifference = 0,
+      priceAdjustmentType = "none",
+      originalItemPrice = 0,
+      replacementItemPrice = 0,
       refundMethod,
       refundDetails
     } = req.body;
@@ -1795,15 +1914,18 @@ export const requestReturnExchange = async (req, res) => {
       });
     }
 
-    // Check product return window days, returnability, and exchangability
+    // Check product return window days, returnability, and exchangability for the target item
     let returnWindowDays = 7;
     let isReturnable = true;
     let isRefundable = true;
     let isExchangeable = true;
 
-    if (order.items && order.items.length > 0) {
-      const firstItem = order.items[0];
-      const searchId = firstItem.productId || firstItem.id;
+    const targetItem = (req.body.itemId && Array.isArray(order.items))
+      ? order.items.find(it => String(it._id || it.id) === String(req.body.itemId)) || order.items[0]
+      : (Array.isArray(order.items) && order.items[0]) || null;
+
+    if (targetItem) {
+      const searchId = targetItem.productId || targetItem.id;
       if (searchId) {
         const prod = await findProductByIdOrCustomId(searchId);
         if (prod) {
@@ -1814,6 +1936,11 @@ export const requestReturnExchange = async (req, res) => {
             returnWindowDays = Number(prod.returnWindowDays);
           }
         }
+      }
+      if (targetItem.isReturnable === false) isReturnable = false;
+      if (targetItem.isExchangeable === false) isExchangeable = false;
+      if (targetItem.returnWindowDays && Number(targetItem.returnWindowDays) > 0) {
+        returnWindowDays = Number(targetItem.returnWindowDays);
       }
     }
 
@@ -1852,25 +1979,35 @@ export const requestReturnExchange = async (req, res) => {
 
     const itemStatus = type === "exchange" ? "Exchange Requested" : "Return Requested";
     if (Array.isArray(order.items)) {
-      order.items.forEach(item => {
-        item.status = itemStatus;
-      });
+      if (targetItem) {
+        targetItem.status = itemStatus;
+      } else {
+        order.items.forEach(item => {
+          item.status = itemStatus;
+        });
+      }
     }
 
-    if (type === "return") {
+    if (type === "return" || (type === "exchange" && priceAdjustmentType === "partial_refund")) {
       order.refundDetails = {
         ...formattedRefundDetails,
         submittedAt: new Date()
       };
-      order.refundStatus = "Refund Requested";
+      order.refundStatus = type === "return" ? "Refund Requested" : "Partial Refund Requested";
     }
 
     order.returnRequest = {
+      itemId: targetItem ? (targetItem._id || targetItem.id) : undefined,
+      itemName: targetItem ? targetItem.name : undefined,
       type,
       reason: reason || "Customer request",
       comment: comment || "",
       exchangeSize: exchangeSize || "",
       exchangeColor: exchangeColor || "",
+      priceDifference: Number(priceDifference) || 0,
+      priceAdjustmentType: priceAdjustmentType || "none",
+      originalItemPrice: Number(originalItemPrice) || 0,
+      replacementItemPrice: Number(replacementItemPrice) || 0,
       refundMethod: refundMethod || "Original Payment Method",
       refundDetails: formattedRefundDetails,
       requestedAt: new Date(),
@@ -1880,7 +2017,12 @@ export const requestReturnExchange = async (req, res) => {
     };
 
     let timelineDesc = `Customer requested ${type}. Reason: ${reason || 'N/A'}${exchangeSize ? ` (Requested Size: ${exchangeSize})` : ''}`;
-    if (type === "return" && formattedRefundDetails.method) {
+    if (type === "exchange" && priceAdjustmentType === "extra_payment") {
+      timelineDesc += ` • Additional amount payable: ₹${Math.abs(priceDifference)}.`;
+    } else if (type === "exchange" && priceAdjustmentType === "partial_refund") {
+      const modeStr = formattedRefundDetails.method === "UPI" ? `UPI (${formattedRefundDetails.upiId})` : `Bank (${formattedRefundDetails.bankName})`;
+      timelineDesc += ` • Partial refund: ₹${Math.abs(priceDifference)} to ${modeStr}.`;
+    } else if (type === "return" && formattedRefundDetails.method) {
       const modeStr = formattedRefundDetails.method === "UPI" ? `UPI (${formattedRefundDetails.upiId})` : `Bank (${formattedRefundDetails.bankName})`;
       timelineDesc += ` • Receiving account: ${modeStr}.`;
     }

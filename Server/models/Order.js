@@ -37,8 +37,8 @@ const orderItemSchema = new mongoose.Schema({
   discountPercentage: { type: Number, default: 0 },
   offerDiscount: { type: Number, default: 0 },
   finalPrice: { type: Number, default: function () { return this.price; } },
-  quantity: { type: Number, required: true, min: 1, default: 1 },
-  total: { type: Number, default: function () { return (this.price || 0) * (this.quantity || 1); } },
+  quantity: { type: Number, required: true, min: 0.01, default: 1 },
+  total: { type: Number, default: function () { return Math.round(((this.price || 0) * (this.quantity || 1)) * 100) / 100; } },
   isReturnable: { type: Boolean, default: true },
   isRefundable: { type: Boolean, default: true },
   isExchangeable: { type: Boolean, default: true },
@@ -184,7 +184,7 @@ const orderSchema = new mongoose.Schema(
       deliveryPersonName: { type: String, default: "" },
       deliveryPersonPhone: { type: String, default: "" },
       vehicleNumber: { type: String, default: "" },
-      deliveryOtp: { type: String, default: "" },
+      deliveryOtp: { type: String, default: () => Math.floor(1000 + Math.random() * 9000).toString() },
       deliveryPartnerToken: { type: String, default: "" },
       trackingUrl: { type: String, default: "" },
       driverLocation: {
@@ -193,6 +193,10 @@ const orderSchema = new mongoose.Schema(
         updatedAt: { type: Date, default: null }
       },
       otpLastSentAt: { type: Date, default: null }
+    },
+    deliveryOtp: {
+      type: String,
+      default: () => Math.floor(1000 + Math.random() * 9000).toString()
     },
     estimatedDeliveryDate: {
       type: Date,
@@ -246,6 +250,10 @@ const orderSchema = new mongoose.Schema(
       comment: { type: String, default: "" },
       exchangeSize: { type: String, default: "" },
       exchangeColor: { type: String, default: "" },
+      priceDifference: { type: Number, default: 0 },
+      priceAdjustmentType: { type: String, enum: ["extra_payment", "partial_refund", "none", ""], default: "none" },
+      originalItemPrice: { type: Number, default: 0 },
+      replacementItemPrice: { type: Number, default: 0 },
       refundMethod: { type: String, default: "Original Payment Method" },
       refundDetails: {
         method: { type: String, enum: ["UPI", "BANK", ""], default: "" },

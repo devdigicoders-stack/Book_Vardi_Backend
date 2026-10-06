@@ -8,7 +8,7 @@ import { downloadInvoice } from "../controllers/orderController.js";
 const router = express.Router();
 
 const DEFAULT_CLASSES_ARRAY = [
-  "Nursery", "LKG", "UKG", "Class 1", "Class 2", "Class 3",
+  "Pre-Nursery", "Nursery", "LKG", "UKG", "Class 1", "Class 2", "Class 3",
   "Class 4", "Class 5", "Class 6", "Class 7", "Class 8",
   "Class 9", "Class 10", "Class 11", "Class 12"
 ];
@@ -235,7 +235,7 @@ router.post("/bulk-order", async (req, res) => {
       buyerAdvanceAmount: buyerAdvAmt,
       buyerAdvanceNote: req.body.buyerAdvanceNote || "",
       advancePaymentStatus: req.body.advancePaymentStatus || "pending",
-      advanceReceiptNumber: `REC-ADV-${refCode}`,
+      advanceReceiptNumber: "",
       assignmentMode: req.body.assignmentMode || "broadcast",
       status: "published"
     });
