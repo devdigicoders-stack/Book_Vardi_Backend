@@ -430,12 +430,12 @@ export const downloadSellerFinancialStatement = async (req, res) => {
 
       enrichedOrders.push({
         ...o,
-        orderId: o.orderId || o.id || `SC-${String(o._id).slice(-4)}`,
+        orderId: o.orderId || o.id || String(o._id || ''),
         sellerSubtotal: effectiveTotal,
         total: effectiveTotal,
         commissionRate,
         isCod,
-        date: o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : (o.date || 'Recent'),
+        date: o.date ? o.date : (o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) : 'Recent'),
         customerName: o.customerName || o.customer?.name || o.shippingAddress?.name || 'Verified Consumer'
       });
     });

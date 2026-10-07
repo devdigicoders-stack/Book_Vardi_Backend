@@ -182,9 +182,15 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       discountAmount: order.discountAmount || order.discount || 0,
       gst: order.gst || order.taxAmount || 0,
       paymentMethod: order.paymentMethod || "COD",
-      paymentStatus: order.paymentStatus
-        ? order.paymentStatus
-        : (String(order.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "paid"),
+      paymentStatus: (() => {
+        const rawMethod = String(order.paymentMethod || "").toLowerCase();
+        const isCodOrder = rawMethod.includes("cod") || rawMethod.includes("cash") || Boolean(order.isCod);
+        const isDelivered = order.overallStatus === "Delivered" || order.status === "Delivered" || Boolean(order.codCollectedAt);
+        if (isCodOrder) {
+          return isDelivered ? "paid" : "pending";
+        }
+        return order.paymentStatus || "pending";
+      })(),
       customer: {
         name: order.customer?.name || "Customer",
         phone: order.customer?.phone || order.shippingAddress?.phone || "",
@@ -197,6 +203,9 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         price: it.finalPrice || it.price,
         quantity: it.quantity || 1,
         size: it.size || "",
+        unit: it.unit || "",
+        isMeterBased: it.isMeterBased || false,
+        subCategory: it.subCategory || "",
         category: it.category || "Stationery",
         image: it.image || "",
         sellerName: it.sellerName || it.storeName || order.sellerDetails?.storeName || "",
@@ -266,7 +275,11 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     }
 
     const order = lookup.order;
-    const isPaid = order.paymentStatus === "paid" || order.paymentStatus === "Paid" || isCashCollected;
+    const rawMethod = String(order.paymentMethod || "").toLowerCase();
+    const isCodOrder = rawMethod.includes("cod") || rawMethod.includes("cash") || Boolean(order.isCod);
+    const isPaid = isCodOrder
+      ? Boolean(isCashCollected || order.overallStatus === "Delivered" || order.codCollectedAt)
+      : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || isCashCollected);
 
     if (!isPaid) {
       return res.status(400).json({

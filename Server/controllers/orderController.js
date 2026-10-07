@@ -1,4 +1,4 @@
-import Order from "../models/Order.js";
+import Order, { generateProductOrderId } from "../models/Order.js";
 import Product from "../models/Product.js";
 import Kit from "../models/Kit.js";
 import User from "../models/User.js";
@@ -739,7 +739,7 @@ export const getMyOrders = async (req, res) => {
       return {
         id: ord.id || ord.orderId || ord._id,
         orderId: ord.orderId || ord.id || ord._id,
-        date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+        date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
         status: canonicalStatus,
         overallStatus: canonicalStatus,
         deliveryMode: resolvedDeliveryMode,
@@ -1002,9 +1002,9 @@ export const createOrder = async (req, res) => {
 
     const orderIdVal = (orderId && !/^[0-9a-fA-F]{24}$/.test(orderId))
       ? orderId
-      : ((id && !/^[0-9a-fA-F]{24}$/.test(id) && String(id).startsWith("SC-"))
+      : ((id && !/^[0-9a-fA-F]{24}$/.test(id))
           ? id
-          : `SC-${Math.floor(1000 + Math.random() * 9000)}`);
+          : generateProductOrderId());
 
       const isCodOrder = paymentMethod && String(paymentMethod).toUpperCase().includes("COD");
       const initialPaymentStatus = req.body.paymentStatus || (req.body.razorpayPaymentId || req.body.isPaid ? "paid" : "pending");
@@ -1036,7 +1036,7 @@ export const createOrder = async (req, res) => {
         discountAmount: discountAmount || discount || 0,
         totalAmount: calculatedTotal,
         total: calculatedTotal,
-        date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+        date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
         shippingAddress: shippingAddress || { street: address || "" },
         paymentMethod: paymentMethod || "UPI",
         paymentStatus: initialPaymentStatus,
@@ -1924,10 +1924,11 @@ export const requestReturnExchange = async (req, res) => {
       ? order.items.find(it => String(it._id || it.id) === String(req.body.itemId)) || order.items[0]
       : (Array.isArray(order.items) && order.items[0]) || null;
 
+    let prod = null;
     if (targetItem) {
       const searchId = targetItem.productId || targetItem.id;
       if (searchId) {
-        const prod = await findProductByIdOrCustomId(searchId);
+        prod = await findProductByIdOrCustomId(searchId);
         if (prod) {
           if (prod.isReturnable === false) isReturnable = false;
           if (prod.isRefundable === false) isRefundable = false;
@@ -1952,6 +1953,25 @@ export const requestReturnExchange = async (req, res) => {
     }
     if (type === "exchange" && !isExchangeable) {
       return res.status(400).json({ message: "This product is marked as non-exchangeable." });
+    }
+
+    if (type === "exchange") {
+      const isUnstitched = Boolean(
+        targetItem?.isMeterBased ||
+        prod?.isMeterBased ||
+        targetItem?.unit === 'meter' ||
+        prod?.unit === 'meter' ||
+        String(targetItem?.category || prod?.category || '').toLowerCase().includes('unstitched') ||
+        String(targetItem?.subCategory || prod?.subCategory || '').toLowerCase().includes('unstitched') ||
+        String(targetItem?.name || prod?.name || '').toLowerCase().includes('unstitched')
+      );
+      const hasExplicitVariants = (Array.isArray(targetItem?.sizeVariants) && targetItem.sizeVariants.length > 1) ||
+                                  (Array.isArray(prod?.sizeVariants) && prod.sizeVariants.length > 1);
+      if (isUnstitched && !hasExplicitVariants) {
+        return res.status(400).json({
+          message: "Unstitched fabric products sold per meter are not eligible for size exchange. Please submit a return request for refund."
+        });
+      }
     }
 
     // Use deliveredAt timestamp if recorded, otherwise fallback to updatedAt or current time if status is delivered

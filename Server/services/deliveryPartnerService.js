@@ -1,5 +1,5 @@
 import DeliveryPartnerConfig from "../models/DeliveryPartnerConfig.js";
-import Order from "../models/Order.js";
+import Order, { generateProductOrderId } from "../models/Order.js";
 
 // Helper to get or initialize logistics configuration
 export const getOrInitDeliveryConfig = async () => {
@@ -119,7 +119,7 @@ export const generateShipmentAwbService = async (orderData, courierCode = "SHIPR
   const config = await getOrInitDeliveryConfig();
   const selectedPartner = config.partners.find((p) => p.code === courierCode || p.partnerId === courierCode) || config.partners[0];
 
-  const orderId = orderData.orderId || orderData.id || `SC-${Math.floor(1000 + Math.random() * 9000)}`;
+  const orderId = orderData.orderId || orderData.id || generateProductOrderId();
   const cleanCode = selectedPartner.code;
   const uniqueAwb = `${cleanCode.slice(0, 3)}-${Date.now().toString().slice(-6)}${Math.floor(10 + Math.random() * 90)}`;
   const pickupToken = `PKP-${Math.floor(100000 + Math.random() * 900000)}`;

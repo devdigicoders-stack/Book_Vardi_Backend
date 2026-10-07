@@ -109,11 +109,21 @@ const timelineEventSchema = new mongoose.Schema({
   }
 });
 
+export const generateProductOrderId = () => {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let prefix = "";
+  for (let i = 0; i < 3; i++) {
+    prefix += letters.charAt(Math.floor(Math.random() * letters.length));
+  }
+  const num = Math.floor(100000 + Math.random() * 900000);
+  return `${prefix}${num}`;
+};
+
 const orderSchema = new mongoose.Schema(
   {
     orderId: {
       type: String,
-      default: () => "SC-" + Math.floor(1000 + Math.random() * 9000)
+      default: generateProductOrderId
     },
     id: { type: String },
     userId: {
@@ -303,6 +313,20 @@ orderSchema.pre("save", function (next) {
         updatedBy: "System"
       }
     ];
+  }
+  if (!this.orderId || /^[0-9a-fA-F]{24}$/.test(this.orderId)) {
+    this.orderId = generateProductOrderId();
+  }
+  if (!this.id || /^[0-9a-fA-F]{24}$/.test(this.id)) {
+    this.id = this.orderId;
+  }
+  if (!this.date) {
+    this.date = new Date().toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'Asia/Kolkata'
+    });
   }
   next();
 });

@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import Order from "../models/Order.js";
+import Order, { generateProductOrderId } from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
@@ -274,7 +274,7 @@ export const getSellerOrders = async (req, res) => {
 
       let rawOrderId = o.orderId || o.id;
       if (!rawOrderId || /^[0-9a-fA-F]{24}$/.test(rawOrderId)) {
-        rawOrderId = `SC-${(parseInt(String(o._id || '').slice(-4), 16) % 9000) + 1000}`;
+        rawOrderId = generateProductOrderId();
         Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
       }
 
@@ -286,13 +286,16 @@ export const getSellerOrders = async (req, res) => {
         customerEmail: customerObj.email || o.userEmail || "",
         customerPhone: customerObj.phone || o.userPhone || "",
         school: o.schoolName || o.school || customerObj.school || "General Public",
-        date: o.createdAt
-          ? new Date(o.createdAt).toLocaleDateString("en-IN", {
-              day: "numeric",
+        date: o.date
+          ? o.date
+          : o.createdAt
+          ? new Date(o.createdAt).toLocaleDateString("en-GB", {
+              day: "2-digit",
               month: "short",
-              year: "numeric"
+              year: "numeric",
+              timeZone: "Asia/Kolkata"
             })
-          : (o.date || "Recently"),
+          : "Recently",
         createdAt: o.createdAt || new Date(),
         total: resolvedOrderTotal,
         totalAmount: resolvedOrderTotal,
@@ -399,9 +402,11 @@ export const getSellerCustomers = async (req, res) => {
           totalOrders: 1,
           totalSpend: orderTotal,
           status: orderTotal >= 5000 ? "VIP" : "Active",
-          lastOrderDate: order.createdAt
-            ? new Date(order.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
-            : (order.date || "Recently")
+          lastOrderDate: order.date
+            ? order.date
+            : order.createdAt
+            ? new Date(order.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })
+            : "Recently"
         });
       } else {
         const existing = customerMap.get(key);
