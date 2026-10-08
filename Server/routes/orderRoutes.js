@@ -12,7 +12,8 @@ import {
   downloadExchangeInvoice,
   cancelOrder,
   requestReturnExchange,
-  updateReturnExchangeStatus
+  updateReturnExchangeStatus,
+  resendAdminDeliveryBoyWhatsApp
 } from "../controllers/orderController.js";
 import { authenticateToken, protectUser, optionalUserAuth } from "../middlewares/auth.js";
 
@@ -34,6 +35,8 @@ router.post("/:id/return-exchange", optionalUserAuth, requestReturnExchange);
 router.patch("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
 router.put("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
 router.put("/:id/status", optionalUserAuth, updateOrder);
+router.post("/:id/resend-rider-whatsapp", optionalUserAuth, resendAdminDeliveryBoyWhatsApp);
+router.post("/:id/resend-whatsapp", optionalUserAuth, resendAdminDeliveryBoyWhatsApp);
 router.put("/:id", authenticateToken, updateOrder);
 router.delete("/:id", authenticateToken, deleteOrder);
 

@@ -220,6 +220,22 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         email: order.items?.[0]?.sellerEmail || "",
         address: order.items?.[0]?.sellerAddress || ""
       },
+      returnRequest: order.returnRequest ? {
+        type: order.returnRequest.type,
+        reason: order.returnRequest.reason,
+        comment: order.returnRequest.comment,
+        itemId: order.returnRequest.itemId,
+        itemName: order.returnRequest.itemName,
+        exchangeSize: order.returnRequest.exchangeSize,
+        exchangeLength: order.returnRequest.exchangeLength,
+        isMeterBased: order.returnRequest.isMeterBased,
+        priceDifference: order.returnRequest.priceDifference || 0,
+        priceAdjustmentType: order.returnRequest.priceAdjustmentType || 'none',
+        originalItemPrice: order.returnRequest.originalItemPrice || 0,
+        replacementItemPrice: order.returnRequest.replacementItemPrice || 0,
+        refundDetails: order.returnRequest.refundDetails || null,
+        status: order.returnRequest.status
+      } : null,
       selfDeliveryDetails: sanitizedSelfDetails
     };
 
@@ -399,12 +415,25 @@ export const verifyDeliveryOtp = async (req, res) => {
     }
 
     const order = lookup.order;
-    const isPaid = order.paymentStatus === "paid" || order.paymentStatus === "Paid" || hasConfirmedPayment;
+    const isExchangeOrder = Boolean(
+      order.returnRequest?.type === 'exchange' ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('exchange')
+    );
+    const returnReq = order.returnRequest || {};
+    const exchangeDiff = Number(returnReq.priceDifference || 0);
+    const exchangeAdjType = returnReq.priceAdjustmentType || (exchangeDiff > 0 ? 'extra_payment' : exchangeDiff < 0 ? 'partial_refund' : 'none');
+    const isExchangeExtraPayment = isExchangeOrder && exchangeAdjType === 'extra_payment' && exchangeDiff > 0;
+
+    const isPaid = isExchangeOrder
+      ? (!isExchangeExtraPayment || hasConfirmedPayment)
+      : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || hasConfirmedPayment);
 
     if (!isPaid) {
       return res.status(400).json({
         success: false,
-        message: "🔒 Payment must be collected & verified before delivery OTP can be verified."
+        message: isExchangeExtraPayment
+          ? `🔒 Extra payment of ₹${exchangeDiff} must be collected from customer before delivery OTP can be verified.`
+          : "🔒 Payment must be collected & verified before delivery OTP can be verified."
       });
     }
 
@@ -446,19 +475,27 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
-    // Mark order as Delivered and update paymentStatus to paid upon OTP verification
+    // Mark order as Delivered or Exchanged upon OTP verification
     const previousStatus = order.overallStatus;
-    const isCodOrder = String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid";
+    const isCodOrder = !isExchangeOrder && (String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid");
     const deliveryExecName = order.selfDeliveryDetails?.deliveryPersonName || "Delivery Executive";
     const now = new Date();
 
-    order.overallStatus = "Delivered";
-    order.status = "Delivered";
+    const finalStatus = isExchangeOrder ? "exchanged" : "Delivered";
+    order.overallStatus = finalStatus;
+    order.status = finalStatus;
     order.deliveryStatus = "Delivered";
     order.paymentStatus = "paid";
     order.deliveredAt = now;
-    order.codCollectedAt = now;
-    order.codCollectedBy = deliveryExecName;
+    if (isCodOrder || isExchangeExtraPayment) {
+      order.codCollectedAt = now;
+      order.codCollectedBy = deliveryExecName;
+    }
+
+    if (isExchangeOrder && order.returnRequest) {
+      order.returnRequest.status = "exchanged";
+      order.returnRequest.updatedAt = now;
+    }
 
     if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
     order.selfDeliveryDetails.deliveredAt = now;
@@ -466,7 +503,7 @@ export const verifyDeliveryOtp = async (req, res) => {
 
     if (Array.isArray(order.items)) {
       order.items.forEach((it) => {
-        it.status = "Delivered";
+        it.status = finalStatus;
         if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
         it.selfDeliveryDetails.deliveredAt = now;
         it.selfDeliveryDetails.status = "Delivered";
@@ -476,11 +513,15 @@ export const verifyDeliveryOtp = async (req, res) => {
     // Append timeline event
     order.timeline = order.timeline || [];
     order.timeline.push({
-      status: "delivered",
-      title: isCodOrder ? "COD Payment Collected & Order Delivered" : "Order Delivered via OTP Verification",
-      description: isCodOrder
-        ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
-        : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`,
+      status: finalStatus.toLowerCase(),
+      title: isExchangeOrder
+        ? (isExchangeExtraPayment ? `Exchange Completed & Extra ₹${exchangeDiff} Collected` : "Exchange Completed via OTP Verification")
+        : (isCodOrder ? "COD Payment Collected & Order Delivered" : "Order Delivered via OTP Verification"),
+      description: isExchangeOrder
+        ? `Exchange handover completed by ${deliveryExecName} and customer OTP verified.${isExchangeExtraPayment ? ` Extra amount of ₹${exchangeDiff} collected.` : ''}`
+        : (isCodOrder
+          ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
+          : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`),
       location: order.shippingAddress?.city || order.shippingAddress?.town || "Destination Address",
       timestamp: now,
       updatedBy: "Delivery Executive"

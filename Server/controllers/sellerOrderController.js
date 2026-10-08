@@ -4,6 +4,7 @@ import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
 import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus } from "./orderController.js";
+import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw) => {
@@ -201,153 +202,154 @@ const getExpandedSellerScope = async (req) => {
   }
 };
 
+// Helper to format a single Order document for seller view
+export const formatSellerSingleOrder = (o, scope = null) => {
+  if (!o) return null;
+  const customerObj = o.customer || {};
+  const itemsList = Array.isArray(o.items) ? o.items : [];
+  const strExpandedSellerIds = scope?.strExpandedSellerIds;
+  const strAllProductKeys = scope?.allProductKeys ? scope.allProductKeys.map(String) : [];
+  const productNameRegexes = scope?.productNameRegexes || [];
+
+  const relevantItems = itemsList.filter((item) => {
+    if (!strExpandedSellerIds || !strExpandedSellerIds.length) return true;
+    const itemSellerIdStr = item.sellerId ? String(item.sellerId._id || item.sellerId) : "";
+    const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
+    const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
+
+    const matchSeller = strExpandedSellerIds.some((sId) => {
+      if (!sId) return false;
+      const cleanSId = String(sId).toLowerCase();
+      return (
+        (itemSellerIdStr && (itemSellerIdStr === sId || (sId.length >= 8 && itemSellerIdStr.endsWith(sId.slice(-10))))) ||
+        (itemSellerStr && (itemSellerStr === sId || (sId.length >= 8 && itemSellerStr.endsWith(sId.slice(-10))))) ||
+        (itemStoreNameStr && itemStoreNameStr.toLowerCase() === cleanSId)
+      );
+    });
+
+    const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId?._id || item.productId || item.id || item._id));
+    const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
+    return matchSeller || matchProduct || matchName;
+  });
+
+  if (relevantItems.length === 0 && strExpandedSellerIds && strExpandedSellerIds.length > 0) {
+    return null;
+  }
+
+  const orderItems = relevantItems.length > 0 ? relevantItems : itemsList;
+  const isMultiSeller = itemsList.length > orderItems.length;
+
+  const computedItemsSubtotal = orderItems.reduce(
+    (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
+    0
+  );
+
+  const storedOrderTotal = Number(o.totalAmount || o.total || 0);
+  const storedSubtotal = Number(o.subtotal || 0);
+  const shippingFee = Number(o.shippingFee ?? o.shippingCost ?? 0);
+  const discountAmount = Number(o.discountAmount ?? o.discount ?? 0);
+  const codFee = Number(o.codFee ?? o.codCharges ?? 0);
+
+  const resolvedOrderTotal = isMultiSeller
+    ? computedItemsSubtotal
+    : (storedOrderTotal > 0 ? storedOrderTotal : Math.max(0, computedItemsSubtotal + shippingFee + codFee - discountAmount));
+
+  const resolvedSubtotal = computedItemsSubtotal;
+
+  const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
+  const hasActiveReturnRequest = o.returnRequest &&
+    typeof o.returnRequest === "object" &&
+    Boolean(o.returnRequest.type && !['none', 'n/a', '', 'null'].includes(String(o.returnRequest.type).toLowerCase().trim())) &&
+    Boolean(o.returnRequest.status && !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(o.returnRequest.status).toLowerCase().trim()));
+
+  const rawStatus = hasActiveReturnRequest
+    ? o.returnRequest.status
+    : (o.overallStatus || sellerItemStatus || o.status || "Pending");
+
+  const formattedStatus = normalizeOrderStatus(rawStatus);
+
+  let rawOrderId = o.orderId || o.id;
+  if (!rawOrderId || /^[0-9a-fA-F]{24}$/.test(rawOrderId)) {
+    rawOrderId = generateProductOrderId();
+    Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
+  }
+
+  return {
+    id: rawOrderId,
+    _id: o._id,
+    orderId: rawOrderId,
+    customerName: customerObj.name || o.userName || o.customerName || "Customer",
+    customerEmail: customerObj.email || o.userEmail || o.customerEmail || "",
+    customerPhone: customerObj.phone || o.userPhone || o.customerPhone || "",
+    school: o.schoolName || o.school || customerObj.school || "General Public",
+    date: o.date
+      ? o.date
+      : o.createdAt
+      ? new Date(o.createdAt).toLocaleDateString("en-GB", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          timeZone: "Asia/Kolkata"
+        })
+      : "Recently",
+    createdAt: o.createdAt || new Date(),
+    total: resolvedOrderTotal,
+    totalAmount: resolvedOrderTotal,
+    subtotal: resolvedSubtotal,
+    sellerSubtotal: computedItemsSubtotal,
+    shippingFee: isMultiSeller ? 0 : shippingFee,
+    shippingCost: isMultiSeller ? 0 : shippingFee,
+    discountAmount: isMultiSeller ? 0 : discountAmount,
+    discount: isMultiSeller ? 0 : discountAmount,
+    codFee: isMultiSeller ? 0 : codFee,
+    itemsCount: orderItems.length,
+    status: formattedStatus,
+    overallStatus: formattedStatus,
+    rawStatus: rawStatus,
+    paymentMethod: o.paymentMethod || "UPI",
+    paymentStatus: o.paymentStatus || (String(o.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "Paid"),
+    cancellationReason: o.cancellationReason || "",
+    cancelledBy: o.cancelledBy || (o.cancellationReason ? "Customer" : ""),
+    cancelledAt: o.cancelledAt || null,
+    refundStatus: o.refundStatus || "",
+    returnRequest: o.returnRequest || null,
+    refundDetails: o.refundDetails || o.returnRequest?.refundDetails || null,
+    timeline: o.timeline || [],
+    shippingAddress: typeof o.shippingAddress === "string"
+      ? o.shippingAddress
+      : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
+    deliveryMode: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
+    deliveryType: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
+    trackingNumber: o.trackingNumber || orderItems[0]?.thirdPartyDetails?.trackingNumber || "",
+    courierName: o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || "",
+    trackingUrl: o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || "",
+    sellerDetails: o.sellerDetails || orderItems[0]?.sellerDetails || null,
+    selfDeliveryDetails: o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails || null,
+    items: orderItems.map((item) => ({
+      id: item._id || item.id,
+      _id: item._id || item.id,
+      name: item.name || "Product Item",
+      price: Number(item.price || item.finalPrice || 0),
+      quantity: Number(item.quantity || 1),
+      total: Number(item.total || (item.price * item.quantity) || 0),
+      size: item.size || "",
+      color: item.color || "",
+      image: item.image || "",
+      status: normalizeOrderStatus(item.status || formattedStatus),
+      deliveryType: item.deliveryType || o.deliveryMode || "",
+      selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
+      thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
+      sellerDetails: item.sellerDetails || o.sellerDetails || null
+    }))
+  };
+};
+
 // 1. Get All Orders for the Logged-in Seller
 export const getSellerOrders = async (req, res) => {
   try {
-    const { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter } = await getExpandedSellerScope(req);
-    const orders = await Order.find(filter).sort({ createdAt: -1 });
-
-    const strAllProductKeys = (allProductKeys || []).map(String);
-
-    const formattedOrders = orders.map((o) => {
-      const customerObj = o.customer || {};
-      const itemsList = Array.isArray(o.items) ? o.items : [];
-
-      const relevantItems = itemsList.filter((item) => {
-        if (!strExpandedSellerIds || !strExpandedSellerIds.length) return true;
-        const itemSellerIdStr = item.sellerId ? String(item.sellerId._id || item.sellerId) : "";
-        const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
-        const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
-
-        const matchSeller = strExpandedSellerIds.some((sId) => {
-          if (!sId) return false;
-          const cleanSId = String(sId).toLowerCase();
-          return (
-            (itemSellerIdStr && (itemSellerIdStr === sId || (sId.length >= 8 && itemSellerIdStr.endsWith(sId.slice(-10))))) ||
-            (itemSellerStr && (itemSellerStr === sId || (sId.length >= 8 && itemSellerStr.endsWith(sId.slice(-10))))) ||
-            (itemStoreNameStr && itemStoreNameStr.toLowerCase() === cleanSId)
-          );
-        });
-
-        const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId?._id || item.productId || item.id || item._id));
-        const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
-        return matchSeller || matchProduct || matchName;
-      });
-
-      // STRICT SELLER PRODUCT ISOLATION: Exclude order completely if none of its items belong to this seller
-      if (relevantItems.length === 0) {
-        return null;
-      }
-
-      const orderItems = relevantItems;
-      const isMultiSeller = itemsList.length > orderItems.length;
-
-      const computedItemsSubtotal = orderItems.reduce(
-        (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
-        0
-      );
-
-      const storedOrderTotal = Number(o.totalAmount || o.total || 0);
-      const storedSubtotal = Number(o.subtotal || 0);
-      const shippingFee = Number(o.shippingFee ?? o.shippingCost ?? 0);
-      const discountAmount = Number(o.discountAmount ?? o.discount ?? 0);
-      const codFee = Number(o.codFee ?? o.codCharges ?? 0);
-
-      // For multi-seller orders, seller order total reflects ONLY their items' subtotal
-      const resolvedOrderTotal = isMultiSeller
-        ? computedItemsSubtotal
-        : (storedOrderTotal > 0 ? storedOrderTotal : Math.max(0, computedItemsSubtotal + shippingFee + codFee - discountAmount));
-
-      const resolvedSubtotal = computedItemsSubtotal;
-
-      const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
-      const hasActiveReturnRequest = o.returnRequest &&
-        typeof o.returnRequest === "object" &&
-        Boolean(o.returnRequest.type && !['none', 'n/a', '', 'null'].includes(String(o.returnRequest.type).toLowerCase().trim())) &&
-        Boolean(o.returnRequest.status && !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(o.returnRequest.status).toLowerCase().trim()));
-
-      const rawStatus = hasActiveReturnRequest
-        ? o.returnRequest.status
-        : (o.overallStatus || sellerItemStatus || o.status || "Pending");
-
-      const formattedStatus = normalizeOrderStatus(rawStatus);
-
-      let rawOrderId = o.orderId || o.id;
-      if (!rawOrderId || /^[0-9a-fA-F]{24}$/.test(rawOrderId)) {
-        rawOrderId = generateProductOrderId();
-        Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
-      }
-
-      return {
-        id: rawOrderId,
-        _id: o._id,
-        orderId: rawOrderId,
-        customerName: customerObj.name || o.userName || "Customer",
-        customerEmail: customerObj.email || o.userEmail || "",
-        customerPhone: customerObj.phone || o.userPhone || "",
-        school: o.schoolName || o.school || customerObj.school || "General Public",
-        date: o.date
-          ? o.date
-          : o.createdAt
-          ? new Date(o.createdAt).toLocaleDateString("en-GB", {
-              day: "2-digit",
-              month: "short",
-              year: "numeric",
-              timeZone: "Asia/Kolkata"
-            })
-          : "Recently",
-        createdAt: o.createdAt || new Date(),
-        total: resolvedOrderTotal,
-        totalAmount: resolvedOrderTotal,
-        subtotal: resolvedSubtotal,
-        sellerSubtotal: computedItemsSubtotal,
-        shippingFee: isMultiSeller ? 0 : shippingFee,
-        shippingCost: isMultiSeller ? 0 : shippingFee,
-        discountAmount: isMultiSeller ? 0 : discountAmount,
-        discount: isMultiSeller ? 0 : discountAmount,
-        codFee: isMultiSeller ? 0 : codFee,
-        itemsCount: orderItems.length,
-        status: formattedStatus,
-        overallStatus: formattedStatus,
-        rawStatus: rawStatus,
-        paymentMethod: o.paymentMethod || "UPI",
-        paymentStatus: o.paymentStatus || (String(o.paymentMethod || "").toUpperCase().includes("COD") ? "pending" : "Paid"),
-        cancellationReason: o.cancellationReason || "",
-        cancelledBy: o.cancelledBy || (o.cancellationReason ? "Customer" : ""),
-        cancelledAt: o.cancelledAt || null,
-        refundStatus: o.refundStatus || "",
-        returnRequest: o.returnRequest || null,
-        refundDetails: o.refundDetails || o.returnRequest?.refundDetails || null,
-        timeline: o.timeline || [],
-        shippingAddress: typeof o.shippingAddress === "string"
-          ? o.shippingAddress
-          : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
-        deliveryMode: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
-        deliveryType: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
-        trackingNumber: o.trackingNumber || orderItems[0]?.thirdPartyDetails?.trackingNumber || "",
-        courierName: o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || "",
-        trackingUrl: o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || "",
-        sellerDetails: o.sellerDetails || orderItems[0]?.sellerDetails || null,
-        selfDeliveryDetails: o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails || null,
-        items: orderItems.map((item) => ({
-          id: item._id || item.id,
-          _id: item._id || item.id,
-          name: item.name || "Product Item",
-          price: Number(item.price || item.finalPrice || 0),
-          quantity: Number(item.quantity || 1),
-          total: Number(item.total || (item.price * item.quantity) || 0),
-          size: item.size || "",
-          color: item.color || "",
-          image: item.image || "",
-          status: normalizeOrderStatus(item.status || formattedStatus),
-          deliveryType: item.deliveryType || o.deliveryMode || "",
-          selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
-          thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
-          sellerDetails: item.sellerDetails || o.sellerDetails || null
-        }))
-      };
-    });
-
+    const scope = await getExpandedSellerScope(req);
+    const orders = await Order.find(scope.filter).sort({ createdAt: -1 });
+    const formattedOrders = orders.map((o) => formatSellerSingleOrder(o, scope));
     res.json(formattedOrders.filter(Boolean));
   } catch (error) {
     console.error("Error fetching seller orders:", error);
@@ -685,6 +687,25 @@ export const updateSellerOrderStatus = async (req, res) => {
       order.trackingNumber = tokenVal;
     }
 
+    // Fully Automated WhatsApp Dispatch to Delivery Boy
+    let whatsappDispatchResult = null;
+    if (resolvedMode === "self_delivery" && mergedSelf && mergedSelf.deliveryPersonPhone) {
+      whatsappDispatchResult = await sendDeliveryPartnerWhatsAppDispatch({
+        order,
+        selfDeliveryDetails: mergedSelf,
+        clientAppUrl: req.headers.origin || req.headers.referer
+      });
+
+      if (whatsappDispatchResult.success) {
+        mergedSelf.whatsappStatus = "sent";
+        mergedSelf.whatsappSentAt = whatsappDispatchResult.sentAt;
+        mergedSelf.whatsappMessageId = whatsappDispatchResult.messageId;
+        mergedSelf.whatsappSentTo = whatsappDispatchResult.sentTo;
+      } else {
+        mergedSelf.whatsappStatus = "failed";
+      }
+    }
+
     // Build update object
     const updatePayload = {
       status: formattedStatus,
@@ -724,6 +745,17 @@ export const updateSellerOrderStatus = async (req, res) => {
       timestamp: new Date(),
       updatedBy: sellerInfo.storeName || "Seller"
     });
+
+    if (whatsappDispatchResult?.success) {
+      newTimeline.push({
+        status: "whatsapp_sent",
+        title: "WhatsApp Link Sent to Delivery Boy",
+        description: `Automated WhatsApp dispatch sent to ${mergedSelf.deliveryPersonName} (${mergedSelf.deliveryPersonPhone}) with live tracking portal link: ${mergedSelf.trackingUrl} (Ref: ${whatsappDispatchResult.messageId})`,
+        timestamp: new Date(),
+        updatedBy: "System (WhatsApp Service)"
+      });
+    }
+
     updatePayload.timeline = newTimeline;
 
     // Also update item statuses in items array for seller's items
@@ -759,20 +791,83 @@ export const updateSellerOrderStatus = async (req, res) => {
       });
 
       updatePayload.items = updatedItems;
-      const recomputedOverall = calculateOverallOrderStatus(updatedItems);
-      updatePayload.status = recomputedOverall;
-      updatePayload.overallStatus = recomputedOverall;
+      // LATEST STATUS IS FINAL: If seller explicitly requested status, keep formattedStatus!
+      if (!status) {
+        const recomputedOverall = calculateOverallOrderStatus(updatedItems);
+        updatePayload.status = recomputedOverall;
+        updatePayload.overallStatus = recomputedOverall;
+      } else {
+        updatePayload.status = formattedStatus;
+        updatePayload.overallStatus = formattedStatus;
+      }
     }
 
     // Update MongoDB directly using updateOne
     await Order.updateOne({ _id: order._id }, { $set: updatePayload });
 
-    // Fetch updated document to return in response
+    // Fetch updated document and format for seller view to eliminate flicker
     const updatedOrder = await Order.findById(order._id);
-    res.json({ success: true, message: `Order status updated to ${formattedStatus}`, order: updatedOrder || order });
+    const scope = await getExpandedSellerScope(req);
+    const formattedResult = formatSellerSingleOrder(updatedOrder, scope) || updatedOrder;
+
+    res.json({
+      success: true,
+      message: `Order status updated to ${formattedStatus}`,
+      order: formattedResult,
+      whatsappDispatch: whatsappDispatchResult
+    });
   } catch (error) {
     console.error("Error in updateSellerOrderStatus:", error);
     res.status(500).json({ success: false, message: "Failed to update order status", error: error.message });
+  }
+};
+
+// Re-send WhatsApp Link to Delivery Boy for an existing Order
+export const resendSellerDeliveryBoyWhatsApp = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const order = await findOrderById(orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found" });
+
+    const selfDetails = order.selfDeliveryDetails;
+    if (!selfDetails || !selfDetails.deliveryPersonPhone) {
+      return res.status(400).json({ success: false, message: "No self-delivery partner details found for this order" });
+    }
+
+    const dispatchResult = await sendDeliveryPartnerWhatsAppDispatch({
+      order,
+      selfDeliveryDetails: selfDetails,
+      clientAppUrl: req.headers.origin || req.headers.referer
+    });
+
+    if (dispatchResult.success) {
+      order.selfDeliveryDetails = {
+        ...selfDetails,
+        whatsappStatus: "sent",
+        whatsappSentAt: dispatchResult.sentAt,
+        whatsappMessageId: dispatchResult.messageId,
+        whatsappSentTo: dispatchResult.sentTo
+      };
+
+      order.timeline = order.timeline || [];
+      order.timeline.push({
+        status: "whatsapp_sent",
+        title: "WhatsApp Link Resent to Delivery Boy",
+        description: `WhatsApp tracking link re-dispatched to ${selfDetails.deliveryPersonName} (${selfDetails.deliveryPersonPhone}). Ref: ${dispatchResult.messageId}`,
+        timestamp: new Date(),
+        updatedBy: "Seller (Resend)"
+      });
+
+      await order.save();
+    }
+
+    res.json({
+      success: dispatchResult.success,
+      message: dispatchResult.success ? "WhatsApp tracking link dispatched to delivery boy" : dispatchResult.error,
+      whatsappDispatch: dispatchResult
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to dispatch WhatsApp link", error: error.message });
   }
 };
 

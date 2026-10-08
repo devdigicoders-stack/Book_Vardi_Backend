@@ -6,6 +6,7 @@ import Seller from "../models/Seller.js";
 import Coupon from "../models/Coupon.js";
 import SellerOffer from "../models/SellerOffer.js";
 import mongoose from "mongoose";
+import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 
 // Helper to locate user document by ID, email, or phone
 const findUserByIdentifier = async (req) => {
@@ -1396,7 +1397,41 @@ export const updateOrder = async (req, res) => {
     if (req.body.trackingNumber !== undefined) existingOrder.trackingNumber = req.body.trackingNumber;
     if (req.body.trackingUrl) existingOrder.trackingUrl = req.body.trackingUrl;
     if (req.body.sellerDetails) existingOrder.sellerDetails = req.body.sellerDetails;
-    if (req.body.selfDeliveryDetails) existingOrder.selfDeliveryDetails = req.body.selfDeliveryDetails;
+
+    let whatsappDispatchResult = null;
+    if (req.body.selfDeliveryDetails && req.body.selfDeliveryDetails.deliveryPersonPhone) {
+      whatsappDispatchResult = await sendDeliveryPartnerWhatsAppDispatch({
+        order: existingOrder,
+        selfDeliveryDetails: req.body.selfDeliveryDetails,
+        clientAppUrl: req.headers.origin || req.headers.referer
+      });
+
+      if (whatsappDispatchResult.success) {
+        existingOrder.selfDeliveryDetails = {
+          ...existingOrder.selfDeliveryDetails,
+          ...req.body.selfDeliveryDetails,
+          whatsappStatus: "sent",
+          whatsappSentAt: whatsappDispatchResult.sentAt,
+          whatsappMessageId: whatsappDispatchResult.messageId,
+          whatsappSentTo: whatsappDispatchResult.sentTo
+        };
+        existingOrder.timeline.push({
+          status: "whatsapp_sent",
+          title: "WhatsApp Link Sent to Delivery Boy",
+          description: `Automated WhatsApp dispatch sent to ${req.body.selfDeliveryDetails.deliveryPersonName} (${req.body.selfDeliveryDetails.deliveryPersonPhone}) with live tracking portal link: ${existingOrder.selfDeliveryDetails?.trackingUrl || whatsappDispatchResult.trackingLink} (Ref: ${whatsappDispatchResult.messageId})`,
+          timestamp: new Date(),
+          updatedBy: req.user?.role ? (req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1)) : "Admin"
+        });
+      } else {
+        existingOrder.selfDeliveryDetails = {
+          ...existingOrder.selfDeliveryDetails,
+          ...req.body.selfDeliveryDetails,
+          whatsappStatus: "failed"
+        };
+      }
+    } else if (req.body.selfDeliveryDetails) {
+      existingOrder.selfDeliveryDetails = req.body.selfDeliveryDetails;
+    }
 
     // Propagate status and fulfillment details to all order items ONLY if updating entire order
     if (!targetItemId && existingOrder.items && Array.isArray(existingOrder.items)) {
@@ -1412,15 +1447,68 @@ export const updateOrder = async (req, res) => {
           };
         }
         if (req.body.selfDeliveryDetails) {
-          item.selfDeliveryDetails = req.body.selfDeliveryDetails;
+          item.selfDeliveryDetails = existingOrder.selfDeliveryDetails;
         }
       });
     }
 
     await existingOrder.save();
-    res.json({ message: "Order updated successfully", order: existingOrder });
+    res.json({ message: "Order updated successfully", order: existingOrder, whatsappDispatch: whatsappDispatchResult });
   } catch (error) {
     res.status(400).json({ message: "Failed to update order", error: error.message });
+  }
+};
+
+// Re-send WhatsApp Link to Delivery Boy by Admin
+export const resendAdminDeliveryBoyWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    let order = isMongoId ? await Order.findById(id) : null;
+    if (!order) {
+      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] });
+    }
+    if (!order) return res.status(404).json({ success: false, message: "Order not found" });
+
+    const selfDetails = order.selfDeliveryDetails;
+    if (!selfDetails || !selfDetails.deliveryPersonPhone) {
+      return res.status(400).json({ success: false, message: "No self-delivery partner details found for this order" });
+    }
+
+    const dispatchResult = await sendDeliveryPartnerWhatsAppDispatch({
+      order,
+      selfDeliveryDetails: selfDetails,
+      clientAppUrl: req.headers.origin || req.headers.referer
+    });
+
+    if (dispatchResult.success) {
+      order.selfDeliveryDetails = {
+        ...selfDetails,
+        whatsappStatus: "sent",
+        whatsappSentAt: dispatchResult.sentAt,
+        whatsappMessageId: dispatchResult.messageId,
+        whatsappSentTo: dispatchResult.sentTo
+      };
+
+      order.timeline = order.timeline || [];
+      order.timeline.push({
+        status: "whatsapp_sent",
+        title: "WhatsApp Link Resent to Delivery Boy",
+        description: `WhatsApp tracking link re-dispatched to ${selfDetails.deliveryPersonName} (${selfDetails.deliveryPersonPhone}). Ref: ${dispatchResult.messageId}`,
+        timestamp: new Date(),
+        updatedBy: req.user?.role ? (req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1)) : "Admin"
+      });
+
+      await order.save();
+    }
+
+    res.json({
+      success: dispatchResult.success,
+      message: dispatchResult.success ? "WhatsApp tracking link dispatched to delivery boy" : dispatchResult.error,
+      whatsappDispatch: dispatchResult
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to dispatch WhatsApp link", error: error.message });
   }
 };
 
@@ -1863,6 +1951,7 @@ export const requestReturnExchange = async (req, res) => {
       reason,
       comment,
       exchangeSize,
+      exchangeLength,
       exchangeColor,
       priceDifference = 0,
       priceAdjustmentType = "none",
@@ -1955,32 +2044,23 @@ export const requestReturnExchange = async (req, res) => {
       return res.status(400).json({ message: "This product is marked as non-exchangeable." });
     }
 
-    if (type === "exchange") {
-      const isUnstitched = Boolean(
-        targetItem?.isMeterBased ||
-        prod?.isMeterBased ||
-        targetItem?.unit === 'meter' ||
-        prod?.unit === 'meter' ||
-        String(targetItem?.category || prod?.category || '').toLowerCase().includes('unstitched') ||
-        String(targetItem?.subCategory || prod?.subCategory || '').toLowerCase().includes('unstitched') ||
-        String(targetItem?.name || prod?.name || '').toLowerCase().includes('unstitched')
-      );
-      const hasExplicitVariants = (Array.isArray(targetItem?.sizeVariants) && targetItem.sizeVariants.length > 1) ||
-                                  (Array.isArray(prod?.sizeVariants) && prod.sizeVariants.length > 1);
-      if (isUnstitched && !hasExplicitVariants) {
-        return res.status(400).json({
-          message: "Unstitched fabric products sold per meter are not eligible for size exchange. Please submit a return request for refund."
-        });
-      }
-    }
+    const isUnstitched = Boolean(
+      targetItem?.isMeterBased ||
+      prod?.isMeterBased ||
+      targetItem?.unit === 'meter' ||
+      prod?.unit === 'meter' ||
+      String(targetItem?.category || prod?.category || '').toLowerCase().includes('unstitched') ||
+      String(targetItem?.subCategory || prod?.subCategory || '').toLowerCase().includes('unstitched') ||
+      String(targetItem?.name || prod?.name || '').toLowerCase().includes('unstitched')
+    );
 
     // Use deliveredAt timestamp if recorded, otherwise fallback to updatedAt or current time if status is delivered
     const deliveredDate = order.deliveredAt || order.deliveryDetails?.deliveredAt || (isDeliveredState ? new Date(order.updatedAt || Date.now()) : new Date(order.createdAt || Date.now()));
     const returnEligibleUntil = new Date(deliveredDate.getTime() + returnWindowDays * 24 * 60 * 60 * 1000);
 
     if (new Date() > returnEligibleUntil) {
-      return res.status(400).json({
-        message: `Return/Exchange window of ${returnWindowDays} days expired on ${returnEligibleUntil.toLocaleDateString('en-IN')}.`
+      return res.status(400).json({ 
+        message: `Return/Exchange window of ${returnWindowDays} days expired on ${returnEligibleUntil.toLocaleDateString('en-IN')}.` 
       });
     }
 
@@ -2016,13 +2096,17 @@ export const requestReturnExchange = async (req, res) => {
       order.refundStatus = type === "return" ? "Refund Requested" : "Partial Refund Requested";
     }
 
+    const effectiveExchangeDisplay = exchangeLength ? `${exchangeLength} Meter(s)` : (exchangeSize || "");
+
     order.returnRequest = {
       itemId: targetItem ? (targetItem._id || targetItem.id) : undefined,
       itemName: targetItem ? targetItem.name : undefined,
       type,
       reason: reason || "Customer request",
       comment: comment || "",
-      exchangeSize: exchangeSize || "",
+      exchangeSize: effectiveExchangeDisplay,
+      exchangeLength: exchangeLength ? Number(exchangeLength) : undefined,
+      isMeterBased: isUnstitched || Boolean(exchangeLength),
       exchangeColor: exchangeColor || "",
       priceDifference: Number(priceDifference) || 0,
       priceAdjustmentType: priceAdjustmentType || "none",
@@ -2036,7 +2120,8 @@ export const requestReturnExchange = async (req, res) => {
       returnEligibleUntil
     };
 
-    let timelineDesc = `Customer requested ${type}. Reason: ${reason || 'N/A'}${exchangeSize ? ` (Requested Size: ${exchangeSize})` : ''}`;
+    const lengthOrSizeStr = exchangeLength ? `Requested Length: ${exchangeLength} Meter(s)` : (exchangeSize ? `Requested Size: ${exchangeSize}` : '');
+    let timelineDesc = `Customer requested ${type}. Reason: ${reason || 'N/A'}${lengthOrSizeStr ? ` (${lengthOrSizeStr})` : ''}`;
     if (type === "exchange" && priceAdjustmentType === "extra_payment") {
       timelineDesc += ` • Additional amount payable: ₹${Math.abs(priceDifference)}.`;
     } else if (type === "exchange" && priceAdjustmentType === "partial_refund") {

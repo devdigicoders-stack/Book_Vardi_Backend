@@ -74,7 +74,11 @@ const orderItemSchema = new mongoose.Schema({
       lng: { type: Number, default: null },
       updatedAt: { type: Date, default: null }
     },
-    otpLastSentAt: { type: Date, default: null }
+    otpLastSentAt: { type: Date, default: null },
+    whatsappStatus: { type: String, default: "" },
+    whatsappSentAt: { type: Date, default: null },
+    whatsappMessageId: { type: String, default: "" },
+    whatsappSentTo: { type: String, default: "" }
   },
   status: {
     type: String,
@@ -202,7 +206,11 @@ const orderSchema = new mongoose.Schema(
         lng: { type: Number, default: null },
         updatedAt: { type: Date, default: null }
       },
-      otpLastSentAt: { type: Date, default: null }
+      otpLastSentAt: { type: Date, default: null },
+      whatsappStatus: { type: String, default: "" },
+      whatsappSentAt: { type: Date, default: null },
+      whatsappMessageId: { type: String, default: "" },
+      whatsappSentTo: { type: String, default: "" }
     },
     deliveryOtp: {
       type: String,
@@ -259,6 +267,8 @@ const orderSchema = new mongoose.Schema(
       reason: { type: String, default: "" },
       comment: { type: String, default: "" },
       exchangeSize: { type: String, default: "" },
+      exchangeLength: { type: Number, default: null },
+      isMeterBased: { type: Boolean, default: false },
       exchangeColor: { type: String, default: "" },
       priceDifference: { type: Number, default: 0 },
       priceAdjustmentType: { type: String, enum: ["extra_payment", "partial_refund", "none", ""], default: "none" },
