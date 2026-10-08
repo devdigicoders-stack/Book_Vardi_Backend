@@ -834,7 +834,7 @@ export const createOrder = async (req, res) => {
     } = req.body;
 
     const resolvedUserId = user ? user._id : (req.user ? req.user.id : req.body.userId || null);
-    const resolvedPhone = shippingAddress?.phone || user?.phone || req.headers["x-user-phone"] || customer?.phone || req.body.phone || "";
+    const resolvedPhone = shippingAddress?.phone || user?.phone || req.headers?.["x-user-phone"] || customer?.phone || req.body.phone || "";
     const resolvedEmail = shippingAddress?.email || user?.email || customer?.email || req.body.email || "";
     const resolvedName = (shippingAddress && !isPlaceholderCust(shippingAddress.name || shippingAddress.fullName) && (shippingAddress.name || shippingAddress.fullName)) ||
       (!isPlaceholderCust(customer?.name) && customer?.name) ||
@@ -1020,41 +1020,203 @@ export const createOrder = async (req, res) => {
         topDeliveryMode = rawDeliveryMode;
       }
 
-      const newOrder = new Order({
-        orderId: orderIdVal,
-        id: orderIdVal,
-        userId: resolvedUserId,
-        customer: customer || {
-          name: resolvedName,
-          email: resolvedEmail,
-          phone: resolvedPhone
-        },
-        items: orderItems,
-        subtotal: subtotal || 0,
-        shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
-        shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
-        discount: discount || discountAmount || 0,
-        discountAmount: discountAmount || discount || 0,
-        totalAmount: calculatedTotal,
-        total: calculatedTotal,
-        date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
-        shippingAddress: shippingAddress || { street: address || "" },
-        paymentMethod: paymentMethod || "UPI",
-        paymentStatus: initialPaymentStatus,
-        overallStatus: "Pending",
-        status: "Pending",
-        deliveryMode: topDeliveryMode,
-        courierName: req.body.courierName || "",
-        trackingNumber: trackingNumber || "",
-        trackingUrl: req.body.trackingUrl || "",
-        sellerDetails: req.body.sellerDetails || orderItems[0]?.sellerDetails || null,
-        selfDeliveryDetails: req.body.selfDeliveryDetails || null,
-        deliveryOtp: req.body.deliveryOtp || req.body.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString(),
-        address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
-        product: product || (orderItems[0]?.name || ""),
-        quantity: quantity || (orderItems[0]?.quantity || 1),
-        amount: calculatedTotal
+    const masterOtp = String(req.body.deliveryOtp || req.body.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString());
+    for (const item of orderItems) {
+      item.status = "pending";
+      item.deliveryOtp = masterOtp;
+      if (item.selfDeliveryDetails) {
+        item.selfDeliveryDetails.deliveryOtp = masterOtp;
+      }
+    }
+
+    // Group items by unique seller to support individual multi-vendor sub-orders
+    const sellerGroupsMap = new Map();
+    for (const item of orderItems) {
+      const sKey = String(
+        item.sellerId?._id ||
+        item.sellerId ||
+        item.sellerDetails?.sellerId ||
+        item.storeName ||
+        item.sellerName ||
+        "default_seller"
+      ).trim();
+
+      if (!sellerGroupsMap.has(sKey)) {
+        sellerGroupsMap.set(sKey, {
+          sellerId: item.sellerId || item.sellerDetails?.sellerId || null,
+          sellerStoreName: item.storeName || item.sellerName || item.sellerDetails?.storeName || "",
+          sellerDetails: item.sellerDetails || null,
+          items: []
+        });
+      }
+      sellerGroupsMap.get(sKey).items.push(item);
+    }
+
+    const sellerGroups = Array.from(sellerGroupsMap.values());
+    const overallItemsSubtotal = orderItems.reduce(
+      (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
+      0
+    ) || 1;
+
+    const totalShipping = Number(shippingCost !== undefined ? shippingCost : (shippingFee || 0));
+    const totalDiscount = Number(discount || discountAmount || 0);
+
+    // =========================================================================
+    // BRANCH A: MULTI-SELLER CHECKOUT (Divide into individual per-seller sub-orders)
+    // =========================================================================
+    if (sellerGroups.length > 1) {
+      const masterOrderId = orderIdVal;
+      const createdSubOrders = [];
+      let accumulatedDiscount = 0;
+      let accumulatedShipping = 0;
+
+      for (let idx = 0; idx < sellerGroups.length; idx++) {
+        const grp = sellerGroups[idx];
+        const isLastGroup = idx === sellerGroups.length - 1;
+        const subOrderId = `${masterOrderId}-${idx + 1}`;
+
+        const groupSubtotal = grp.items.reduce(
+          (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
+          0
+        );
+
+        const ratio = groupSubtotal / overallItemsSubtotal;
+
+        const groupDiscount = isLastGroup
+          ? Math.max(0, totalDiscount - accumulatedDiscount)
+          : Math.round(totalDiscount * ratio);
+        accumulatedDiscount += groupDiscount;
+
+        const groupShipping = isLastGroup
+          ? Math.max(0, totalShipping - accumulatedShipping)
+          : Math.round(totalShipping * ratio);
+        accumulatedShipping += groupShipping;
+
+        const groupTotal = Math.max(0, Math.round((groupSubtotal + groupShipping - groupDiscount) * 100) / 100);
+
+        const subOrder = new Order({
+          orderId: subOrderId,
+          id: subOrderId,
+          masterOrderId: masterOrderId,
+          isSubOrder: true,
+          subOrderIndex: idx + 1,
+          subOrdersCount: sellerGroups.length,
+          userId: resolvedUserId,
+          customer: customer || {
+            name: resolvedName,
+            email: resolvedEmail,
+            phone: resolvedPhone
+          },
+          items: grp.items,
+          subtotal: groupSubtotal,
+          shippingCost: groupShipping,
+          shippingFee: groupShipping,
+          discount: groupDiscount,
+          discountAmount: groupDiscount,
+          totalAmount: groupTotal,
+          total: groupTotal,
+          date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
+          shippingAddress: shippingAddress || { street: address || "" },
+          paymentMethod: paymentMethod || "UPI",
+          paymentStatus: initialPaymentStatus,
+          razorpayOrderId: req.body.razorpayOrderId || "",
+          razorpayPaymentId: req.body.razorpayPaymentId || "",
+          overallStatus: "Pending",
+          status: "Pending",
+          deliveryMode: topDeliveryMode,
+          courierName: req.body.courierName || "",
+          trackingNumber: trackingNumber || "",
+          trackingUrl: req.body.trackingUrl || "",
+          sellerId: grp.sellerId,
+          sellerStoreName: grp.sellerStoreName,
+          sellerDetails: grp.sellerDetails || req.body.sellerDetails || null,
+          selfDeliveryDetails: req.body.selfDeliveryDetails ? { ...req.body.selfDeliveryDetails, deliveryOtp: masterOtp } : { deliveryOtp: masterOtp },
+          deliveryOtp: masterOtp,
+          address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
+          product: grp.items[0]?.name || "",
+          quantity: grp.items.reduce((acc, it) => acc + (Number(it.quantity) || 1), 0),
+          amount: groupTotal
+        });
+
+        await subOrder.save();
+        createdSubOrders.push(subOrder);
+
+        // Auto-decrease stock for this group's products
+        try {
+          for (const item of grp.items) {
+            await decrementItemStock(item);
+          }
+        } catch (stockErr) {
+          console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
+        }
+      }
+
+      // Auto-increment coupon redemption once for checkout
+      try {
+        const appliedCode = req.body.couponCode || req.body.coupon?.code || req.body.appliedCoupon?.code || req.body.coupon || req.body.promoCode;
+        if (appliedCode) {
+          const cleanCode = String(appliedCode).toUpperCase().trim();
+          await Coupon.findOneAndUpdate({ code: cleanCode }, { $inc: { usageCount: 1 } }).catch(() => {});
+          await SellerOffer.findOneAndUpdate({ code: cleanCode }, { $inc: { usageCount: 1 } }).catch(() => {});
+        }
+      } catch (couponErr) {}
+
+      return res.status(201).json({
+        message: "Order placed successfully (divided into per-seller sub-orders)",
+        masterOrderId,
+        subOrdersCount: sellerGroups.length,
+        orders: createdSubOrders,
+        order: createdSubOrders[0]
       });
+    }
+
+    // =========================================================================
+    // BRANCH B: SINGLE-SELLER ORDER (Standard direct order)
+    // =========================================================================
+    const primarySeller = sellerGroups[0] || {};
+    const newOrder = new Order({
+      orderId: orderIdVal,
+      id: orderIdVal,
+      masterOrderId: orderIdVal,
+      isSubOrder: false,
+      subOrderIndex: 1,
+      subOrdersCount: 1,
+      sellerId: primarySeller.sellerId || null,
+      sellerStoreName: primarySeller.sellerStoreName || "",
+      userId: resolvedUserId,
+      customer: customer || {
+        name: resolvedName,
+        email: resolvedEmail,
+        phone: resolvedPhone
+      },
+      items: orderItems,
+      subtotal: subtotal || 0,
+      shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
+      shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
+      discount: discount || discountAmount || 0,
+      discountAmount: discountAmount || discount || 0,
+      totalAmount: calculatedTotal,
+      total: calculatedTotal,
+      date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
+      shippingAddress: shippingAddress || { street: address || "" },
+      paymentMethod: paymentMethod || "UPI",
+      paymentStatus: initialPaymentStatus,
+      razorpayOrderId: req.body.razorpayOrderId || "",
+      razorpayPaymentId: req.body.razorpayPaymentId || "",
+      overallStatus: "Pending",
+      status: "Pending",
+      deliveryMode: topDeliveryMode,
+      courierName: req.body.courierName || "",
+      trackingNumber: trackingNumber || "",
+      trackingUrl: req.body.trackingUrl || "",
+      sellerDetails: req.body.sellerDetails || primarySeller.sellerDetails || orderItems[0]?.sellerDetails || null,
+      selfDeliveryDetails: req.body.selfDeliveryDetails ? { ...req.body.selfDeliveryDetails, deliveryOtp: masterOtp } : { deliveryOtp: masterOtp },
+      deliveryOtp: masterOtp,
+      address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
+      product: product || (orderItems[0]?.name || ""),
+      quantity: quantity || (orderItems[0]?.quantity || 1),
+      amount: calculatedTotal
+    });
 
     await newOrder.save();
 
@@ -1398,6 +1560,13 @@ export const updateOrder = async (req, res) => {
     if (req.body.trackingUrl) existingOrder.trackingUrl = req.body.trackingUrl;
     if (req.body.sellerDetails) existingOrder.sellerDetails = req.body.sellerDetails;
 
+    if (req.body.selfDeliveryDetails) {
+      const existingOtp = existingOrder.deliveryOtp || existingOrder.selfDeliveryDetails?.deliveryOtp;
+      if (existingOtp && !req.body.selfDeliveryDetails.deliveryOtp) {
+        req.body.selfDeliveryDetails.deliveryOtp = existingOtp;
+      }
+    }
+
     let whatsappDispatchResult = null;
     if (req.body.selfDeliveryDetails && req.body.selfDeliveryDetails.deliveryPersonPhone) {
       whatsappDispatchResult = await sendDeliveryPartnerWhatsAppDispatch({
@@ -1430,7 +1599,10 @@ export const updateOrder = async (req, res) => {
         };
       }
     } else if (req.body.selfDeliveryDetails) {
-      existingOrder.selfDeliveryDetails = req.body.selfDeliveryDetails;
+      existingOrder.selfDeliveryDetails = {
+        ...existingOrder.selfDeliveryDetails,
+        ...req.body.selfDeliveryDetails
+      };
     }
 
     // Propagate status and fulfillment details to all order items ONLY if updating entire order
@@ -1706,39 +1878,52 @@ export const downloadInvoice = async (req, res) => {
       return pdfDoc.pipe(res);
     }
 
-    // STRICT ORDER CONFIRMATION CHECK: Invoice is generated ONLY when order is confirmed by seller/platform (Pending orders are locked)
-    const paymentStatus = String(enrichedOrder.paymentStatus || "").toLowerCase().trim();
-    const isPending = !orderStatusVal || orderStatusVal === "pending" || orderStatusVal === "unconfirmed" || orderStatusVal === "placed";
-
-    const confirmedStatuses = [
-      "confirmed",
-      "processing",
-      "packed",
-      "shipped",
-      "dispatched",
-      "out_for_delivery",
-      "out for delivery",
-      "delivered",
-      "completed"
-    ];
-
-    const isConfirmed = !isPending && (confirmedStatuses.includes(orderStatusVal) || paymentStatus === "paid" || paymentStatus === "partially_paid" || enrichedOrder.isBulkOrder);
-
-    if (!isConfirmed) {
-      return res.status(400).json({
-        message: `Tax Invoice can only be generated strictly after the order is confirmed by the seller/platform. Current order status: '${enrichedOrder.overallStatus || enrichedOrder.status || "Pending"}'.`
+    const filterSellerId = req.query.sellerId || req.headers["x-seller-id"] || null;
+    let itemsToCheck = enrichedOrder.items || [];
+    if (filterSellerId) {
+      const fStr = String(filterSellerId).toLowerCase().trim();
+      const fDigits = fStr.replace(/\D/g, "");
+      itemsToCheck = itemsToCheck.filter((item) => {
+        const sId = String(item.sellerId?._id || item.sellerId || item.sellerDetails?.sellerId || "").toLowerCase().trim();
+        const sStore = String(item.storeName || item.sellerName || item.sellerDetails?.storeName || "").toLowerCase().trim();
+        const sPhone = String(item.sellerPhone || item.sellerDetails?.phone || "").replace(/\D/g, "");
+        return (
+          sId === fStr ||
+          sStore === fStr ||
+          (fStr.length >= 8 && sId.endsWith(fStr.slice(-10))) ||
+          (fDigits.length >= 10 && sPhone.endsWith(fDigits.slice(-10)))
+        );
       });
     }
 
-    const filename = `Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+    // STRICT PRODUCT & ORDER CONFIRMATION CHECK: Do not generate invoice when product status or order status is pending
+    const isPending = !orderStatusVal || orderStatusVal === "pending" || orderStatusVal === "unconfirmed" || orderStatusVal === "placed";
+
+    const hasPendingProduct = isPending || (Array.isArray(itemsToCheck) && itemsToCheck.length > 0 && itemsToCheck.some(it => {
+      const st = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+      return !st || st === "pending" || st === "unconfirmed" || st === "placed";
+    }));
+
+    if (isPending || hasPendingProduct) {
+      return res.status(400).json({
+        message: `Tax Invoice cannot be generated while product or order status is pending. Current status: '${enrichedOrder.overallStatus || enrichedOrder.status || "Pending"}'. Invoice will be available once the order and products are confirmed.`
+      });
+    }
+
+    const filename = filterSellerId
+      ? `Invoice_${enrichedOrder.orderId || enrichedOrder._id}_${String(filterSellerId).slice(-6)}.pdf`
+      : `Invoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const pdfDoc = generateTaxInvoicePDF(enrichedOrder);
+    const pdfDoc = generateTaxInvoicePDF(enrichedOrder, filterSellerId);
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Download invoice error:", error);
+    if (error.message && error.message.toLowerCase().includes("pending")) {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: "Failed to generate invoice", error: error.message });
   }
 };

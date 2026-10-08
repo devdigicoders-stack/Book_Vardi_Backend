@@ -130,6 +130,12 @@ const orderSchema = new mongoose.Schema(
       default: generateProductOrderId
     },
     id: { type: String },
+    masterOrderId: { type: String, default: "" },
+    isSubOrder: { type: Boolean, default: false },
+    subOrderIndex: { type: Number, default: 1 },
+    subOrdersCount: { type: Number, default: 1 },
+    sellerId: { type: mongoose.Schema.Types.Mixed },
+    sellerStoreName: { type: String, default: "" },
     userId: {
       type: mongoose.Schema.Types.Mixed,
       ref: "User"
@@ -302,7 +308,7 @@ const orderSchema = new mongoose.Schema(
     product: { type: String },
     quantity: { type: Number },
     amount: { type: Number },
-    status: { type: String, default: "Processing" },
+    status: { type: String, default: "Pending" },
     deliveryBoy: { type: String }
   },
   {
@@ -311,8 +317,30 @@ const orderSchema = new mongoose.Schema(
   }
 );
 
-// Pre-save hook to initialize first timeline entry
+// Pre-save hook to initialize first timeline entry and unify delivery OTP
 orderSchema.pre("save", function (next) {
+  // Unify and synchronize deliveryOtp across order and item fields to prevent mismatch
+  const canonicalOtp = this.deliveryOtp ||
+    this.selfDeliveryDetails?.deliveryOtp ||
+    (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
+    (this.items?.[0]?.deliveryOtp) ||
+    Math.floor(1000 + Math.random() * 9000).toString();
+
+  this.deliveryOtp = canonicalOtp;
+  if (!this.selfDeliveryDetails) {
+    this.selfDeliveryDetails = {};
+  }
+  this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+
+  if (Array.isArray(this.items)) {
+    this.items.forEach(it => {
+      it.deliveryOtp = canonicalOtp;
+      if (it.selfDeliveryDetails) {
+        it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+      }
+    });
+  }
+
   if (this.isNew && (!this.timeline || this.timeline.length === 0)) {
     this.timeline = [
       {
@@ -341,6 +369,7 @@ orderSchema.pre("save", function (next) {
   next();
 });
 
+orderSchema.index({ masterOrderId: 1 });
 orderSchema.index({ sellerId: 1 });
 orderSchema.index({ seller: 1 });
 orderSchema.index({ "items.sellerId": 1 });

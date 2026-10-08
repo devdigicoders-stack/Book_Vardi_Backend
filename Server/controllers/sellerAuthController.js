@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Seller from "../models/Seller.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { upsertFcmToken } from "../utils/fcmHelper.js";
 
 import path from "path";
 import fs from "fs";
@@ -306,6 +307,15 @@ export const loginSeller = async (req, res) => {
         message: "Your seller account is suspended. Please contact support.",
         status: "suspended"
       });
+    }
+
+    if (req.body.fcmToken) {
+      upsertFcmToken(seller, {
+        fcmToken: req.body.fcmToken,
+        platform: req.body.platform,
+        deviceId: req.body.deviceId
+      });
+      await seller.save();
     }
 
     // If Approved, generate JWT Token

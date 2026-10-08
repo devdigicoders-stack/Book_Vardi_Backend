@@ -13,7 +13,9 @@ import {
   deleteAddress,
   forgotPassword,
   resetPassword,
-  uploadUserAvatar
+  uploadUserAvatar,
+  saveFcmToken,
+  removeFcmToken
 } from "../controllers/userAuthController.js";
 import { protectUser, optionalUserAuth } from "../middlewares/auth.js";
 import { uploadAvatar } from "../middlewares/upload.js";
@@ -29,6 +31,10 @@ router.post("/login-with-otp", loginWithOtp);
 router.get("/by-phone/:phone", getUserByPhone);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
+
+// FCM Push Notification Token routes (Supports JWT or x-user-phone or body phone)
+router.post("/fcm-token", optionalUserAuth, saveFcmToken);
+router.delete("/fcm-token", optionalUserAuth, removeFcmToken);
 
 // Profile and Address routes (Supports both JWT and x-user-phone headers)
 router.get("/profile", optionalUserAuth, getUserProfile);

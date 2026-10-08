@@ -897,28 +897,26 @@ export const downloadSellerInvoice = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // STRICT CONFIRMATION CHECK: Certificate/Invoice only generated when order is confirmed (Pending orders are locked)
+    // STRICT CONFIRMATION CHECK: Do not generate invoice when product status is pending
     const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
-    const paymentStatus = String(order.paymentStatus || "").toLowerCase().trim();
     const isPending = !status || status === "pending" || status === "unconfirmed" || status === "placed";
 
-    const confirmedStatuses = [
-      "confirmed",
-      "processing",
-      "packed",
-      "shipped",
-      "dispatched",
-      "out_for_delivery",
-      "out for delivery",
-      "delivered",
-      "completed"
-    ];
+    const fStr = String(sellerId || "").toLowerCase().trim();
+    const sellerItems = (order.items || []).filter(it => {
+      if (!sellerId) return true;
+      const sId = String(it.sellerId?._id || it.sellerId || it.sellerDetails?.sellerId || "").toLowerCase().trim();
+      const sStore = String(it.storeName || it.sellerName || it.sellerDetails?.storeName || "").toLowerCase().trim();
+      return sId === fStr || sStore === fStr || (fStr.length >= 8 && sId.endsWith(fStr.slice(-10)));
+    });
+    const itemsToCheck = sellerItems.length > 0 ? sellerItems : (order.items || []);
+    const hasPendingProduct = isPending || itemsToCheck.some(it => {
+      const itSt = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+      return !itSt || itSt === "pending" || itSt === "unconfirmed" || itSt === "placed";
+    });
 
-    const isConfirmed = !isPending && (confirmedStatuses.includes(status) || paymentStatus === "paid");
-
-    if (!isConfirmed) {
+    if (isPending || hasPendingProduct) {
       return res.status(400).json({
-        message: `Tax Invoice & Certificate can only be generated strictly after the order is confirmed by seller/platform. Current status: '${order.overallStatus || order.status || "Pending"}'.`
+        message: `Tax Invoice & Certificate can only be generated strictly after the order and products are confirmed. Current status: '${order.overallStatus || order.status || "Pending"}'.`
       });
     }
 
@@ -936,6 +934,9 @@ export const downloadSellerInvoice = async (req, res) => {
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Seller invoice download error:", error);
+    if (error.message && error.message.toLowerCase().includes("pending")) {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: "Failed to generate seller invoice", error: error.message });
   }
 };

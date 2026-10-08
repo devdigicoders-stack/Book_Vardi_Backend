@@ -122,6 +122,31 @@ export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
     ord.sellerAdvanceType = "";
   }
 
+  // 5. Competing quote rejection enforcement: If the requisition has been awarded to another vendor,
+  // ensure this seller's quotation is strictly sanitized as rejected so it cannot display as accepted.
+  const isAwardedToOtherSeller = Boolean(
+    (ord.sellerId && !isAwardedToThisSeller) ||
+    (ord.acceptedQuoteId && ord.quotations.every(q => String(q._id || q.id) !== String(ord.acceptedQuoteId)))
+  );
+  if (isAwardedToOtherSeller && ['quote_accepted', 'accepted', 'confirmed', 'packed', 'out for delivery', 'delivered', 'completed'].includes(ord.status)) {
+    if (Array.isArray(ord.quotations)) {
+      ord.quotations.forEach(q => {
+        q.status = "rejected";
+        q.negotiationStage = "rejected";
+      });
+    }
+    // Scrub winning seller's confidential payment, transaction, and advance settlement data
+    ord.advancePaymentStatus = "unpaid";
+    ord.advancePaidAmount = 0;
+    ord.advanceTransactionId = "";
+    ord.advancePaymentDate = null;
+    ord.advancePaymentMethod = "";
+    ord.sellerAdvanceAmount = 0;
+    ord.sellerAdvancePercentage = 0;
+    ord.acceptedQuoteId = null;
+    ord.winningQuoteId = null;
+  }
+
   return ord;
 };
 
@@ -1260,13 +1285,17 @@ export const acceptBuyerCounterDemand = async (req, res) => {
 export const confirmBuyerAcceptance = async (req, res) => {
   try {
     const { id } = req.params;
+    const { quoteId } = req.body || {};
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
     const winningQuote = (bulkOrder.quotations || []).find(
-      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "seller_accepted"
+      q => (quoteId && (String(q._id) === String(quoteId) || String(q.id) === String(quoteId))) ||
+           (bulkOrder.acceptedQuoteId && (String(q._id) === String(bulkOrder.acceptedQuoteId) || String(q.id) === String(bulkOrder.acceptedQuoteId))) ||
+           q.negotiationStage === "seller_accepted_counter" ||
+           q.status === "seller_accepted"
     );
 
     if (!winningQuote) {
@@ -1275,7 +1304,25 @@ export const confirmBuyerAcceptance = async (req, res) => {
 
     winningQuote.status = "approved";
     winningQuote.negotiationStage = "approved";
+    bulkOrder.acceptedQuoteId = winningQuote._id;
+    if (winningQuote.sellerId) {
+      bulkOrder.sellerId = winningQuote.sellerId;
+    }
     bulkOrder.status = "accepted";
+
+    // Mark all competing seller quotations as rejected
+    if (Array.isArray(bulkOrder.quotations)) {
+      bulkOrder.quotations.forEach(q => {
+        const isWin = String(q._id) === String(winningQuote._id) || String(q.id) === String(winningQuote._id);
+        if (isWin) {
+          q.status = "approved";
+          q.negotiationStage = "approved";
+        } else {
+          q.status = "rejected";
+          q.negotiationStage = "rejected";
+        }
+      });
+    }
 
     const advPct = Number(bulkOrder.sellerAdvancePercentage || winningQuote.prepaymentPercentage || winningQuote.sellerAdvancePercentage || 20);
     const advAmt = Math.round((Number(bulkOrder.overallBudget || winningQuote.quoteAmount || 0) * advPct) / 100);
@@ -1472,7 +1519,8 @@ export const approveSellerQuotation = async (req, res) => {
 
     // Mark all quotes status & negotiation stages
     bulkOrder.quotations.forEach(q => {
-      if (String(q._id) === String(effectiveQuoteId)) {
+      const isWin = String(q._id) === String(effectiveQuoteId) || String(q.id) === String(effectiveQuoteId) || (winningQuote && String(q._id) === String(winningQuote._id));
+      if (isWin) {
         q.status = "approved";
         q.negotiationStage = "approved";
       } else {
@@ -1611,9 +1659,27 @@ export const confirmSellerAcceptance = async (req, res) => {
       return res.status(404).json({ success: false, message: "Accepted quotation not found" });
     }
 
+    bulkOrder.acceptedQuoteId = winningQuote._id;
+    if (winningQuote.sellerId) {
+      bulkOrder.sellerId = winningQuote.sellerId;
+    }
     winningQuote.status = "approved";
     winningQuote.negotiationStage = "approved";
     bulkOrder.status = "accepted";
+
+    // Mark all competing seller quotations as rejected
+    if (Array.isArray(bulkOrder.quotations)) {
+      bulkOrder.quotations.forEach(q => {
+        const isWin = String(q._id) === String(winningQuote._id) || String(q.id) === String(winningQuote._id);
+        if (isWin) {
+          q.status = "approved";
+          q.negotiationStage = "approved";
+        } else {
+          q.status = "rejected";
+          q.negotiationStage = "rejected";
+        }
+      });
+    }
 
     const advPct = Number(bulkOrder.sellerAdvancePercentage || winningQuote.prepaymentPercentage || winningQuote.sellerAdvancePercentage || 20);
     const advAmt = Math.round((Number(bulkOrder.overallBudget || winningQuote.quoteAmount || 0) * advPct) / 100);
@@ -1955,7 +2021,7 @@ export const downloadAdvanceReceipt = async (req, res) => {
 export const recordAdvancePayment = async (req, res) => {
   try {
     const { id } = req.params;
-    const { advancePaidAmount, advancePaymentMode, advanceTransactionId, advanceReceiptNumber } = req.body;
+    const { advancePaidAmount, advancePaymentMode, advanceTransactionId, advanceReceiptNumber, quoteId } = req.body;
 
     const mongoose = (await import("mongoose")).default;
     const isMongoId = mongoose.Types.ObjectId.isValid(id);
@@ -1974,6 +2040,35 @@ export const recordAdvancePayment = async (req, res) => {
     bulkOrder.advancePaidAt = new Date();
     bulkOrder.advancePaymentStatus = "paid_partially";
 
+    // Locate winning quote and mark competing quotes rejected
+    const effectiveQuoteId = quoteId || bulkOrder.acceptedQuoteId;
+    const winningQuote = (bulkOrder.quotations || []).find(
+      q => (effectiveQuoteId && (String(q._id) === String(effectiveQuoteId) || String(q.id) === String(effectiveQuoteId))) ||
+           q.status === "approved" ||
+           q.negotiationStage === "approved" ||
+           q.negotiationStage === "seller_accepted_counter"
+    );
+
+    if (winningQuote) {
+      bulkOrder.acceptedQuoteId = winningQuote._id;
+      if (winningQuote.sellerId) {
+        bulkOrder.sellerId = winningQuote.sellerId;
+      }
+      winningQuote.status = "approved";
+      winningQuote.negotiationStage = "approved";
+
+      (bulkOrder.quotations || []).forEach(q => {
+        const isWin = String(q._id) === String(winningQuote._id) || String(q.id) === String(winningQuote._id);
+        if (isWin) {
+          q.status = "approved";
+          q.negotiationStage = "approved";
+        } else {
+          q.status = "rejected";
+          q.negotiationStage = "rejected";
+        }
+      });
+    }
+
     await bulkOrder.save();
 
     res.json({
@@ -1990,13 +2085,15 @@ export const recordAdvancePayment = async (req, res) => {
 export const createSchoolBulkPrepaymentOrder = async (req, res) => {
   try {
     const { id } = req.params;
+    const { quoteId } = req.body || {};
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
     const winningQuote = (bulkOrder.quotations || []).find(
-      q => String(q._id) === String(bulkOrder.acceptedQuoteId) ||
+      q => (quoteId && (String(q._id) === String(quoteId) || String(q.id) === String(quoteId))) ||
+           (bulkOrder.acceptedQuoteId && (String(q._id) === String(bulkOrder.acceptedQuoteId) || String(q.id) === String(bulkOrder.acceptedQuoteId))) ||
            q.status === "approved" ||
            q.status === "seller_accepted" ||
            q.status === "buyer_accepted" ||
@@ -2116,7 +2213,8 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
-      paidAmount: clientPaidAmount
+      paidAmount: clientPaidAmount,
+      quoteId
     } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id) {
@@ -2152,8 +2250,12 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
       });
     }
 
+    const effectiveQuoteId = quoteId || bulkOrder.acceptedQuoteId;
     const winningQuote = (bulkOrder.quotations || []).find(
-      q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
+      q => (effectiveQuoteId && (String(q._id) === String(effectiveQuoteId) || String(q.id) === String(effectiveQuoteId))) ||
+           q.status === "approved" ||
+           q.negotiationStage === "approved" ||
+           q.negotiationStage === "seller_accepted_counter"
     );
 
     const paidAmt = Number(clientPaidAmount) || bulkOrder.sellerAdvanceAmount || (
@@ -2169,14 +2271,24 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
     bulkOrder.advancePaidAt = new Date();
     bulkOrder.advancePaymentStatus = "paid";
     bulkOrder.status = "confirmed"; // Order officially confirmed with winning seller!
-    if (winningQuote?.sellerId) {
-      bulkOrder.sellerId = winningQuote.sellerId;
+
+    if (winningQuote) {
+      winningQuote.status = "approved";
+      winningQuote.negotiationStage = "approved";
+      bulkOrder.acceptedQuoteId = winningQuote._id;
+      if (winningQuote.sellerId) {
+        bulkOrder.sellerId = winningQuote.sellerId;
+      }
     }
 
     // Mark all competing seller quotations as rejected
     if (Array.isArray(bulkOrder.quotations)) {
       bulkOrder.quotations.forEach(q => {
-        if (winningQuote && String(q._id) !== String(winningQuote._id) && String(q.id) !== String(winningQuote._id)) {
+        const isWin = winningQuote && (String(q._id) === String(winningQuote._id) || String(q.id) === String(winningQuote._id));
+        if (isWin) {
+          q.status = "approved";
+          q.negotiationStage = "approved";
+        } else {
           q.status = "rejected";
           q.negotiationStage = "rejected";
         }

@@ -80,14 +80,30 @@ export const formatInvoiceQuantity = (item) => {
 
 export const resolveInvoiceSellerDetails = (order, filterSellerId = null) => {
   const items = order.items || [];
-  let targetItem = items.find(it => {
-    if (filterSellerId) {
-      const sId = it.sellerId?._id?.toString() || it.sellerId?.toString();
-      return sId === filterSellerId.toString();
-    }
-    const cand = it.sellerDetails?.storeName || it.sellerDetails?.sellerName || it.sellerName || it.storeName;
-    return cand && !isGenericSellerPlaceholder(cand);
-  }) || items[0] || {};
+  let targetItem = null;
+
+  if (filterSellerId) {
+    const fStr = String(filterSellerId).toLowerCase().trim();
+    const fDigits = fStr.replace(/\D/g, "");
+    targetItem = items.find((it) => {
+      const sId = String(it.sellerId?._id || it.sellerId || it.sellerDetails?.sellerId || "").toLowerCase().trim();
+      const sStore = String(it.storeName || it.sellerName || it.sellerDetails?.storeName || "").toLowerCase().trim();
+      const sPhone = String(it.sellerPhone || it.sellerDetails?.phone || "").replace(/\D/g, "");
+      return (
+        sId === fStr ||
+        sStore === fStr ||
+        (fStr.length >= 8 && sId.endsWith(fStr.slice(-10))) ||
+        (fDigits.length >= 10 && sPhone.endsWith(fDigits.slice(-10)))
+      );
+    });
+  }
+
+  if (!targetItem) {
+    targetItem = items.find(it => {
+      const cand = it.sellerDetails?.storeName || it.sellerDetails?.sellerName || it.sellerName || it.storeName;
+      return cand && !isGenericSellerPlaceholder(cand);
+    }) || items[0] || {};
+  }
 
   const sObj = (targetItem.sellerId && typeof targetItem.sellerId === 'object') ? targetItem.sellerId : null;
   const sDetails = targetItem.sellerDetails || order.sellerDetails || {};
@@ -204,6 +220,43 @@ export const resolveInvoiceConsumerDetails = (order) => {
  * @returns {PDFDocument} - Streaming PDF document
  */
 export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
+  if (!order) {
+    throw new Error("Order data is required to generate tax invoice.");
+  }
+
+  // Pre-filter items if specific seller requested
+  let itemsToRender = order.items || [];
+  if (filterSellerId) {
+    const fStr = String(filterSellerId).toLowerCase().trim();
+    const fDigits = fStr.replace(/\D/g, "");
+    itemsToRender = itemsToRender.filter((item) => {
+      const sId = String(item.sellerId?._id || item.sellerId || item.sellerDetails?.sellerId || "").toLowerCase().trim();
+      const sStore = String(item.storeName || item.sellerName || item.sellerDetails?.storeName || "").toLowerCase().trim();
+      const sPhone = String(item.sellerPhone || item.sellerDetails?.phone || "").replace(/\D/g, "");
+      return (
+        sId === fStr ||
+        sStore === fStr ||
+        (fStr.length >= 8 && sId.endsWith(fStr.slice(-10))) ||
+        (fDigits.length >= 10 && sPhone.endsWith(fDigits.slice(-10)))
+      );
+    });
+  }
+
+  // STRICT VALIDATION: Do not generate invoice when product or order status is pending
+  const orderStatus = String(order.overallStatus || order.status || "").toLowerCase().trim();
+  const isOrderPending = !orderStatus || orderStatus === "pending" || orderStatus === "placed" || orderStatus === "unconfirmed";
+
+  const hasPendingProduct = isOrderPending || itemsToRender.some((it) => {
+    const itStatus = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+    return !itStatus || itStatus === "pending" || itStatus === "placed" || itStatus === "unconfirmed";
+  });
+
+  if (hasPendingProduct) {
+    throw new Error(
+      `Tax invoice cannot be generated while product or order status is pending. Current status: '${order.overallStatus || order.status || "Pending"}'. Items must be confirmed before generating invoice.`
+    );
+  }
+
   const doc = new PDFDocument({ margin: 40, size: "A4" });
 
   const primaryColor = "#0f172a"; // Slate 900
@@ -382,13 +435,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .text("Unit Price", 390, tableTop + 6, { align: "right" })
     .text("Total (INR)", 480, tableTop + 6, { align: "right" });
 
-  // 5. ITEMS ROWS
-  let itemsToRender = order.items || [];
-  if (filterSellerId) {
-    itemsToRender = itemsToRender.filter(
-      (item) => item.sellerId && item.sellerId._id?.toString() === filterSellerId.toString()
-    );
-  }
+  // 5. ITEMS ROWS (itemsToRender already pre-filtered and validated above)
 
   // Helper to determine Product-level GST Rate set by seller
   const getProductGstRate = (item) => {
@@ -573,10 +620,24 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   }
 
   // Financial Summary (Right)
-  const shippingCost = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
-  const discountAmount = Number(order.discount ?? order.discountAmount ?? 0);
-  const pointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
-  const calculatedGrandTotal = Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
+  const isFilteredMultiSeller = Boolean(filterSellerId && itemsToRender.length < (order.items || []).length);
+  const allItemsSum = (order.items || []).reduce(
+    (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
+    0
+  ) || 1;
+  const ratio = isFilteredMultiSeller ? (subtotal / allItemsSum) : 1;
+
+  const rawShipping = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
+  const rawDiscount = Number(order.discount ?? order.discountAmount ?? 0);
+  const rawPointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
+
+  const shippingCost = isFilteredMultiSeller ? Math.round(rawShipping * ratio) : rawShipping;
+  const discountAmount = isFilteredMultiSeller ? Math.round(rawDiscount * ratio) : rawDiscount;
+  const pointsDiscount = isFilteredMultiSeller ? Math.round(rawPointsDiscount * ratio) : rawPointsDiscount;
+
+  const calculatedGrandTotal = isFilteredMultiSeller
+    ? Math.max(0, Math.round((subtotal + shippingCost - discountAmount - pointsDiscount) * 100) / 100)
+    : Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
 
   let rightY = y;
   doc

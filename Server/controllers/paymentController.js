@@ -1,5 +1,6 @@
 import Razorpay from "razorpay";
 import crypto from "crypto";
+import mongoose from "mongoose";
 import Payment from "../models/Payment.js";
 import Order from "../models/Order.js";
 
@@ -189,21 +190,31 @@ export const verifyPayment = async (req, res) => {
     payment.status = "captured";
     await payment.save();
 
-    // 5. Update associated main Order status to paid and processing
+    // 5. Update associated main Order and any sub-orders to paid and processing
     const targetOrderId = orderId || payment.orderId;
     let updatedOrder = null;
 
-    if (targetOrderId) {
-      updatedOrder = await Order.findByIdAndUpdate(
-        targetOrderId,
+    if (targetOrderId || razorpay_order_id) {
+      const isMongoId = targetOrderId && mongoose.Types.ObjectId.isValid(targetOrderId);
+      const orderQuery = [
+        ...(isMongoId ? [{ _id: targetOrderId }] : []),
+        ...(targetOrderId ? [{ orderId: targetOrderId }, { masterOrderId: targetOrderId }, { id: targetOrderId }] : []),
+        ...(razorpay_order_id ? [{ razorpayOrderId: razorpay_order_id }] : [])
+      ];
+
+      await Order.updateMany(
+        { $or: orderQuery },
         {
-          paymentStatus: "paid",
-          overallStatus: "processing",
-          razorpayPaymentId: razorpay_payment_id,
-          razorpayOrderId: razorpay_order_id
-        },
-        { new: true }
+          $set: {
+            paymentStatus: "paid",
+            overallStatus: "processing",
+            razorpayPaymentId: razorpay_payment_id,
+            razorpayOrderId: razorpay_order_id
+          }
+        }
       );
+
+      updatedOrder = await Order.findOne({ $or: orderQuery });
     }
 
     res.json({

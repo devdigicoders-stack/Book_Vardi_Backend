@@ -437,22 +437,18 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
-    const expectedOtp = String(
-      order.selfDeliveryDetails?.deliveryOtp ||
-      order.items?.[0]?.selfDeliveryDetails?.deliveryOtp ||
-      "4829"
-    ).trim();
-
-    const providedOtp = String(otp).trim();
-
     const validOtps = new Set([
-      expectedOtp,
       "1234",
       "3123",
       "4829",
       "0000",
       "9999"
     ]);
+
+    if (order.deliveryOtp) validOtps.add(String(order.deliveryOtp).trim());
+    if (order.selfDeliveryDetails?.deliveryOtp) validOtps.add(String(order.selfDeliveryDetails.deliveryOtp).trim());
+    if (order.items?.[0]?.deliveryOtp) validOtps.add(String(order.items[0].deliveryOtp).trim());
+    if (order.items?.[0]?.selfDeliveryDetails?.deliveryOtp) validOtps.add(String(order.items[0].selfDeliveryDetails.deliveryOtp).trim());
 
     const phoneDigits = String(order.customer?.phone || order.shippingAddress?.phone || order.userPhone || "").replace(/\D/g, "");
     if (phoneDigits.length >= 4) {

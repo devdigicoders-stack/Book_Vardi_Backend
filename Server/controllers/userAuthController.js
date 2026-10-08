@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import Seller from "../models/Seller.js";
+import DeliveryBoy from "../models/DeliveryBoy.js";
 import jwt from "jsonwebtoken";
 import { saveBase64ToFile } from "./sellerAuthController.js";
 
@@ -13,6 +14,9 @@ export const normalizePhone = (phone) => {
   const digitsOnly = String(phone).replace(/\D/g, "");
   return digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
 };
+
+import { upsertFcmToken, removeFcmTokenFromDoc } from "../utils/fcmHelper.js";
+export { upsertFcmToken, removeFcmTokenFromDoc };
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -158,6 +162,15 @@ export const loginWithOtp = async (req, res) => {
       await user.save();
     }
 
+    if (req.body.fcmToken) {
+      upsertFcmToken(user, {
+        fcmToken: req.body.fcmToken,
+        platform: req.body.platform,
+        deviceId: req.body.deviceId
+      });
+      await user.save();
+    }
+
     const seller = await Seller.findOne({
       $or: [
         ...(user.phone ? [{ phone: user.phone }] : []),
@@ -216,6 +229,13 @@ export const registerUser = async (req, res) => {
       if (institution) user.institution = institution;
       if (studentId) user.studentId = studentId;
       user.phoneVerified = true;
+      if (req.body.fcmToken) {
+        upsertFcmToken(user, {
+          fcmToken: req.body.fcmToken,
+          platform: req.body.platform,
+          deviceId: req.body.deviceId
+        });
+      }
       await user.save();
     } else {
       user = new User({
@@ -227,6 +247,13 @@ export const registerUser = async (req, res) => {
         studentId: studentId || "",
         phoneVerified: true
       });
+      if (req.body.fcmToken) {
+        upsertFcmToken(user, {
+          fcmToken: req.body.fcmToken,
+          platform: req.body.platform,
+          deviceId: req.body.deviceId
+        });
+      }
       await user.save();
     }
 
@@ -281,6 +308,15 @@ export const loginUser = async (req, res) => {
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid phone or email and password combination" });
+    }
+
+    if (req.body.fcmToken) {
+      upsertFcmToken(user, {
+        fcmToken: req.body.fcmToken,
+        platform: req.body.platform,
+        deviceId: req.body.deviceId
+      });
+      await user.save();
     }
 
     const seller = await Seller.findOne({
@@ -480,6 +516,14 @@ export const updateUserProfile = async (req, res) => {
       if (standard !== undefined) user.standard = standard;
       if (password) user.password = password;
       if (Array.isArray(addresses)) user.addresses = addresses;
+    }
+
+    if (req.body.fcmToken) {
+      upsertFcmToken(user, {
+        fcmToken: req.body.fcmToken,
+        platform: req.body.platform,
+        deviceId: req.body.deviceId
+      });
     }
 
     await user.save();
@@ -701,6 +745,192 @@ export const uploadUserAvatar = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to upload avatar photo", error: error.message });
+  }
+};
+
+// 11. Register or Update FCM Device Token
+export const saveFcmToken = async (req, res) => {
+  try {
+    const { fcmToken, token: bodyToken, platform = "android", deviceId = "", phone, role } = req.body;
+    const targetToken = fcmToken || bodyToken;
+
+    if (!targetToken || typeof targetToken !== "string" || !targetToken.trim()) {
+      return res.status(400).json({ success: false, message: "fcmToken is required" });
+    }
+
+    const cleanToken = targetToken.trim();
+
+    // 1. Identify User / Caller
+    let user = await findUserByIdentifier(req);
+
+    // If not found yet and a phone was supplied in body
+    if (!user && phone) {
+      const cleanPhone = normalizePhone(phone);
+      user = await User.findOne({
+        $or: [
+          { phone: phone.trim() },
+          { phone: { $regex: cleanPhone + "$" } }
+        ]
+      });
+    }
+
+    const updatedEntities = [];
+
+    // 2. Update User document if found
+    if (user) {
+      upsertFcmToken(user, { fcmToken: cleanToken, platform, deviceId });
+      await user.save();
+      updatedEntities.push("User");
+    }
+
+    // 3. Update Seller document if found
+    const sellerQuery = [];
+    if (req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
+      sellerQuery.push({ _id: req.user.id });
+    }
+    const checkPhone = user?.phone || req.user?.phone || req.headers?.["x-user-phone"] || req.headers?.["x-seller-phone"] || phone;
+    if (checkPhone) {
+      const cleanPhone = normalizePhone(checkPhone);
+      sellerQuery.push({ phone: checkPhone.trim() });
+      if (cleanPhone.length >= 10) {
+        sellerQuery.push({ phone: { $regex: cleanPhone + "$" } });
+      }
+    }
+    if (sellerQuery.length > 0) {
+      const seller = await Seller.findOne({ $or: sellerQuery });
+      if (seller) {
+        upsertFcmToken(seller, { fcmToken: cleanToken, platform, deviceId });
+        await seller.save();
+        updatedEntities.push("Seller");
+      }
+    }
+
+    // 4. Update DeliveryBoy document if found
+    if (role === "delivery" || role === "deliveryBoy" || checkPhone) {
+      const cleanPhone = normalizePhone(checkPhone);
+      const deliveryBoy = await DeliveryBoy.findOne({
+        $or: [
+          ...(checkPhone ? [{ phone: checkPhone.trim() }] : []),
+          ...(cleanPhone ? [{ phone: { $regex: cleanPhone + "$" } }] : [])
+        ]
+      });
+      if (deliveryBoy) {
+        upsertFcmToken(deliveryBoy, { fcmToken: cleanToken, platform, deviceId });
+        await deliveryBoy.save();
+        updatedEntities.push("DeliveryBoy");
+      }
+    }
+
+    // 5. If no entity found, auto-create a user if phone is provided
+    if (updatedEntities.length === 0) {
+      if (checkPhone) {
+        const cleanPhone = normalizePhone(checkPhone);
+        const newUser = new User({
+          name: `User ${cleanPhone.slice(-4)}`,
+          phone: `+91${cleanPhone}`,
+          email: `user_${cleanPhone}@bookvardi.local`,
+          phoneVerified: true,
+          fcmToken: cleanToken,
+          fcmTokens: [
+            {
+              token: cleanToken,
+              platform,
+              deviceId,
+              lastActive: new Date()
+            }
+          ]
+        });
+        await newUser.save();
+        return res.json({
+          success: true,
+          message: "FCM token saved successfully into new user document",
+          entitiesUpdated: ["User"],
+          fcmToken: cleanToken,
+          platform
+        });
+      }
+
+      return res.status(404).json({
+        success: false,
+        message: "No user, seller, or delivery profile found to link with this FCM token. Please authenticate or provide a phone number."
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `FCM token saved successfully into ${updatedEntities.join(", ")}`,
+      entitiesUpdated: updatedEntities,
+      fcmToken: cleanToken,
+      platform
+    });
+  } catch (error) {
+    console.error("Error saving FCM token:", error);
+    return res.status(500).json({ success: false, message: "Failed to save FCM token", error: error.message });
+  }
+};
+
+// 12. Remove FCM Device Token (Logout / Invalidation)
+export const removeFcmToken = async (req, res) => {
+  try {
+    const { fcmToken, token: bodyToken, phone } = req.body;
+    const targetToken = fcmToken || bodyToken;
+
+    if (!targetToken || typeof targetToken !== "string" || !targetToken.trim()) {
+      return res.status(400).json({ success: false, message: "fcmToken is required to remove" });
+    }
+
+    const cleanToken = targetToken.trim();
+    let user = await findUserByIdentifier(req);
+    if (!user && phone) {
+      const cleanPhone = normalizePhone(phone);
+      user = await User.findOne({
+        $or: [
+          { phone: phone.trim() },
+          { phone: { $regex: cleanPhone + "$" } }
+        ]
+      });
+    }
+
+    const removedEntities = [];
+    if (user && removeFcmTokenFromDoc(user, cleanToken)) {
+      await user.save();
+      removedEntities.push("User");
+    }
+
+    const checkPhone = user?.phone || req.user?.phone || req.headers?.["x-user-phone"] || req.headers?.["x-seller-phone"] || phone;
+    if (checkPhone) {
+      const cleanPhone = normalizePhone(checkPhone);
+      const seller = await Seller.findOne({
+        $or: [
+          { phone: checkPhone.trim() },
+          { phone: { $regex: cleanPhone + "$" } }
+        ]
+      });
+      if (seller && removeFcmTokenFromDoc(seller, cleanToken)) {
+        await seller.save();
+        removedEntities.push("Seller");
+      }
+
+      const deliveryBoy = await DeliveryBoy.findOne({
+        $or: [
+          { phone: checkPhone.trim() },
+          { phone: { $regex: cleanPhone + "$" } }
+        ]
+      });
+      if (deliveryBoy && removeFcmTokenFromDoc(deliveryBoy, cleanToken)) {
+        await deliveryBoy.save();
+        removedEntities.push("DeliveryBoy");
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "FCM token removed successfully",
+      entitiesUpdated: removedEntities
+    });
+  } catch (error) {
+    console.error("Error removing FCM token:", error);
+    return res.status(500).json({ success: false, message: "Failed to remove FCM token", error: error.message });
   }
 };
 

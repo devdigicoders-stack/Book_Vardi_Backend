@@ -54,6 +54,7 @@ import {
 import { exportSellerOrders } from "../controllers/exportController.js";
 import { uploadSellerDocs, uploadProductImages } from "../middlewares/upload.js";
 import { authenticateSeller } from "../middlewares/auth.js";
+import { saveFcmToken, removeFcmToken } from "../controllers/userAuthController.js";
 
 const router = express.Router();
 
@@ -85,6 +86,8 @@ router.get("/profile", authenticateSeller, getSellerProfile);
 router.put("/profile", authenticateSeller, uploadSellerDocs, updateSellerProfile);
 router.get("/settings", authenticateSeller, getSellerSettings);
 router.put("/settings", authenticateSeller, updateSellerSettings);
+router.post("/fcm-token", authenticateSeller, saveFcmToken);
+router.delete("/fcm-token", authenticateSeller, removeFcmToken);
 
 // ==========================================
 // 3. Seller Single Product Management & Offers
