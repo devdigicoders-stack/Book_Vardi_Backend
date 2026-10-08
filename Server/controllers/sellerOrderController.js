@@ -37,7 +37,7 @@ const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL 
 
 // Helper to extract authenticated seller ID
 const resolveSellerId = (req) => {
-  const id = req.user?.id || req.seller?._id || req.seller?.id || req.user?._id || req.user?.phone || req.headers["x-seller-id"] || req.query?.sellerId || null;
+  const id = req.user?.id || req.seller?._id || req.seller?.id || req.user?._id || req.user?.phone || req.headers?.["x-seller-id"] || req.query?.sellerId || null;
   if (!id || id === "undefined" || id === "null" || id === "[object Object]") return null;
   return id;
 };
@@ -54,8 +54,8 @@ const getExpandedSellerScope = async (req) => {
       req.user?._id,
       req.user?.phone,
       req.seller?.phone,
-      req.headers["x-seller-id"],
-      req.headers["x-user-phone"],
+      req.headers?.["x-seller-id"],
+      req.headers?.["x-user-phone"],
       req.query?.sellerId
     ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
@@ -202,34 +202,43 @@ const getExpandedSellerScope = async (req) => {
   }
 };
 
+// Helper to check if a specific order item belongs to the given seller scope
+export const isItemBelongingToSellerScope = (item, scope) => {
+  if (!item) return false;
+  const strExpandedSellerIds = scope?.strExpandedSellerIds || [];
+  const strAllProductKeys = scope?.allProductKeys ? scope.allProductKeys.map(String) : [];
+  const productNameRegexes = scope?.productNameRegexes || [];
+  if (!strExpandedSellerIds || !strExpandedSellerIds.length) return false;
+
+  const itemSellerIdStr = item.sellerId ? String(item.sellerId._id || item.sellerId) : "";
+  const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
+  const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
+
+  const matchSeller = strExpandedSellerIds.some((sId) => {
+    if (!sId) return false;
+    const cleanSId = String(sId).toLowerCase();
+    return (
+      (itemSellerIdStr && (itemSellerIdStr === sId || (sId.length >= 8 && itemSellerIdStr.endsWith(sId.slice(-10))))) ||
+      (itemSellerStr && (itemSellerStr === sId || (sId.length >= 8 && itemSellerStr.endsWith(sId.slice(-10))))) ||
+      (itemStoreNameStr && itemStoreNameStr.toLowerCase() === cleanSId)
+    );
+  });
+
+  const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId?._id || item.productId || item.id || item._id));
+  const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
+  return Boolean(matchSeller || matchProduct || matchName);
+};
+
 // Helper to format a single Order document for seller view
 export const formatSellerSingleOrder = (o, scope = null) => {
   if (!o) return null;
   const customerObj = o.customer || {};
   const itemsList = Array.isArray(o.items) ? o.items : [];
   const strExpandedSellerIds = scope?.strExpandedSellerIds;
-  const strAllProductKeys = scope?.allProductKeys ? scope.allProductKeys.map(String) : [];
-  const productNameRegexes = scope?.productNameRegexes || [];
 
   const relevantItems = itemsList.filter((item) => {
     if (!strExpandedSellerIds || !strExpandedSellerIds.length) return true;
-    const itemSellerIdStr = item.sellerId ? String(item.sellerId._id || item.sellerId) : "";
-    const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
-    const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
-
-    const matchSeller = strExpandedSellerIds.some((sId) => {
-      if (!sId) return false;
-      const cleanSId = String(sId).toLowerCase();
-      return (
-        (itemSellerIdStr && (itemSellerIdStr === sId || (sId.length >= 8 && itemSellerIdStr.endsWith(sId.slice(-10))))) ||
-        (itemSellerStr && (itemSellerStr === sId || (sId.length >= 8 && itemSellerStr.endsWith(sId.slice(-10))))) ||
-        (itemStoreNameStr && itemStoreNameStr.toLowerCase() === cleanSId)
-      );
-    });
-
-    const matchProduct = (item.productId || item.id || item._id) && strAllProductKeys.includes(String(item.productId?._id || item.productId || item.id || item._id));
-    const matchName = item.name && productNameRegexes.some((regex) => regex.test(item.name));
-    return matchSeller || matchProduct || matchName;
+    return isItemBelongingToSellerScope(item, scope);
   });
 
   if (relevantItems.length === 0 && strExpandedSellerIds && strExpandedSellerIds.length > 0) {
@@ -256,6 +265,8 @@ export const formatSellerSingleOrder = (o, scope = null) => {
 
   const resolvedSubtotal = computedItemsSubtotal;
 
+  // Compute status strictly from THIS seller's items to prevent other sellers' changes from corrupting this dashboard
+  const sellerComputedStatus = relevantItems.length > 0 ? calculateOverallOrderStatus(relevantItems) : null;
   const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
   const hasActiveReturnRequest = o.returnRequest &&
     typeof o.returnRequest === "object" &&
@@ -264,7 +275,7 @@ export const formatSellerSingleOrder = (o, scope = null) => {
 
   const rawStatus = hasActiveReturnRequest
     ? o.returnRequest.status
-    : (o.overallStatus || sellerItemStatus || o.status || "Pending");
+    : (sellerComputedStatus || sellerItemStatus || o.overallStatus || o.status || "Pending");
 
   const formattedStatus = normalizeOrderStatus(rawStatus);
 
@@ -500,12 +511,18 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       item = order.items.find(i => String(i._id) === String(itemId) || String(i.id) === String(itemId));
     }
 
-    if (!item && order.items && order.items.length > 0) {
-      item = order.items[0];
-    }
-
     if (!item) {
       return res.status(404).json({ message: "Order item not found" });
+    }
+
+    // STRICT MULTI-SELLER AUTHORIZATION: Ensure seller owns this specific item
+    const scope = await getExpandedSellerScope(req);
+    const isOwner = isItemBelongingToSellerScope(item, scope);
+    if (!isOwner && req.user?.role !== "admin" && req.user?.role !== "super_admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: You can only update fulfillment status for your own products."
+      });
     }
 
     let rawMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
@@ -760,13 +777,12 @@ export const updateSellerOrderStatus = async (req, res) => {
 
     // Also update item statuses in items array for seller's items
     if (Array.isArray(order.items) && order.items.length > 0) {
-      const sellerIdStr = String(sellerInfo.sellerId || req.user?.id || '').trim();
+      const scope = await getExpandedSellerScope(req);
       const updatedItems = order.items.map(item => {
         const itemObj = item.toObject ? item.toObject() : item;
-        const itemSellerId = String(itemObj.sellerId || itemObj.sellerDetails?.sellerId || '').trim();
-        const isBelongingToSeller = !sellerIdStr || !itemSellerId || sellerIdStr === itemSellerId;
+        const isBelongingToSeller = isItemBelongingToSellerScope(itemObj, scope);
         if (!isBelongingToSeller) {
-          return itemObj;
+          return itemObj; // Preserved untouched: other sellers' items remain unchanged
         }
 
         return {
@@ -791,15 +807,9 @@ export const updateSellerOrderStatus = async (req, res) => {
       });
 
       updatePayload.items = updatedItems;
-      // LATEST STATUS IS FINAL: If seller explicitly requested status, keep formattedStatus!
-      if (!status) {
-        const recomputedOverall = calculateOverallOrderStatus(updatedItems);
-        updatePayload.status = recomputedOverall;
-        updatePayload.overallStatus = recomputedOverall;
-      } else {
-        updatePayload.status = formattedStatus;
-        updatePayload.overallStatus = formattedStatus;
-      }
+      const recomputedOverall = calculateOverallOrderStatus(updatedItems);
+      updatePayload.status = recomputedOverall;
+      updatePayload.overallStatus = recomputedOverall;
     }
 
     // Update MongoDB directly using updateOne

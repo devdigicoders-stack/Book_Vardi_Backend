@@ -48,8 +48,8 @@ const getExpandedSellerIds = async (req) => {
     req.user?._id,
     req.user?.phone,
     req.seller?.phone,
-    req.headers["x-seller-id"],
-    req.headers["x-user-phone"],
+    req.headers?.["x-seller-id"],
+    req.headers?.["x-user-phone"],
     req.query?.sellerId
   ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
@@ -493,7 +493,7 @@ export const createProduct = async (req, res) => {
 };
 
 // Helper to verify if the requesting seller or admin owns the given product
-const checkProductOwnership = async (req, product) => {
+export const checkProductOwnership = async (req, product) => {
   if (!product) return false;
   if (req.user?.role === "admin" || req.user?.role === "super_admin") return true;
 
@@ -508,7 +508,13 @@ const checkProductOwnership = async (req, product) => {
     product.createdBy
   ].filter(Boolean).map(s => String(s));
 
-  if (productOwnerIds.length === 0) return true;
+  if (productOwnerIds.length === 0) {
+    // If no explicit owner ID, check store name matching
+    const productStore = (product.sellerStoreName || product.storeName || "").trim().toLowerCase();
+    const requestingStore = (req.seller?.storeName || req.seller?.name || "").trim().toLowerCase();
+    if (productStore && requestingStore && productStore === requestingStore) return true;
+    return false;
+  }
   return productOwnerIds.some(ownerId => expandedStrSet.has(ownerId));
 };
 

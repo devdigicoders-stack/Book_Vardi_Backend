@@ -104,8 +104,15 @@ export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
     });
   }
 
-  // 3. Competitor invitations are secret
-  ord.invitedSellerIds = [];
+  // 3. Competitor invitations are secret, but keep requesting seller's invitation intact
+  if (Array.isArray(ord.invitedSellerIds)) {
+    ord.invitedSellerIds = ord.invitedSellerIds.filter(s => {
+      const sId = String(s?._id || s?.id || s).trim();
+      return candidateIdSet.has(sId);
+    });
+  } else {
+    ord.invitedSellerIds = [];
+  }
 
   // 4. Do not leak other sellers' advance proposals on open orders
   if (!myQuote && !isAwardedToThisSeller) {
@@ -278,19 +285,15 @@ export const getSchoolOrderById = async (req, res) => {
         return sId && sId === requestingSellerId;
       });
 
-      const isUnassignedBroadcast = (order.assignmentMode === "broadcast" || order.isGlobalRfq || order.isGlobal || order.isPublic) &&
-        !assignedSellerIdStr &&
-        !order.acceptedQuoteId &&
-        !["completed", "fulfilled", "cancelled", "rejected"].includes(String(order.status || "").toLowerCase());
+      const isBroadcast = order.assignmentMode === "broadcast" || order.isGlobalRfq || order.isGlobal || order.isPublic || order.assignmentMode === "unassigned" || !order.assignmentMode || order.assignmentMode === "open";
 
       const sellerQuoted = Array.isArray(order.quotations) && order.quotations.some(q => {
         const qSellerId = String(q.sellerId?._id || q.sellerId?.id || q.sellerId || "");
         return qSellerId && qSellerId === requestingSellerId;
       });
-      const notAwardedToAnother = !assignedSellerIdStr || assignedSellerIdStr === requestingSellerId;
-      const isAuthorizedSellerQuoted = sellerQuoted && notAwardedToAnother;
 
-      const isAuthorized = isAssignedSeller || isInvitedSeller || isUnassignedBroadcast || isAuthorizedSellerQuoted;
+      const isPrepaymentPaid = order.advancePaymentStatus === "paid";
+      const isAuthorized = isAssignedSeller || isInvitedSeller || isBroadcast || sellerQuoted || (!isPrepaymentPaid && order.assignmentMode !== "direct");
 
       if (!isAuthorized) {
         return res.status(403).json({ success: false, message: "Access denied. This bulk order is private to another seller." });
@@ -446,30 +449,34 @@ export const getSellerSchoolOrders = async (req, res) => {
 
     const matchIds = [...validObjectIds, ...stringIds];
 
-    // Open broadcast / global RFQ orders (unassigned to any specific seller yet)
-    const openBroadcastCondition = {
+    // Global broadcast / RFQ orders (visible to all active sellers)
+    const broadcastCondition = {
       $or: [
         { assignmentMode: "broadcast" },
         { isGlobalRfq: true },
         { isGlobal: true },
-        { isPublic: true }
+        { isPublic: true },
+        { assignmentMode: "unassigned" },
+        { assignmentMode: "open" },
+        { assignmentMode: "" },
+        { assignmentMode: { $exists: false } },
+        { assignmentMode: null },
+        // Any order that is not strictly private direct and whose prepayment is not confirmed remains open to all sellers
+        { assignmentMode: { $ne: "direct" }, advancePaymentStatus: { $ne: "paid" } }
       ],
-      $and: [
-        { $or: [{ sellerId: { $exists: false } }, { sellerId: null }] },
-        { $or: [{ acceptedQuoteId: { $exists: false } }, { acceptedQuoteId: null }] }
-      ],
-      status: { $nin: ["completed", "fulfilled", "cancelled", "rejected", "received"] }
+      status: { $nin: ["cancelled", "rejected"] }
     };
 
     const queryConditions = [
-      openBroadcastCondition
+      broadcastCondition
     ];
 
-    // Orders explicitly assigned or invited to this seller
+    // Orders explicitly assigned, invited, or quoted by this seller
     if (matchIds.length > 0) {
       queryConditions.push(
         { sellerId: { $in: matchIds } },
-        { invitedSellerIds: { $in: matchIds } }
+        { invitedSellerIds: { $in: matchIds } },
+        { "quotations.sellerId": { $in: matchIds } }
       );
     }
 
@@ -500,10 +507,22 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     }
 
     const assignedSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId.id || bulkOrder.sellerId) : "";
-    if (assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+    const isBroadcast = bulkOrder.assignmentMode === "broadcast" || bulkOrder.isGlobalRfq || bulkOrder.isGlobal || bulkOrder.isPublic || bulkOrder.assignmentMode === "unassigned" || !bulkOrder.assignmentMode || bulkOrder.assignmentMode === "open";
+    const isPrepaymentPaid = bulkOrder.advancePaymentStatus === "paid";
+
+    // If prepayment has already been paid and verified for another seller, lock the consignment
+    if (isPrepaymentPaid && assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+      return res.status(403).json({
+        success: false,
+        message: "This bulk order has already been finalized and advance prepayment confirmed with another seller."
+      });
+    }
+
+    // For strictly private direct orders, enforce private assignment
+    if (bulkOrder.assignmentMode === "direct" && !isBroadcast && assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
       return res.status(403).json({ success: false, message: "This bulk order has already been assigned or accepted by another seller." });
     }
-    if ((bulkOrder.assignmentMode === "direct" || bulkOrder.assignmentMode === "selected") && !assignedSellerIdStr) {
+    if (bulkOrder.assignmentMode === "direct" && !isBroadcast && !assignedSellerIdStr) {
       const isInvited = Array.isArray(bulkOrder.invitedSellerIds) && bulkOrder.invitedSellerIds.some(s => String(s._id || s.id || s) === String(sellerId));
       if (!isInvited) {
         return res.status(403).json({ success: false, message: "This bulk order is private and was not assigned or invited to you." });
@@ -517,6 +536,10 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     const sellerCity = seller ? (seller.city || "") : "";
 
     bulkOrder.sellerId = sellerId;
+    bulkOrder.sellerName = sellerName;
+    bulkOrder.sellerStoreName = sellerStoreName;
+    bulkOrder.sellerPhone = sellerPhone;
+    bulkOrder.sellerCity = sellerCity;
 
     // Ensure seller acceptance generates a formal quotation record so quotations.length reflects to Admin & Buyer
     if (!Array.isArray(bulkOrder.quotations)) {
@@ -604,6 +627,8 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     if (activeQuote) {
       activeQuote.status = "approved";
       activeQuote.negotiationStage = "approved";
+      activeQuote.acceptanceMode = "target_budget";
+      activeQuote.notes = `Accepted direct fulfillment at buyer's target budget of ₹${calculatedQuoteAmount.toLocaleString()}`;
       bulkOrder.acceptedQuoteId = activeQuote._id;
     }
 
@@ -611,6 +636,9 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     bulkOrder.sellerAdvanceAmount = advAmt;
     bulkOrder.prepaymentPercentage = advPct;
     bulkOrder.prepaymentAmount = advAmt;
+    bulkOrder.acceptanceMode = "target_budget";
+    bulkOrder.acceptedAtTargetBudget = true;
+    bulkOrder.acceptedPrice = calculatedQuoteAmount;
     bulkOrder.status = "accepted";
     bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
 
@@ -702,10 +730,22 @@ export const submitSellerQuotation = async (req, res) => {
     }
 
     const assignedSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId.id || bulkOrder.sellerId) : "";
-    if (assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+    const isBroadcast = bulkOrder.assignmentMode === "broadcast" || bulkOrder.isGlobalRfq || bulkOrder.isGlobal || bulkOrder.isPublic || bulkOrder.assignmentMode === "unassigned" || !bulkOrder.assignmentMode || bulkOrder.assignmentMode === "open";
+    const isPrepaymentPaid = bulkOrder.advancePaymentStatus === "paid";
+
+    // If advance payment has already been confirmed with another seller, bidding is officially closed
+    if (isPrepaymentPaid && assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
+      return res.status(403).json({
+        success: false,
+        message: "This bulk order has already been finalized and advance prepayment confirmed with another seller."
+      });
+    }
+
+    // For strictly private direct orders, enforce private assignment
+    if (bulkOrder.assignmentMode === "direct" && !isBroadcast && assignedSellerIdStr && assignedSellerIdStr !== String(sellerId)) {
       return res.status(403).json({ success: false, message: "This bulk order has already been awarded to another seller." });
     }
-    if ((bulkOrder.assignmentMode === "direct" || bulkOrder.assignmentMode === "selected") && !assignedSellerIdStr) {
+    if (bulkOrder.assignmentMode === "direct" && !isBroadcast && !assignedSellerIdStr) {
       const isInvited = Array.isArray(bulkOrder.invitedSellerIds) && bulkOrder.invitedSellerIds.some(s => String(s._id || s.id || s) === String(sellerId));
       if (!isInvited) {
         return res.status(403).json({ success: false, message: "This bulk order is private and was not assigned or invited to you." });
