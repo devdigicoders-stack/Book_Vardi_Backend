@@ -34,7 +34,7 @@ export const getOrInitDeliveryConfig = async () => {
         },
         {
           partnerId: "bluedart",
-          name: "BlueDart Campus Air Priority",
+          name: "BlueDart Air Priority",
           code: "BLUEDART",
           active: true,
           isDefault: false,
@@ -246,7 +246,7 @@ export const getLiveAwbTrackingService = async (awbNumber) => {
   const courierPrefix = upperAwb.split("-")[0] || "SHIP";
   const partnerNameMap = {
     DELH: "Delhivery Direct Express",
-    BLUE: "BlueDart Campus Air",
+    BLUE: "BlueDart Air Priority",
     DTDC: "DTDC Express Courier",
     EKAR: "Ekart Logistics",
     POST: "India Post SpeedPost",

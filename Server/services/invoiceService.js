@@ -7,6 +7,7 @@ export const isGenericSellerPlaceholder = (val) => {
     s === '' ||
     s === 'bookvardi verified seller hub' ||
     s === 'bookvardi verified seller' ||
+    s === 'verified seller' ||
     s === 'bookvardimerchant' ||
     s === 'bookvardi merchant' ||
     s === 'book vardi partner merchant' ||
@@ -16,6 +17,7 @@ export const isGenericSellerPlaceholder = (val) => {
     s === 'new merchant' ||
     s === 'merchant store' ||
     s === 'direct marketplace' ||
+    s === 'exempt / n/a' ||
     s === 'n/a'
   );
 };
@@ -100,7 +102,7 @@ export const resolveInvoiceSellerDetails = (order, filterSellerId = null) => {
 
   if (!targetItem) {
     targetItem = items.find(it => {
-      const cand = it.sellerDetails?.storeName || it.sellerDetails?.sellerName || it.sellerName || it.storeName;
+      const cand = it.sellerStoreName || it.storeName || it.sellerName || it.sellerDetails?.storeName || it.sellerDetails?.sellerStoreName || it.sellerDetails?.tradeName || it.sellerDetails?.businessName || it.sellerDetails?.sellerName;
       return cand && !isGenericSellerPlaceholder(cand);
     }) || items[0] || {};
   }
@@ -110,21 +112,38 @@ export const resolveInvoiceSellerDetails = (order, filterSellerId = null) => {
 
   const storeCandidate = 
     (sObj && !isGenericSellerPlaceholder(sObj.storeName) && sObj.storeName) ||
+    (sObj && !isGenericSellerPlaceholder(sObj.tradeName) && sObj.tradeName) ||
+    (sObj && !isGenericSellerPlaceholder(sObj.businessName) && sObj.businessName) ||
+    (sObj && !isGenericSellerPlaceholder(sObj.legalBusinessName) && sObj.legalBusinessName) ||
     (sObj && !isGenericSellerPlaceholder(sObj.name) && sObj.name) ||
     (sDetails && !isGenericSellerPlaceholder(sDetails.storeName) && sDetails.storeName) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.sellerStoreName) && sDetails.sellerStoreName) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.tradeName) && sDetails.tradeName) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.businessName) && sDetails.businessName) ||
+    (sDetails && !isGenericSellerPlaceholder(sDetails.legalBusinessName) && sDetails.legalBusinessName) ||
     (sDetails && !isGenericSellerPlaceholder(sDetails.sellerName) && sDetails.sellerName) ||
-    (!isGenericSellerPlaceholder(targetItem.sellerName) && targetItem.sellerName) ||
-    (!isGenericSellerPlaceholder(targetItem.storeName) && targetItem.storeName) ||
     (!isGenericSellerPlaceholder(targetItem.sellerStoreName) && targetItem.sellerStoreName) ||
+    (!isGenericSellerPlaceholder(targetItem.storeName) && targetItem.storeName) ||
+    (!isGenericSellerPlaceholder(targetItem.sellerName) && targetItem.sellerName) ||
     (!isGenericSellerPlaceholder(order.sellerStoreName) && order.sellerStoreName) ||
+    (!isGenericSellerPlaceholder(order.storeName) && order.storeName) ||
+    (!isGenericSellerPlaceholder(order.sellerTradeName) && order.sellerTradeName) ||
     (!isGenericSellerPlaceholder(order.sellerName) && order.sellerName) ||
     sObj?.storeName ||
+    sObj?.tradeName ||
+    sObj?.businessName ||
+    sObj?.legalBusinessName ||
     sObj?.name ||
     sDetails.storeName ||
+    sDetails.sellerStoreName ||
+    sDetails.tradeName ||
+    sDetails.businessName ||
     sDetails.sellerName ||
-    targetItem.sellerName ||
+    targetItem.sellerStoreName ||
     targetItem.storeName ||
+    targetItem.sellerName ||
     order.sellerStoreName ||
+    order.storeName ||
     order.sellerName ||
     "BookVardi Verified Seller";
 
@@ -453,19 +472,41 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
 
   // Helper to resolve seller name per product item
   const getItemSellerName = (item) => {
+    if (item.sellerStoreName && !isGenericSellerPlaceholder(item.sellerStoreName)) return item.sellerStoreName;
+    if (item.storeName && !isGenericSellerPlaceholder(item.storeName)) return item.storeName;
     if (item.sellerId && typeof item.sellerId === "object") {
-      const sName = item.sellerId.storeName || item.sellerId.name || item.sellerId.sellerName || item.sellerId.legalName;
+      const sName =
+        item.sellerId.storeName ||
+        item.sellerId.tradeName ||
+        item.sellerId.businessName ||
+        item.sellerId.legalBusinessName ||
+        item.sellerId.name ||
+        item.sellerId.sellerName ||
+        item.sellerId.legalName;
       if (sName && !isGenericSellerPlaceholder(sName)) return sName;
     }
     if (item.sellerDetails && typeof item.sellerDetails === "object") {
-      const sName = item.sellerDetails.storeName || item.sellerDetails.sellerName;
+      const sName =
+        item.sellerDetails.storeName ||
+        item.sellerDetails.sellerStoreName ||
+        item.sellerDetails.tradeName ||
+        item.sellerDetails.businessName ||
+        item.sellerDetails.sellerName;
       if (sName && !isGenericSellerPlaceholder(sName)) return sName;
     }
     if (item.sellerName && !isGenericSellerPlaceholder(item.sellerName)) return item.sellerName;
-    if (item.storeName && !isGenericSellerPlaceholder(item.storeName)) return item.storeName;
     if (item.seller) {
-      const sName = typeof item.seller === "string" ? item.seller : (item.seller.storeName || item.seller.name);
+      const sName = typeof item.seller === "string" ? item.seller : (item.seller.storeName || item.seller.tradeName || item.seller.businessName || item.seller.name);
       if (sName && !isGenericSellerPlaceholder(sName)) return sName;
+    }
+    if (item.productId && typeof item.productId === "object") {
+      const pName =
+        item.productId.sellerStoreName ||
+        item.productId.storeName ||
+        item.productId.tradeName ||
+        item.productId.businessName ||
+        item.productId.sellerName;
+      if (pName && !isGenericSellerPlaceholder(pName)) return pName;
     }
     return resolvedSeller.storeName || "BookVardi Verified Seller";
   };
@@ -874,7 +915,18 @@ export const generateCreditNotePDF = (order, filterSellerId = null) => {
       .filter(Boolean)
       .join("\n");
 
-    const itemSeller = item.sellerName || item.storeName || (item.sellerDetails && (item.sellerDetails.storeName || item.sellerDetails.sellerName)) || (item.sellerId && (item.sellerId.storeName || item.sellerId.name)) || resolvedSeller.storeName;
+    const itemSeller =
+      (!isGenericSellerPlaceholder(item.sellerStoreName) && item.sellerStoreName) ||
+      (!isGenericSellerPlaceholder(item.storeName) && item.storeName) ||
+      (!isGenericSellerPlaceholder(item.sellerName) && item.sellerName) ||
+      (item.sellerDetails && !isGenericSellerPlaceholder(item.sellerDetails.storeName) && item.sellerDetails.storeName) ||
+      (item.sellerDetails && !isGenericSellerPlaceholder(item.sellerDetails.sellerStoreName) && item.sellerDetails.sellerStoreName) ||
+      (item.sellerDetails && !isGenericSellerPlaceholder(item.sellerDetails.tradeName) && item.sellerDetails.tradeName) ||
+      (item.sellerDetails && !isGenericSellerPlaceholder(item.sellerDetails.sellerName) && item.sellerDetails.sellerName) ||
+      (item.sellerId && typeof item.sellerId === "object" && !isGenericSellerPlaceholder(item.sellerId.storeName) && item.sellerId.storeName) ||
+      (item.sellerId && typeof item.sellerId === "object" && !isGenericSellerPlaceholder(item.sellerId.tradeName) && item.sellerId.tradeName) ||
+      (item.sellerId && typeof item.sellerId === "object" && !isGenericSellerPlaceholder(item.sellerId.name) && item.sellerId.name) ||
+      resolvedSeller.storeName;
 
     const displayQty = formatInvoiceQuantity(item);
 

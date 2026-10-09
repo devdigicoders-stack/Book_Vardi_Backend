@@ -140,6 +140,14 @@ const quotationSchema = new mongoose.Schema(
       enum: ["submitted", "under_review", "approved", "rejected", "buyer_accepted"],
       default: "submitted"
     },
+    acceptanceMode: {
+      type: String,
+      default: "standard"
+    },
+    acceptedAtTargetBudget: {
+      type: Boolean,
+      default: false
+    },
     submittedAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
@@ -236,6 +244,9 @@ const schoolBulkOrderSchema = new mongoose.Schema(
     // Seller Quotations & Counter Offers
     quotations: [quotationSchema],
     acceptedQuoteId: { type: mongoose.Schema.Types.ObjectId },
+    acceptanceMode: { type: String, default: "standard" },
+    acceptedAtTargetBudget: { type: Boolean, default: false },
+    acceptedPrice: { type: Number, default: 0 },
 
     // Delivery & Tracking Details (Seller Bulk Orders - Self Delivery Fleet)
     deliveryMode: {

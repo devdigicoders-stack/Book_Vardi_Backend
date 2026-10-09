@@ -560,13 +560,7 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     const sellerPhone = seller ? (seller.phone || "") : "";
     const sellerCity = seller ? (seller.city || "") : "";
 
-    bulkOrder.sellerId = sellerId;
-    bulkOrder.sellerName = sellerName;
-    bulkOrder.sellerStoreName = sellerStoreName;
-    bulkOrder.sellerPhone = sellerPhone;
-    bulkOrder.sellerCity = sellerCity;
-
-    // Ensure seller acceptance generates a formal quotation record so quotations.length reflects to Admin & Buyer
+    // Ensure seller acceptance generates a formal quotation record so quotations reflects to Admin & Buyer
     if (!Array.isArray(bulkOrder.quotations)) {
       bulkOrder.quotations = [];
     }
@@ -595,13 +589,56 @@ export const acceptSchoolOrderDirect = async (req, res) => {
           customerBudget: Number(r.budgetPerUnit || 0),
           pricePerUnit: Number(r.sellerPricePerUnit || r.budgetPerUnit || avgUnitPrice),
           totalPrice: Number(r.quantity || 1) * Number(r.sellerPricePerUnit || r.budgetPerUnit || avgUnitPrice),
-          discountTierNote: "Accepted direct fulfillment offer"
+          discountTierNote: "Accepted direct fulfillment offer at target budget"
         }))
       : [];
 
+    const quoteNotes = `Accepted direct fulfillment at buyer's target budget of ₹${calculatedQuoteAmount.toLocaleString()}`;
+
     if (existingIndex >= 0) {
-      bulkOrder.quotations[existingIndex].status = "submitted";
-      bulkOrder.quotations[existingIndex].negotiationStage = "seller_quoted";
+      const existingQuote = bulkOrder.quotations[existingIndex];
+      existingQuote.quoteAmount = calculatedQuoteAmount;
+      existingQuote.unitPrice = avgUnitPrice;
+      existingQuote.itemPrices = formattedItemPrices;
+      existingQuote.sellerName = sellerName;
+      existingQuote.sellerStoreName = sellerStoreName;
+      existingQuote.sellerPhone = sellerPhone;
+      existingQuote.sellerCity = sellerCity;
+      existingQuote.notes = quoteNotes;
+      existingQuote.acceptanceMode = "target_budget";
+      existingQuote.acceptedAtTargetBudget = true;
+      existingQuote.sellerAdvanceType = "percentage";
+      existingQuote.sellerAdvancePercentage = advPct;
+      existingQuote.sellerAdvanceAmount = advAmt;
+      existingQuote.prepaymentType = "percentage";
+      existingQuote.prepaymentPercentage = advPct;
+      existingQuote.prepaymentAmount = advAmt;
+      existingQuote.status = "submitted";
+      existingQuote.negotiationStage = "seller_quoted";
+      existingQuote.submittedAt = new Date();
+
+      if (!Array.isArray(existingQuote.negotiationHistory)) {
+        existingQuote.negotiationHistory = [];
+      }
+      existingQuote.negotiationHistory.push({
+        round: existingQuote.negotiationHistory.length + 1,
+        version: (existingQuote.currentVersion || 1) + 1,
+        senderRole: "seller",
+        senderName: sellerStoreName,
+        senderId: String(sellerId),
+        quoteAmount: calculatedQuoteAmount,
+        unitPrice: avgUnitPrice,
+        itemPrices: formattedItemPrices,
+        estimatedDeliveryDays: 7,
+        prepaymentType: "percentage",
+        prepaymentPercentage: advPct,
+        prepaymentAmount: advAmt,
+        prepaymentRaised: false,
+        deliveryDaysRaised: false,
+        notes: quoteNotes,
+        createdAt: new Date()
+      });
+      existingQuote.currentVersion = (existingQuote.currentVersion || 1) + 1;
     } else {
       const initialRound = {
         round: 1,
@@ -618,7 +655,7 @@ export const acceptSchoolOrderDirect = async (req, res) => {
         prepaymentAmount: advAmt,
         prepaymentRaised: false,
         deliveryDaysRaised: false,
-        notes: "Seller directly accepted bulk order request",
+        notes: quoteNotes,
         createdAt: new Date()
       };
 
@@ -633,7 +670,9 @@ export const acceptSchoolOrderDirect = async (req, res) => {
         itemPrices: formattedItemPrices,
         volumeDiscountNote: "Direct Seller Acceptance - Full Fleet Availability",
         estimatedDeliveryDays: 7,
-        notes: "Accepted direct fulfillment for institution bulk requirement",
+        notes: quoteNotes,
+        acceptanceMode: "target_budget",
+        acceptedAtTargetBudget: true,
         sellerAdvanceType: "percentage",
         sellerAdvancePercentage: advPct,
         sellerAdvanceAmount: advAmt,
@@ -649,24 +688,15 @@ export const acceptSchoolOrderDirect = async (req, res) => {
     }
 
     const activeQuote = existingIndex >= 0 ? bulkOrder.quotations[existingIndex] : bulkOrder.quotations[bulkOrder.quotations.length - 1];
-    if (activeQuote) {
-      activeQuote.status = "approved";
-      activeQuote.negotiationStage = "approved";
-      activeQuote.acceptanceMode = "target_budget";
-      activeQuote.notes = `Accepted direct fulfillment at buyer's target budget of ₹${calculatedQuoteAmount.toLocaleString()}`;
-      bulkOrder.acceptedQuoteId = activeQuote._id;
+
+    // Important: Do NOT assign bulkOrder.sellerId or set bulkOrder.status = "accepted" here!
+    // The seller's acceptance is added as a quotation at target budget.
+    // The order is officially awarded/confirmed when the buyer reviews quotes and pays the advance payment.
+    if (!bulkOrder.status || bulkOrder.status === "open" || bulkOrder.status === "published" || bulkOrder.status === "unassigned") {
+      bulkOrder.status = "quoted";
     }
 
-    bulkOrder.sellerAdvancePercentage = advPct;
-    bulkOrder.sellerAdvanceAmount = advAmt;
-    bulkOrder.prepaymentPercentage = advPct;
-    bulkOrder.prepaymentAmount = advAmt;
-    bulkOrder.acceptanceMode = "target_budget";
-    bulkOrder.acceptedAtTargetBudget = true;
-    bulkOrder.acceptedPrice = calculatedQuoteAmount;
-    bulkOrder.status = "accepted";
-    bulkOrder.advancePaymentStatus = advAmt > 0 ? "pending" : "paid";
-
+    bulkOrder.markModified("quotations");
     await bulkOrder.save();
 
     const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers["x-seller-id"]].filter(Boolean).map(String);
@@ -674,8 +704,9 @@ export const acceptSchoolOrderDirect = async (req, res) => {
 
     res.json({
       success: true,
-      message: `You have successfully accepted school bulk order #${bulkOrder.referenceId}`,
-      order: sanitizeOrderForSeller(bulkOrder, { candidateIds, candidatePhones })
+      message: `Quotation submitted at target budget of ₹${calculatedQuoteAmount.toLocaleString()}! Order is open for buyer review and will be confirmed when buyer completes advance payment.`,
+      order: sanitizeOrderForSeller(bulkOrder, { candidateIds, candidatePhones }),
+      quotation: activeQuote
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to accept school bulk order", error: error.message });

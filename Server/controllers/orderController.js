@@ -5,6 +5,7 @@ import User from "../models/User.js";
 import Seller from "../models/Seller.js";
 import Coupon from "../models/Coupon.js";
 import SellerOffer from "../models/SellerOffer.js";
+import PlatformSetting from "../models/PlatformSetting.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 
@@ -60,35 +61,35 @@ export const normalizeOrderStatus = (raw) => {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
 
+// Canonical milestone ranks in standard fulfillment lifecycle:
+export const STAGE_RANK = {
+  pending: 0,
+  placed: 0,
+  confirmed: 1,
+  processing: 2,
+  packed: 3,
+  shipped: 4,
+  in_transit: 4,
+  out_for_delivery: 5,
+  delivered: 6,
+  completed: 6
+};
+
+export const RANK_TO_STATUS = [
+  "Pending",          // 0
+  "Confirmed",        // 1
+  "Processing",       // 2
+  "Packed",           // 3
+  "Shipped",          // 4
+  "Out for Delivery", // 5
+  "Delivered"         // 6
+];
+
 // Calculate Overall Order Status across all items in a multi-product order
 export const calculateOverallOrderStatus = (items = []) => {
   if (!Array.isArray(items) || items.length === 0) {
     return "Pending";
   }
-
-  // Canonical milestone ranks in standard fulfillment lifecycle:
-  const STAGE_RANK = {
-    pending: 0,
-    placed: 0,
-    processing: 1,
-    confirmed: 2,
-    packed: 3,
-    shipped: 4,
-    in_transit: 4,
-    out_for_delivery: 5,
-    delivered: 6,
-    completed: 6
-  };
-
-  const RANK_TO_STATUS = [
-    "Pending",          // 0
-    "Processing",       // 1
-    "Confirmed",        // 2
-    "Packed",           // 3
-    "Shipped",          // 4
-    "Out for Delivery", // 5
-    "Delivered"         // 6
-  ];
 
   // Active items are items that have not been cancelled
   const nonCancelledItems = items.filter(it => {
@@ -245,11 +246,19 @@ export const isPlaceholderSeller = (str) => {
     s === 'bookvardi merchant' ||
     s === 'book vardi partner merchant' ||
     s === 'book vardi partner store' ||
+    s === 'verified seller' ||
+    s === 'other verified seller' ||
     s === 'partner merchant' ||
     s === 'unknown seller' ||
     s === 'new merchant' ||
     s === 'merchant store' ||
-    s === 'n/a'
+    s === 'direct marketplace' ||
+    s === 'seller' ||
+    s === 'merchant' ||
+    s === 'partner' ||
+    s === 'n/a' ||
+    s === 'null' ||
+    s === 'undefined'
   );
 };
 
@@ -573,7 +582,8 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         if (matchedSeller) {
           item.sellerId = matchedSeller;
           item.sellerName = matchedSeller.storeName || matchedSeller.name;
-          item.storeName = matchedSeller.storeName;
+          item.storeName = matchedSeller.storeName || matchedSeller.name;
+          item.sellerStoreName = matchedSeller.storeName || matchedSeller.name;
           item.sellerPhone = matchedSeller.phone;
           item.sellerEmail = matchedSeller.email;
           item.sellerAddress = matchedSeller.address;
@@ -583,8 +593,8 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
           if (!primarySellerDetails) primarySellerDetails = matchedSeller;
         } else if (item.sellerDetails && !isPlaceholderSeller(item.sellerDetails.storeName)) {
           if (!primarySellerDetails) primarySellerDetails = item.sellerDetails;
-        } else if (!isPlaceholderSeller(item.sellerName || item.storeName)) {
-          const sName = item.sellerName || item.storeName;
+        } else if (!isPlaceholderSeller(item.sellerStoreName || item.sellerName || item.storeName)) {
+          const sName = item.sellerStoreName || item.sellerName || item.storeName;
           if (!primarySellerDetails) {
             primarySellerDetails = {
               storeName: sName,
@@ -601,9 +611,10 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
           ord.sellerDetails = primarySellerDetails;
         }
         ord.sellerName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
-        ord.sellerStoreName = primarySellerDetails.storeName;
-        ord.sellerPhone = primarySellerDetails.phone;
-        ord.sellerCity = primarySellerDetails.city;
+        ord.sellerStoreName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
+        ord.storeName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
+        ord.sellerPhone = primarySellerDetails.phone || ord.sellerPhone || "";
+        ord.sellerCity = primarySellerDetails.city || ord.sellerCity || "";
       }
 
       // Canonicalize status across overall order and individual items
@@ -878,7 +889,7 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      let sellerStoreName = item.sellerName || item.storeName || item.sellerStoreName || "";
+      let sellerStoreName = item.sellerStoreName || item.storeName || item.sellerName || "";
 
       const isPlaceholder = (str) => {
         if (!str || typeof str !== "string") return true;
@@ -888,10 +899,15 @@ export const createOrder = async (req, res) => {
           s === "bookvardimerchant" ||
           s === "bookvardi merchant" ||
           s === "book vardi partner merchant" ||
+          s === "book vardi partner store" ||
           s === "partner merchant" ||
           s === "unknown seller" ||
           s === "new merchant" ||
           s === "merchant store" ||
+          s === "bookvardi verified seller" ||
+          s === "bookvardi verified seller hub" ||
+          s === "verified seller" ||
+          s === "exempt / n/a" ||
           s === "n/a"
         );
       };
@@ -907,6 +923,8 @@ export const createOrder = async (req, res) => {
         if (!item.image && prod.images && prod.images.length > 0) item.image = prod.images[0];
         if (!sellerStoreName && prod.sellerStoreName && !isPlaceholder(prod.sellerStoreName)) sellerStoreName = prod.sellerStoreName;
         if (!sellerStoreName && prod.storeName && !isPlaceholder(prod.storeName)) sellerStoreName = prod.storeName;
+        if (!sellerStoreName && prod.tradeName && !isPlaceholder(prod.tradeName)) sellerStoreName = prod.tradeName;
+        if (!sellerStoreName && prod.businessName && !isPlaceholder(prod.businessName)) sellerStoreName = prod.businessName;
         if (!sellerStoreName && prod.sellerName && !isPlaceholder(prod.sellerName)) sellerStoreName = prod.sellerName;
         if (!sellerStoreName && prod.legalBusinessName && !isPlaceholder(prod.legalBusinessName)) sellerStoreName = prod.legalBusinessName;
         item.isReturnable = (prod.returnPolicy === 'non_returnable' || prod.isReturnable === false) ? false : (item.isReturnable ?? prod.isReturnable ?? true);
@@ -921,21 +939,43 @@ export const createOrder = async (req, res) => {
       let sellerAddress = item.sellerAddress || "";
       let sellerCity = item.sellerCity || "";
 
-      if (!sellerStoreName && item.sellerId) {
+      const targetSellerId = item.sellerId || prod?.sellerId;
+      if (!sellerStoreName && targetSellerId) {
         try {
           let sellerUser = null;
-          if (mongoose.Types.ObjectId.isValid(item.sellerId)) {
-            sellerUser = await User.findById(item.sellerId);
+          if (mongoose.Types.ObjectId.isValid(targetSellerId)) {
+            sellerUser = await User.findById(targetSellerId);
           }
-          if (!sellerUser && typeof item.sellerId === "string") {
-            sellerUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] });
+          if (!sellerUser && typeof targetSellerId === "string") {
+            sellerUser = await User.findOne({ $or: [{ id: targetSellerId }, { phone: targetSellerId }, { email: targetSellerId }] });
           }
           if (!sellerUser) {
             const SellerModel = (await import("../models/Seller.js")).default;
-            sellerUser = await SellerModel.findById(item.sellerId).catch(() => null);
+            if (mongoose.Types.ObjectId.isValid(targetSellerId)) {
+              sellerUser = await SellerModel.findById(targetSellerId).catch(() => null);
+            }
+            if (!sellerUser) {
+              sellerUser = await SellerModel.findOne({
+                $or: [
+                  { userId: targetSellerId },
+                  { id: targetSellerId },
+                  { email: targetSellerId },
+                  { phone: targetSellerId }
+                ]
+              }).catch(() => null);
+            }
           }
           if (sellerUser) {
-            const fetchedName = sellerUser.storeName || sellerUser.name || sellerUser.legalName || sellerUser.ownerFullName || "";
+            const fetchedName =
+              sellerUser.storeName ||
+              sellerUser.tradeName ||
+              sellerUser.businessName ||
+              sellerUser.legalBusinessName ||
+              sellerUser.storeDetails?.storeName ||
+              sellerUser.name ||
+              sellerUser.legalName ||
+              sellerUser.ownerFullName ||
+              "";
             if (!isPlaceholder(fetchedName)) {
               sellerStoreName = fetchedName;
             }
@@ -953,13 +993,15 @@ export const createOrder = async (req, res) => {
 
       item.sellerName = sellerStoreName;
       item.storeName = sellerStoreName;
+      item.sellerStoreName = sellerStoreName;
       item.sellerPhone = sellerPhone;
       item.sellerEmail = sellerEmail;
       item.sellerAddress = sellerAddress;
       item.sellerCity = sellerCity;
       item.sellerDetails = {
-        sellerId: item.sellerId,
+        sellerId: item.sellerId || targetSellerId,
         storeName: sellerStoreName,
+        sellerStoreName: sellerStoreName,
         sellerName: sellerStoreName,
         phone: sellerPhone,
         email: sellerEmail,
@@ -1058,7 +1100,22 @@ export const createOrder = async (req, res) => {
       0
     ) || 1;
 
-    const totalShipping = Number(shippingCost !== undefined ? shippingCost : (shippingFee || 0));
+    let totalShipping = 0;
+    if (shippingCost !== undefined && shippingCost !== null && !isNaN(Number(shippingCost))) {
+      totalShipping = Number(shippingCost);
+    } else if (shippingFee !== undefined && shippingFee !== null && !isNaN(Number(shippingFee))) {
+      totalShipping = Number(shippingFee);
+    } else {
+      try {
+        const globalSettings = await PlatformSetting.findOne({ key: "global_settings" }).lean();
+        const threshold = Number(globalSettings?.freeShippingThreshold ?? globalSettings?.minOrderFreeShipping ?? 999);
+        const fee = Number(globalSettings?.shippingFee ?? 49);
+        const distinctCount = orderItems.length;
+        totalShipping = overallItemsSubtotal >= threshold ? 0 : (distinctCount * fee);
+      } catch (e) {
+        totalShipping = overallItemsSubtotal >= 999 ? 0 : (orderItems.length * 49);
+      }
+    }
     const totalDiscount = Number(discount || discountAmount || 0);
 
     // =========================================================================
@@ -1089,7 +1146,7 @@ export const createOrder = async (req, res) => {
 
         const groupShipping = isLastGroup
           ? Math.max(0, totalShipping - accumulatedShipping)
-          : Math.round(totalShipping * ratio);
+          : Math.round(totalShipping * (grp.items.length / (orderItems.length || 1)));
         accumulatedShipping += groupShipping;
 
         const groupTotal = Math.max(0, Math.round((groupSubtotal + groupShipping - groupDiscount) * 100) / 100);
@@ -1424,10 +1481,22 @@ export const updateOrder = async (req, res) => {
       product_return_received: { title: "Product Return Received", desc: "Returned product received at facility and inspected." }
     };
 
-    const targetItemId = req.body.itemId;
+    const targetItemId = req.body.itemId !== undefined ? req.body.itemId : req.body.itemIndex;
 
-    if (targetItemId && Array.isArray(existingOrder.items)) {
-      const itemToUpdate = existingOrder.items.find(i => String(i._id) === String(targetItemId) || String(i.id) === String(targetItemId));
+    let itemToUpdate = null;
+    if (targetItemId !== undefined && Array.isArray(existingOrder.items)) {
+      itemToUpdate = existingOrder.items.find(i => 
+        String(i._id) === String(targetItemId) || 
+        String(i.id) === String(targetItemId) ||
+        (i.productId && String(i.productId._id || i.productId) === String(targetItemId))
+      );
+      if (!itemToUpdate && !isNaN(Number(targetItemId)) && existingOrder.items[Number(targetItemId)]) {
+        itemToUpdate = existingOrder.items[Number(targetItemId)];
+      }
+      if (!itemToUpdate && req.body.itemIndex !== undefined && !isNaN(Number(req.body.itemIndex)) && existingOrder.items[Number(req.body.itemIndex)]) {
+        itemToUpdate = existingOrder.items[Number(req.body.itemIndex)];
+      }
+
       if (itemToUpdate) {
         if (canonicalStatus) {
           itemToUpdate.status = canonicalStatus;
@@ -1465,13 +1534,34 @@ export const updateOrder = async (req, res) => {
           updatedBy: req.user?.role ? (req.user.role.charAt(0).toUpperCase() + req.user.role.slice(1)) : "Admin"
         });
       }
-    } else if (canonicalStatus && newStatusKey !== previousStatusKey) {
-      existingOrder.overallStatus = canonicalStatus;
-      existingOrder.status = canonicalStatus;
-      if (Array.isArray(existingOrder.items)) {
+    } else if (canonicalStatus) {
+      // Universal order status update
+      const targetRank = STAGE_RANK[newStatusKey];
+      if (targetRank !== undefined && Array.isArray(existingOrder.items)) {
+        // FORWARD PROMOTION RULE:
+        // Promote items whose status is behind targetRank, keep items already at or ahead of targetRank!
         existingOrder.items.forEach(item => {
-          item.status = canonicalStatus;
+          const itKey = String(item.status || 'Pending').toLowerCase().trim().replace(/[\s-]+/g, '_');
+          if (itKey === 'cancelled' || itKey === 'canceled') return; // Exclude cancelled items from forward promotion
+          const itRank = STAGE_RANK[itKey] !== undefined ? STAGE_RANK[itKey] : 0;
+          if (itRank < targetRank) {
+            item.status = canonicalStatus; // Promote item behind
+          }
+          // Items with itRank >= targetRank stay as-is!
         });
+
+        // Recalculate computed overall status from the updated items
+        const computedOverall = calculateOverallOrderStatus(existingOrder.items);
+        existingOrder.overallStatus = computedOverall;
+        existingOrder.status = computedOverall;
+      } else {
+        existingOrder.overallStatus = canonicalStatus;
+        existingOrder.status = canonicalStatus;
+        if ((newStatusKey === 'cancelled' || newStatusKey === 'canceled') && Array.isArray(existingOrder.items)) {
+          existingOrder.items.forEach(item => {
+            item.status = 'Cancelled';
+          });
+        }
       }
 
       // Restock item inventory on cancellation or when product return is received / completed
@@ -1605,10 +1695,9 @@ export const updateOrder = async (req, res) => {
       };
     }
 
-    // Propagate status and fulfillment details to all order items ONLY if updating entire order
-    if (!targetItemId && existingOrder.items && Array.isArray(existingOrder.items)) {
+    // Propagate fulfillment details to all order items ONLY if updating entire order
+    if (!itemToUpdate && existingOrder.items && Array.isArray(existingOrder.items)) {
       existingOrder.items.forEach(item => {
-        if (canonicalStatus) item.status = canonicalStatus;
         if (req.body.deliveryMode) item.deliveryType = req.body.deliveryMode;
         if (req.body.courierName || req.body.trackingNumber !== undefined || req.body.trackingUrl) {
           item.thirdPartyDetails = {
@@ -1624,8 +1713,13 @@ export const updateOrder = async (req, res) => {
       });
     }
 
+    existingOrder.markModified("items");
+    existingOrder.markModified("overallStatus");
+    existingOrder.markModified("status");
+    existingOrder.markModified("timeline");
+
     await existingOrder.save();
-    res.json({ message: "Order updated successfully", order: existingOrder, whatsappDispatch: whatsappDispatchResult });
+    res.json({ success: true, message: "Order updated successfully", order: existingOrder, whatsappDispatch: whatsappDispatchResult });
   } catch (error) {
     res.status(400).json({ message: "Failed to update order", error: error.message });
   }

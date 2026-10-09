@@ -1051,12 +1051,13 @@ export const getPublicPlatformSettings = async (req, res) => {
     if (!settings) {
       settings = await PlatformSetting.create({ key: "global_settings" });
     }
-    const threshold = settings.minOrderFreeShipping !== undefined ? Number(settings.minOrderFreeShipping) : (settings.freeShippingThreshold !== undefined ? Number(settings.freeShippingThreshold) : 99);
+    const threshold = settings.minOrderFreeShipping !== undefined ? Number(settings.minOrderFreeShipping) : (settings.freeShippingThreshold !== undefined ? Number(settings.freeShippingThreshold) : 999);
     const commRate = settings.defaultCommissionRate !== undefined ? Number(settings.defaultCommissionRate) : 5;
+    const universalShippingFee = (settings.shippingFee !== undefined && settings.shippingFee !== null) ? Number(settings.shippingFee) : 49;
     res.json({
       freeShippingThreshold: threshold,
       minOrderFreeShipping: threshold,
-      shippingFee: Number(settings.shippingFee || 49),
+      shippingFee: universalShippingFee,
       defaultCommissionRate: commRate,
       commissionRate: commRate,
       supportEmail: settings.supportEmail || "support@bookvardi.in",
@@ -1064,7 +1065,7 @@ export const getPublicPlatformSettings = async (req, res) => {
     });
   } catch (error) {
     console.error("Error in getPublicPlatformSettings:", error);
-    res.json({ freeShippingThreshold: 99, minOrderFreeShipping: 99, shippingFee: 49, defaultCommissionRate: 5, commissionRate: 5 });
+    res.json({ freeShippingThreshold: 999, minOrderFreeShipping: 999, shippingFee: 49, defaultCommissionRate: 5, commissionRate: 5 });
   }
 };
 
@@ -1075,6 +1076,9 @@ export const updatePlatformSettings = async (req, res) => {
       updates.freeShippingThreshold = Number(updates.minOrderFreeShipping);
     } else if (updates.freeShippingThreshold !== undefined) {
       updates.minOrderFreeShipping = Number(updates.freeShippingThreshold);
+    }
+    if (updates.shippingFee !== undefined && updates.shippingFee !== null) {
+      updates.shippingFee = Number(updates.shippingFee);
     }
     let settings = await PlatformSetting.findOneAndUpdate(
       { key: "global_settings" },

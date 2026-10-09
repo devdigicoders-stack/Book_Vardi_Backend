@@ -3,7 +3,7 @@ import Order, { generateProductOrderId } from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
-import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus } from "./orderController.js";
+import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus, STAGE_RANK } from "./orderController.js";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 
 // Canonical Order Status Normalizer
@@ -79,6 +79,8 @@ const getExpandedSellerScope = async (req) => {
       ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
     ];
 
+    let primaryScopeStoreName = req.seller?.storeName || req.user?.storeName || "";
+
     if (orConditions.length > 0) {
       const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email storeName legalName");
       sellerDocs.forEach((doc) => {
@@ -86,7 +88,10 @@ const getExpandedSellerScope = async (req) => {
           sellerSet.add(doc._id);
           sellerSet.add(String(doc._id));
         }
-        if (doc.storeName) sellerSet.add(doc.storeName);
+        if (doc.storeName) {
+          sellerSet.add(doc.storeName);
+          if (!primaryScopeStoreName) primaryScopeStoreName = doc.storeName;
+        }
         if (doc.legalName) sellerSet.add(doc.legalName);
         if (doc.phone) {
           sellerSet.add(doc.phone);
@@ -107,7 +112,10 @@ const getExpandedSellerScope = async (req) => {
           sellerSet.add(doc._id);
           sellerSet.add(String(doc._id));
         }
-        if (doc.name) sellerSet.add(doc.name);
+        if (doc.name) {
+          sellerSet.add(doc.name);
+          if (!primaryScopeStoreName) primaryScopeStoreName = `${doc.name}'s Store`;
+        }
         if (doc.phone) {
           sellerSet.add(doc.phone);
           const cleanP = String(doc.phone).replace(/\D/g, "");
@@ -195,10 +203,10 @@ const getExpandedSellerScope = async (req) => {
 
     const filter = orderOrConditions.length > 0 ? { $or: orderOrConditions } : { _id: null };
 
-    return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter };
+    return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter, storeName: primaryScopeStoreName };
   } catch (err) {
     console.error("Error in getExpandedSellerScope:", err);
-    return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null } };
+    return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null }, storeName: "" };
   }
 };
 
@@ -335,10 +343,14 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     courierName: o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || "",
     trackingUrl: o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || "",
     sellerDetails: o.sellerDetails || orderItems[0]?.sellerDetails || null,
+    sellerStoreName: o.sellerStoreName || o.storeName || orderItems[0]?.sellerStoreName || orderItems[0]?.storeName || o.sellerDetails?.storeName || scope?.storeName || "",
+    storeName: o.storeName || o.sellerStoreName || orderItems[0]?.storeName || orderItems[0]?.sellerStoreName || o.sellerDetails?.storeName || scope?.storeName || "",
+    sellerName: o.sellerName || orderItems[0]?.sellerName || o.sellerDetails?.sellerName || scope?.storeName || "",
     selfDeliveryDetails: o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails || null,
     items: orderItems.map((item) => ({
       id: item._id || item.id,
       _id: item._id || item.id,
+      productId: item.productId || item.id || item._id,
       name: item.name || "Product Item",
       price: Number(item.price || item.finalPrice || 0),
       quantity: Number(item.quantity || 1),
@@ -350,6 +362,10 @@ export const formatSellerSingleOrder = (o, scope = null) => {
       deliveryType: item.deliveryType || o.deliveryMode || "",
       selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
       thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
+      sellerId: item.sellerId || o.sellerId || null,
+      sellerStoreName: item.sellerStoreName || item.storeName || item.sellerDetails?.storeName || o.sellerStoreName || o.storeName || scope?.storeName || "",
+      storeName: item.storeName || item.sellerStoreName || item.sellerDetails?.storeName || o.storeName || o.sellerStoreName || scope?.storeName || "",
+      sellerName: item.sellerName || item.sellerDetails?.sellerName || o.sellerName || scope?.storeName || "",
       sellerDetails: item.sellerDetails || o.sellerDetails || null
     }))
   };
@@ -778,6 +794,9 @@ export const updateSellerOrderStatus = async (req, res) => {
     // Also update item statuses in items array for seller's items
     if (Array.isArray(order.items) && order.items.length > 0) {
       const scope = await getExpandedSellerScope(req);
+      const targetKey = String(formattedStatus || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+      const targetRank = STAGE_RANK[targetKey];
+
       const updatedItems = order.items.map(item => {
         const itemObj = item.toObject ? item.toObject() : item;
         const isBelongingToSeller = isItemBelongingToSellerScope(itemObj, scope);
@@ -785,9 +804,21 @@ export const updateSellerOrderStatus = async (req, res) => {
           return itemObj; // Preserved untouched: other sellers' items remain unchanged
         }
 
+        const itKey = String(itemObj.status || 'Pending').toLowerCase().trim().replace(/[\s-]+/g, '_');
+        let nextStatus = formattedStatus;
+        if (targetRank !== undefined) {
+          if (itKey === 'cancelled' || itKey === 'canceled') {
+            nextStatus = itemObj.status; // Keep cancelled items cancelled
+          } else {
+            const itRank = STAGE_RANK[itKey] !== undefined ? STAGE_RANK[itKey] : 0;
+            // Promote if behind target; keep current if already at or ahead of target
+            nextStatus = itRank < targetRank ? formattedStatus : itemObj.status;
+          }
+        }
+
         return {
           ...itemObj,
-          status: formattedStatus,
+          status: nextStatus,
           deliveryType: resolvedMode,
           sellerDetails: sellerInfo,
           sellerName: sellerInfo.sellerName,
