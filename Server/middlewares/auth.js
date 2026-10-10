@@ -16,15 +16,17 @@ export const authenticateToken = (req, res, next) => {
 
   token = token.trim();
 
-  // Handle dev/fallback tokens when testing locally or running in demo mode
-  if (token === "mock-jwt-token-123" || token === "dev-admin-token" || token === "super-admin-token" || token === "test-token") {
-    req.user = {
-      id: "admin-dev-001",
-      email: "admin@bookvardi.in",
-      role: "super_admin",
-      permissions: {}
-    };
-    return next();
+  // Handle dev/fallback tokens only when explicitly enabled in development mode
+  if (process.env.NODE_ENV === "development" && process.env.ALLOW_DEV_TOKENS === "true") {
+    if (token === "mock-jwt-token-123" || token === "dev-admin-token" || token === "super-admin-token" || token === "test-token") {
+      req.user = {
+        id: "admin-dev-001",
+        email: "admin@bookvardi.in",
+        role: "super_admin",
+        permissions: {}
+      };
+      return next();
+    }
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
@@ -80,32 +82,34 @@ export const requireAdminPermission = (tabId, requiredLevel = "viewer") => {
   };
 };
 
-// Seller-Only Authenticator (Resolves seller account for active user)
+// Seller-Only Authenticator (Resolves seller account for active authenticated user)
 export const authenticateSeller = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const rawToken = authHeader && authHeader.split(" ")[1];
-  const token = (rawToken && rawToken !== "undefined" && rawToken !== "null" && rawToken !== "Bearer") ? rawToken : null;
-
-  let rawPhone = req.headers["x-user-phone"] || req.headers["x-seller-phone"] || req.query?.phone || req.body?.phone;
-  if (rawPhone === "undefined" || rawPhone === "null" || rawPhone === "[object Object]") rawPhone = null;
-  const headerPhone = rawPhone;
-
-  let rawSellerId = req.headers["x-seller-id"] || req.headers["x-user-id"] || req.query?.sellerId;
-  if (rawSellerId === "undefined" || rawSellerId === "null" || rawSellerId === "[object Object]") rawSellerId = null;
-  const headerSellerId = rawSellerId;
+  const token = (rawToken && rawToken !== "undefined" && rawToken !== "null" && rawToken !== "Bearer") ? rawToken.trim() : null;
 
   let authenticatedUser = null;
 
   if (token) {
-    try {
-      authenticatedUser = jwt.verify(token, JWT_SECRET);
-    } catch (e) {}
+    if (process.env.NODE_ENV === "development" && process.env.ALLOW_DEV_TOKENS === "true" && (token === "dev-seller-token" || token === "mock-jwt-token-123")) {
+      authenticatedUser = { role: "seller" };
+    } else {
+      try {
+        authenticatedUser = jwt.verify(token, JWT_SECRET);
+      } catch (e) {
+        return res.status(401).json({ message: "Invalid or expired authentication token", code: "TOKEN_EXPIRED" });
+      }
+    }
   }
 
-  const userId = authenticatedUser?.id || headerSellerId;
-  const userPhone = authenticatedUser?.phone || headerPhone;
+  // If no valid authenticated user from token
+  if (!authenticatedUser) {
+    return res.status(401).json({ message: "Authentication token required for seller access", code: "NO_TOKEN" });
+  }
 
-  const isValidObjectId = Boolean(userId && mongoose.Types.ObjectId.isValid(userId) && userId !== "undefined" && userId !== "null" && userId !== "[object Object]");
+  const userId = authenticatedUser.id || authenticatedUser._id;
+  const userPhone = authenticatedUser.phone;
+  const isValidObjectId = Boolean(userId && mongoose.Types.ObjectId.isValid(userId));
 
   try {
     let seller = null;
@@ -118,8 +122,7 @@ export const authenticateSeller = async (req, res, next) => {
         $or: [
           { phone: cleanPhone },
           { phone: `+91${cleanPhone}` },
-          { phone: `+91 ${cleanPhone}` },
-          { phone: { $regex: cleanPhone } }
+          { phone: `+91 ${cleanPhone}` }
         ]
       }).select("-password -documents");
     }
@@ -130,7 +133,7 @@ export const authenticateSeller = async (req, res, next) => {
       return next();
     }
 
-    // Check User collection for approved seller
+    // Check User collection for approved seller account
     let userDoc = null;
     if (isValidObjectId) {
       userDoc = await User.findById(userId);
@@ -141,8 +144,7 @@ export const authenticateSeller = async (req, res, next) => {
         $or: [
           { phone: cleanPhone },
           { phone: `+91${cleanPhone}` },
-          { phone: `+91 ${cleanPhone}` },
-          { phone: { $regex: cleanPhone } }
+          { phone: `+91 ${cleanPhone}` }
         ]
       });
     }
@@ -156,15 +158,12 @@ export const authenticateSeller = async (req, res, next) => {
         storeName: `${userDoc.name}'s Vardi Store`,
         email: userDoc.email,
         phone: userDoc.phone,
-        status: "approved"
+        status: userDoc.sellerStatus === "approved" ? "approved" : "pending"
       };
       return next();
     }
 
-    // Unauthenticated or unknown seller context -> return empty scope for that ID/phone
-    req.user = { id: isValidObjectId ? userId : null, phone: userPhone || "", role: "seller" };
-    req.seller = null;
-    return next();
+    return res.status(403).json({ message: "No registered seller profile found for this account." });
   } catch (error) {
     res.status(500).json({ message: "Server seller authentication error", error: error.message });
   }
@@ -173,7 +172,10 @@ export const authenticateSeller = async (req, res, next) => {
 // Require Approved Seller Middleware (Strict check on seller status)
 export const requireApprovedSeller = (req, res, next) => {
   authenticateSeller(req, res, () => {
-    if (req.seller && req.seller.status !== "approved") {
+    if (!req.seller) {
+      return res.status(401).json({ message: "Seller authentication required." });
+    }
+    if (req.seller.status !== "approved") {
       return res.status(403).json({
         message: `Seller account status is '${req.seller.status}'. Only approved sellers can access this dashboard feature.`,
         status: req.seller.status

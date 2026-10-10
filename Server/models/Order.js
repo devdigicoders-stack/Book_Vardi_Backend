@@ -66,7 +66,7 @@ const orderItemSchema = new mongoose.Schema({
     deliveryPersonName: { type: String, default: "" },
     deliveryPersonPhone: { type: String, default: "" },
     vehicleNumber: { type: String, default: "" },
-    deliveryOtp: { type: String, default: () => Math.floor(1000 + Math.random() * 9000).toString() },
+    deliveryOtp: { type: String, default: "" },
     deliveryPartnerToken: { type: String, default: "" },
     trackingUrl: { type: String, default: "" },
     driverLocation: {
@@ -204,7 +204,7 @@ const orderSchema = new mongoose.Schema(
       deliveryPersonName: { type: String, default: "" },
       deliveryPersonPhone: { type: String, default: "" },
       vehicleNumber: { type: String, default: "" },
-      deliveryOtp: { type: String, default: () => Math.floor(1000 + Math.random() * 9000).toString() },
+      deliveryOtp: { type: String, default: "" },
       deliveryPartnerToken: { type: String, default: "" },
       trackingUrl: { type: String, default: "" },
       driverLocation: {
@@ -220,7 +220,7 @@ const orderSchema = new mongoose.Schema(
     },
     deliveryOtp: {
       type: String,
-      default: () => Math.floor(1000 + Math.random() * 9000).toString()
+      default: ""
     },
     estimatedDeliveryDate: {
       type: Date,
@@ -319,26 +319,28 @@ const orderSchema = new mongoose.Schema(
 
 // Pre-save hook to initialize first timeline entry and unify delivery OTP
 orderSchema.pre("save", function (next) {
-  // Unify and synchronize deliveryOtp across order and item fields to prevent mismatch
+  // Synchronize deliveryOtp across order and item fields only if already generated
   const canonicalOtp = this.deliveryOtp ||
     this.selfDeliveryDetails?.deliveryOtp ||
     (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
     (this.items?.[0]?.deliveryOtp) ||
-    Math.floor(1000 + Math.random() * 9000).toString();
+    "";
 
-  this.deliveryOtp = canonicalOtp;
-  if (!this.selfDeliveryDetails) {
-    this.selfDeliveryDetails = {};
-  }
-  this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+  if (canonicalOtp) {
+    this.deliveryOtp = canonicalOtp;
+    if (!this.selfDeliveryDetails) {
+      this.selfDeliveryDetails = {};
+    }
+    this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
 
-  if (Array.isArray(this.items)) {
-    this.items.forEach(it => {
-      it.deliveryOtp = canonicalOtp;
-      if (it.selfDeliveryDetails) {
-        it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
-      }
-    });
+    if (Array.isArray(this.items)) {
+      this.items.forEach(it => {
+        it.deliveryOtp = canonicalOtp;
+        if (it.selfDeliveryDetails) {
+          it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+        }
+      });
+    }
   }
 
   if (this.isNew && (!this.timeline || this.timeline.length === 0)) {

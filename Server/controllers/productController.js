@@ -178,7 +178,9 @@ export const getProducts = async (req, res) => {
       console.warn("DB product query failed:", e.message);
     }
 
-    if (!products || products.length === 0) {
+    // Only fallback if no explicit search/category filters were provided and no items exist in DB
+    const hasExplicitFilter = Boolean(search || category || subCategory || schoolName);
+    if (!hasExplicitFilter && (!products || products.length === 0)) {
       try {
         const fallbackFilter = (req.query.all === "true" || req.query.includePending === "true")
           ? { isDeleted: { $ne: true } }

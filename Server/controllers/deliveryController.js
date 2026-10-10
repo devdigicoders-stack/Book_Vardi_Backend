@@ -280,13 +280,10 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
       const customerPhone = bulkOrder.contactPhone || bulkOrder.userPhone || "School Campus Admin";
       console.log(`📲 [SMS/OTP RESENT] Bulk Delivery OTP ${freshOtp} dispatched to Customer (${customerPhone}) for Requisition #${bulkOrder.referenceId}`);
 
-      const phoneFallback = customerPhone.replace(/\D/g, "").slice(-4);
       return res.json({
         success: true,
-        message: `Delivery OTP (${freshOtp}) has been resent to Customer (${customerPhone}). Fallback OTP: 1234 or ${phoneFallback || "4829"}.`,
-        otpLastSentAt: new Date(),
-        otp: freshOtp,
-        fallbackOtp: "1234"
+        message: `Delivery OTP has been resent securely to Customer (${customerPhone}).`,
+        otpLastSentAt: new Date()
       });
     }
 
@@ -322,13 +319,10 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     const customerPhone = order.customer?.phone || order.shippingAddress?.phone || "Customer";
     console.log(`📲 [SMS/OTP RESENT] Delivery OTP ${freshOtp} dispatched to Customer (${customerPhone}) for Order #${order.orderId}`);
 
-    const phoneFallback = customerPhone.replace(/\D/g, "").slice(-4);
     return res.json({
       success: true,
-      message: `Delivery OTP (${freshOtp}) has been resent to Customer (${customerPhone}). Fallback OTP: 1234 or ${phoneFallback || "4829"}.`,
-      otpLastSentAt: order.selfDeliveryDetails.otpLastSentAt,
-      otp: freshOtp,
-      fallbackOtp: "1234"
+      message: `Delivery OTP has been resent securely to Customer (${customerPhone}).`,
+      otpLastSentAt: order.selfDeliveryDetails.otpLastSentAt
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Failed to resend OTP", error: error.message });
@@ -532,7 +526,7 @@ export const verifyDeliveryOtp = async (req, res) => {
             const seller = await Seller.findById(item.sellerId);
             if (seller) {
               const itemTotal = item.total || (item.finalPrice || item.price || 0) * (item.quantity || 1);
-              const commissionRate = seller.commissionPercentage !== undefined ? seller.commissionPercentage : 5;
+              const commissionRate = Number(item.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 5);
               const commissionAmount = Math.round(((itemTotal * commissionRate) / 100) * 100) / 100;
               const sellerEarnings = Math.max(0, itemTotal - commissionAmount);
 

@@ -237,6 +237,16 @@ export const isItemBelongingToSellerScope = (item, scope) => {
   return Boolean(matchSeller || matchProduct || matchName);
 };
 
+// Helper to strictly strip delivery OTP from seller payloads
+export const sanitizeSelfDeliveryForSeller = (details) => {
+  if (!details) return null;
+  const obj = typeof details.toObject === 'function' ? details.toObject() : { ...details };
+  delete obj.deliveryOtp;
+  delete obj.otp;
+  delete obj.otpLastSentAt;
+  return obj;
+};
+
 // Helper to format a single Order document for seller view
 export const formatSellerSingleOrder = (o, scope = null) => {
   if (!o) return null;
@@ -346,7 +356,7 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     sellerStoreName: o.sellerStoreName || o.storeName || orderItems[0]?.sellerStoreName || orderItems[0]?.storeName || o.sellerDetails?.storeName || scope?.storeName || "",
     storeName: o.storeName || o.sellerStoreName || orderItems[0]?.storeName || orderItems[0]?.sellerStoreName || o.sellerDetails?.storeName || scope?.storeName || "",
     sellerName: o.sellerName || orderItems[0]?.sellerName || o.sellerDetails?.sellerName || scope?.storeName || "",
-    selfDeliveryDetails: o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails || null,
+    selfDeliveryDetails: sanitizeSelfDeliveryForSeller(o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails),
     items: orderItems.map((item) => ({
       id: item._id || item.id,
       _id: item._id || item.id,
@@ -360,7 +370,7 @@ export const formatSellerSingleOrder = (o, scope = null) => {
       image: item.image || "",
       status: normalizeOrderStatus(item.status || formattedStatus),
       deliveryType: item.deliveryType || o.deliveryMode || "",
-      selfDeliveryDetails: item.selfDeliveryDetails || o.selfDeliveryDetails || null,
+      selfDeliveryDetails: sanitizeSelfDeliveryForSeller(item.selfDeliveryDetails || o.selfDeliveryDetails),
       thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
       sellerId: item.sellerId || o.sellerId || null,
       sellerStoreName: item.sellerStoreName || item.storeName || item.sellerDetails?.storeName || o.sellerStoreName || o.storeName || scope?.storeName || "",
@@ -541,6 +551,41 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       });
     }
 
+    // 🔒 Enforce delivery partner immutability for this item once chosen
+    const existingItemMode = item.deliveryType || order.deliveryMode || "";
+    const existingItemCourier = String(item.thirdPartyDetails?.courierName || order.courierName || "").trim();
+    const existingItemSelf = Boolean(
+      item.selfDeliveryDetails?.deliveryPartnerToken ||
+      item.selfDeliveryDetails?.deliveryPersonName ||
+      order.selfDeliveryDetails?.deliveryPartnerToken
+    );
+
+    const isItemPartnerChosen = (existingItemMode === "third_party" && (existingItemCourier || item.thirdPartyDetails?.trackingNumber || order.trackingNumber)) ||
+                                (existingItemMode === "self_delivery" && existingItemSelf) ||
+                                ["shipped", "out for delivery", "delivered", "completed"].includes(String(item.status || "").toLowerCase());
+
+    if (isItemPartnerChosen) {
+      let incomingMode = deliveryMode || deliveryType;
+      if (incomingMode === "self") incomingMode = "self_delivery";
+      if (incomingMode === "courier") incomingMode = "third_party";
+
+      if (incomingMode && incomingMode !== existingItemMode) {
+        return res.status(400).json({
+          success: false,
+          message: `Delivery partner mode is permanently locked to '${existingItemMode === "self_delivery" ? "Self-Delivery (Store Fleet)" : "3rd-Party Courier"}' for this product item and cannot be changed.`
+        });
+      }
+
+      if (existingItemMode === "third_party" && existingItemCourier && thirdPartyDetails?.courierName) {
+        if (thirdPartyDetails.courierName.trim().toLowerCase() !== existingItemCourier.toLowerCase()) {
+          return res.status(400).json({
+            success: false,
+            message: `Courier partner '${existingItemCourier}' is permanently locked for this product item and cannot be changed.`
+          });
+        }
+      }
+    }
+
     let rawMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
     if (rawMode === "self") rawMode = "self_delivery";
     if (rawMode === "courier") rawMode = "third_party";
@@ -616,13 +661,21 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     order.markModified('items');
     await order.save();
 
+    const sanitizedItem = { ...(item.toObject ? item.toObject() : item) };
+    if (sanitizedItem.selfDeliveryDetails) {
+      sanitizedItem.selfDeliveryDetails = sanitizeSelfDeliveryForSeller(sanitizedItem.selfDeliveryDetails);
+    }
+    delete sanitizedItem.deliveryOtp;
+
+    const formattedOrder = formatSellerSingleOrder(order, scope) || order;
+
     res.json({
       success: true,
       message: `Item status updated to ${formattedStatus}. Overall order status: ${order.overallStatus}`,
       status: formattedStatus,
       overallStatus: order.overallStatus,
-      item,
-      order
+      item: sanitizedItem,
+      order: formattedOrder
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to update item delivery & status", error: error.message });
@@ -648,6 +701,40 @@ export const updateSellerOrderStatus = async (req, res) => {
     const order = await findOrderById(orderId);
 
     if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // 🔒 Enforce delivery partner immutability once chosen
+    const existingMode = order.deliveryMode || (order.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (order.courierName ? "third_party" : ""));
+    const existingCourier = String(order.courierName || order.shipmentDetails?.courierPartnerName || "").trim();
+    const existingSelf = Boolean(
+      order.selfDeliveryDetails?.deliveryPartnerToken ||
+      order.selfDeliveryDetails?.deliveryPersonName
+    );
+
+    const isExistingPartnerChosen = (existingMode === "third_party" && (existingCourier || order.trackingNumber)) ||
+                                    (existingMode === "self_delivery" && existingSelf) ||
+                                    ["shipped", "out for delivery", "delivered", "completed"].includes(String(order.overallStatus || order.status || "").toLowerCase());
+
+    if (isExistingPartnerChosen) {
+      let incomingMode = deliveryMode || deliveryType;
+      if (incomingMode === "self") incomingMode = "self_delivery";
+      if (incomingMode === "courier") incomingMode = "third_party";
+
+      if (incomingMode && incomingMode !== existingMode) {
+        return res.status(400).json({
+          success: false,
+          message: `Delivery mode is permanently locked to '${existingMode === "self_delivery" ? "Self-Delivery (Store Fleet)" : "3rd-Party Courier"}' for this order and cannot be changed.`
+        });
+      }
+
+      if (existingMode === "third_party" && existingCourier && courierName) {
+        if (courierName.trim().toLowerCase() !== existingCourier.toLowerCase()) {
+          return res.status(400).json({
+            success: false,
+            message: `Courier partner '${existingCourier}' is permanently locked for this order and cannot be changed.`
+          });
+        }
+      }
+    }
 
     const formattedStatus = status
       ? normalizeOrderStatus(status)

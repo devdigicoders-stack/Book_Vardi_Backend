@@ -1,5 +1,6 @@
 import express from "express";
 import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
 import School from "../models/School.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { cacheMiddleware, clearCache } from "../utils/cache.js";
@@ -202,9 +203,27 @@ router.post("/bulk-order", async (req, res) => {
     const buyerAdvPct = Number(req.body.buyerAdvancePercentage) || 0;
     const buyerAdvAmt = Number(req.body.buyerAdvanceAmount) || 0;
 
-    const userId = req.user?.id || req.user?._id || req.headers["x-user-id"] || req.body.userId || null;
-    const userPhone = req.body.userPhone || req.headers["x-user-phone"] || contactPhone || "";
-    const userEmail = req.body.userEmail || req.headers["x-user-email"] || contactEmail || "";
+    let authUserId = null;
+    let authUserPhone = "";
+    let authUserEmail = "";
+    const authHeader = req.headers["authorization"] || "";
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      try {
+        const rawToken = authHeader.split(" ")[1]?.trim();
+        if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
+          const decoded = jwt.decode(rawToken);
+          if (decoded) {
+            authUserId = decoded.id || decoded._id || decoded.userId || null;
+            authUserPhone = decoded.phone || decoded.mobile || "";
+            authUserEmail = decoded.email || "";
+          }
+        }
+      } catch (e) {}
+    }
+
+    const userId = req.user?.id || req.user?._id || authUserId || req.headers["x-user-id"] || req.body.userId || null;
+    const userPhone = req.body.userPhone || req.headers["x-user-phone"] || authUserPhone || contactPhone || "";
+    const userEmail = req.body.userEmail || req.headers["x-user-email"] || authUserEmail || contactEmail || "";
 
     const bulkOrder = new SchoolBulkOrder({
       referenceId: refCode,
@@ -216,6 +235,7 @@ router.post("/bulk-order", async (req, res) => {
       contactPhone,
       designation: designation || "Administrator",
       userId: userId && mongoose.Types.ObjectId.isValid(userId) ? userId : null,
+      customUserId: userId ? String(userId).trim() : "",
       userPhone,
       userEmail,
       address: address || "",

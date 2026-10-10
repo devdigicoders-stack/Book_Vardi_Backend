@@ -219,7 +219,16 @@ export const deleteSubadmin = async (req, res) => {
 
 export const getUsers = async (req, res) => {
   try {
-    const users = await User.find().select('-password');
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 100));
+    const skip = (page - 1) * limit;
+
+    const users = await User.find()
+      .select('-password -fcmTokens -fcmToken')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
     res.json(users);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -286,21 +295,44 @@ export const deleteUser = async (req, res) => {
 
 export const getDashboardStats = async (req, res) => {
   try {
-    const totalUsers = await User.countDocuments();
-    const activeUsers = await User.countDocuments({ status: 'active' });
-    const inactiveUsers = await User.countDocuments({ status: 'inactive' });
-    const totalAdmins = await Admin.countDocuments();
+    const [
+      totalUsers,
+      activeUsers,
+      inactiveUsers,
+      totalAdmins,
+      totalSellers,
+      activeSellers,
+      pendingSellers,
+      totalProducts,
+      pendingProducts,
+      totalOrders,
+      revenueAgg
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ status: 'active' }),
+      User.countDocuments({ status: 'inactive' }),
+      Admin.countDocuments(),
+      Seller.countDocuments(),
+      Seller.countDocuments({ status: 'approved' }),
+      Seller.countDocuments({ status: 'pending' }),
+      Product.countDocuments(),
+      Product.countDocuments({ approvalStatus: 'Pending' }),
+      Order.countDocuments(),
+      Order.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: {
+              $sum: {
+                $ifNull: ["$payableAmount", { $ifNull: ["$totalAmount", { $ifNull: ["$total", 0] }] }]
+              }
+            }
+          }
+        }
+      ])
+    ]);
 
-    const totalSellers = await Seller.countDocuments();
-    const activeSellers = await Seller.countDocuments({ status: 'approved' });
-    const pendingSellers = await Seller.countDocuments({ status: 'pending' });
-
-    const totalProducts = await Product.countDocuments();
-    const pendingProducts = await Product.countDocuments({ approvalStatus: 'Pending' });
-
-    const totalOrders = await Order.countDocuments();
-    const orders = await Order.find();
-    const totalRevenue = orders.reduce((sum, o) => sum + (o.total || o.totalAmount || 0), 0);
+    const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
 
     res.json({
       totalUsers,

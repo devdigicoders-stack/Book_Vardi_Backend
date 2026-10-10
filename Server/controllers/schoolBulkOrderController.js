@@ -29,6 +29,177 @@ export const findSchoolBulkOrderByIdOrRef = async (idOrRef) => {
   return await SchoolBulkOrder.findOne({ referenceId: new RegExp(`^${clean}$`, "i") });
 };
 
+// Helper to check if requester has administrative privileges
+export const isRequestAdmin = (req) => {
+  if (req.user?.role === "admin" || req.user?.role === "super_admin" || req.user?.role === "subadmin") {
+    return true;
+  }
+  const authHeader = req.headers?.["authorization"] || "";
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const rawToken = authHeader.split(" ")[1]?.trim();
+      if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
+        const decoded = jwt.decode(rawToken);
+        if (decoded && (decoded.role === "admin" || decoded.role === "super_admin" || decoded.role === "subadmin")) {
+          return true;
+        }
+      }
+    } catch (e) {}
+    if (authHeader.includes("dev-admin-token") || authHeader.includes("super-admin-token") || authHeader.includes("mock-jwt-token")) {
+      return true;
+    }
+  }
+  return false;
+};
+
+// Helper to resolve seller authentication context
+export const resolveSellerAuthInfo = (req) => {
+  const sellerHeader = req.headers?.["x-seller-id"] || req.query?.sellerId;
+  const authHeader = req.headers?.["authorization"] || "";
+  let isSellerReq = Boolean(sellerHeader);
+  let sellerAuthInfo = sellerHeader ? { id: sellerHeader } : null;
+
+  if (req.seller?._id || req.seller?.id) {
+    isSellerReq = true;
+    sellerAuthInfo = {
+      id: req.seller._id || req.seller.id,
+      phone: req.seller.phone || req.seller.mobile
+    };
+  }
+
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const rawToken = authHeader.split(" ")[1]?.trim();
+      if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
+        const decoded = jwt.decode(rawToken);
+        if (decoded && (decoded.role === "seller" || decoded.sellerId)) {
+          isSellerReq = true;
+          sellerAuthInfo = {
+            id: decoded.sellerId || decoded.id || decoded._id,
+            phone: decoded.phone || decoded.mobile
+          };
+        }
+      }
+    } catch (e) {}
+  }
+
+  return { isSellerReq, sellerAuthInfo };
+};
+
+// Helper to resolve customer/buyer identity credentials (user ID, phone, email)
+export const resolveCustomerIdentity = async (req) => {
+  let userId = req.user?.id || req.user?._id || req.headers?.["x-user-id"] || req.query?.userId || req.query?.customerId || "";
+  let rawPhone = req.headers?.["x-user-phone"] || req.query?.phone || req.query?.userPhone || req.user?.phone || "";
+  let rawEmail = req.headers?.["x-user-email"] || req.query?.email || req.query?.userEmail || req.user?.email || "";
+
+  const authHeader = req.headers?.["authorization"] || "";
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const rawToken = authHeader.split(" ")[1]?.trim();
+      if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
+        const decoded = jwt.decode(rawToken);
+        if (decoded) {
+          if (!userId && (decoded.id || decoded._id || decoded.userId)) {
+            userId = decoded.id || decoded._id || decoded.userId;
+          }
+          if (!rawPhone && (decoded.phone || decoded.mobile)) {
+            rawPhone = decoded.phone || decoded.mobile;
+          }
+          if (!rawEmail && decoded.email) {
+            rawEmail = decoded.email;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  const candidateUserIds = new Set();
+  const candidatePhones = new Set();
+  const candidateEmails = new Set();
+
+  if (userId && !["undefined", "null", "[object Object]"].includes(String(userId).trim())) {
+    candidateUserIds.add(String(userId).trim());
+  }
+
+  const cleanPhone = String(rawPhone || "").replace(/\D/g, "").slice(-10);
+  if (cleanPhone.length >= 10) candidatePhones.add(cleanPhone);
+
+  const cleanEmail = String(rawEmail || "").trim().toLowerCase();
+  if (cleanEmail && !cleanEmail.includes("@bookvardi.local")) candidateEmails.add(cleanEmail);
+
+  try {
+    const userLookupQueries = [];
+    candidateUserIds.forEach(id => {
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        userLookupQueries.push({ _id: new mongoose.Types.ObjectId(id) });
+      }
+    });
+    candidatePhones.forEach(p => {
+      userLookupQueries.push({ phone: new RegExp(p + "$", "i") });
+      userLookupQueries.push({ mobile: new RegExp(p + "$", "i") });
+    });
+    candidateEmails.forEach(e => {
+      userLookupQueries.push({ email: e });
+    });
+
+    if (userLookupQueries.length > 0) {
+      const User = mongoose.model("User");
+      const matchedUsers = await User.find({ $or: userLookupQueries }).select("_id name phone mobile email").lean();
+      matchedUsers.forEach(u => {
+        if (u._id) candidateUserIds.add(String(u._id));
+        const p = String(u.phone || u.mobile || "").replace(/\D/g, "").slice(-10);
+        if (p.length >= 10) candidatePhones.add(p);
+        const em = String(u.email || "").trim().toLowerCase();
+        if (em && !em.includes("@bookvardi.local")) candidateEmails.add(em);
+      });
+    }
+  } catch (e) {}
+
+  return {
+    candidateUserIds,
+    candidatePhones,
+    candidateEmails,
+    hasIdentity: candidateUserIds.size > 0 || candidatePhones.size > 0 || candidateEmails.size > 0
+  };
+};
+
+// Strict ownership verification: returns true if the order belongs to the requester
+export const isUserOrderCreator = (orderDoc, identity) => {
+  if (!orderDoc || !identity || !identity.hasIdentity) return false;
+
+  // 1. Check order.userId and order.customUserId
+  const orderUserId = orderDoc.userId ? String(orderDoc.userId._id || orderDoc.userId.id || orderDoc.userId).trim() : "";
+  if (orderUserId && !["undefined", "null", ""].includes(orderUserId) && identity.candidateUserIds.has(orderUserId)) {
+    return true;
+  }
+  const orderCustomUserId = String(orderDoc.customUserId || "").trim();
+  if (orderCustomUserId && !["undefined", "null", ""].includes(orderCustomUserId) && identity.candidateUserIds.has(orderCustomUserId)) {
+    return true;
+  }
+
+  // 2. Check order.userPhone or order.contactPhone
+  const orderUserPhone = String(orderDoc.userPhone || "").replace(/\D/g, "").slice(-10);
+  if (orderUserPhone.length >= 10 && identity.candidatePhones.has(orderUserPhone)) {
+    return true;
+  }
+  const orderContactPhone = String(orderDoc.contactPhone || "").replace(/\D/g, "").slice(-10);
+  if (orderContactPhone.length >= 10 && identity.candidatePhones.has(orderContactPhone)) {
+    return true;
+  }
+
+  // 3. Check order.userEmail or order.contactEmail
+  const orderUserEmail = String(orderDoc.userEmail || "").trim().toLowerCase();
+  if (orderUserEmail && !orderUserEmail.includes("@bookvardi.local") && identity.candidateEmails.has(orderUserEmail)) {
+    return true;
+  }
+  const orderContactEmail = String(orderDoc.contactEmail || "").trim().toLowerCase();
+  if (orderContactEmail && !orderContactEmail.includes("@bookvardi.local") && identity.candidateEmails.has(orderContactEmail)) {
+    return true;
+  }
+
+  return false;
+};
+
 // Strict confidentiality sanitizer: Vendors CANNOT see each other's pitches.
 // Pitches and quotations are secret between sellers; visible ONLY to Admin, Buyer (School), and the quoting Seller.
 export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
@@ -150,98 +321,35 @@ export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
   return ord;
 };
 
-// GET School Bulk Orders for the authenticated/requesting Customer (Strictly Private)
+// GET School Bulk Orders for the authenticated/requesting Customer (Strictly Private to the Creator)
 export const getCustomerSchoolOrders = async (req, res) => {
   try {
-    let userId = req.user?.id || req.user?._id || req.headers?.["x-user-id"] || req.query?.userId || req.query?.customerId;
-    let rawPhone = req.headers?.["x-user-phone"] || req.query?.phone || req.query?.userPhone || req.user?.phone || "";
-    let rawEmail = req.headers?.["x-user-email"] || req.query?.email || req.query?.userEmail || req.user?.email || "";
-    const rawRefIds = req.query?.referenceIds || req.query?.referenceId || req.headers?.["x-reference-ids"] || "";
+    const customerIdentity = await resolveCustomerIdentity(req);
 
-    // 1. Decode JWT token if present
-    const authHeader = req.headers?.["authorization"] || "";
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      try {
-        const rawToken = authHeader.split(" ")[1]?.trim();
-        if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
-          const decoded = jwt.decode(rawToken);
-          if (decoded) {
-            if (!userId) userId = decoded.id || decoded._id || decoded.userId;
-            if (!rawPhone) rawPhone = decoded.phone || decoded.mobile;
-            if (!rawEmail) rawEmail = decoded.email;
-          }
-        }
-      } catch (e) {}
+    // If caller has no authenticated identity credentials provided, return empty
+    if (!customerIdentity.hasIdentity) {
+      return res.json({ success: true, count: 0, orders: [] });
     }
 
-    let cleanPhone = String(rawPhone || "").replace(/\D/g, "").slice(-10);
-    let cleanEmail = String(rawEmail || "").trim().toLowerCase();
-
-    // 2. Resolve cross-identities from User collection if we have userId, phone, or email
-    const candidateUserIds = new Set();
-    const candidatePhones = new Set();
-    const candidateEmails = new Set();
-
-    if (userId && mongoose.Types.ObjectId.isValid(userId)) candidateUserIds.add(String(userId));
-    if (cleanPhone && cleanPhone.length >= 10) candidatePhones.add(cleanPhone);
-    if (cleanEmail && !cleanEmail.includes("@bookvardi.local")) candidateEmails.add(cleanEmail);
-
-    try {
-      const userLookupQueries = [];
-      if (candidateUserIds.size > 0) {
-        userLookupQueries.push({ _id: { $in: Array.from(candidateUserIds).map(id => new mongoose.Types.ObjectId(id)) } });
-      }
-      if (candidatePhones.size > 0) {
-        Array.from(candidatePhones).forEach(p => {
-          userLookupQueries.push({ phone: new RegExp(p + "$", "i") });
-          userLookupQueries.push({ mobile: new RegExp(p + "$", "i") });
-        });
-      }
-      if (candidateEmails.size > 0) {
-        Array.from(candidateEmails).forEach(e => {
-          userLookupQueries.push({ email: e });
-        });
-      }
-
-      if (userLookupQueries.length > 0) {
-        const User = mongoose.model("User");
-        const matchedUsers = await User.find({ $or: userLookupQueries }).select("_id name phone mobile email").lean();
-        matchedUsers.forEach(u => {
-          if (u._id) candidateUserIds.add(String(u._id));
-          const p = String(u.phone || u.mobile || "").replace(/\D/g, "").slice(-10);
-          if (p.length >= 10) candidatePhones.add(p);
-          const em = String(u.email || "").trim().toLowerCase();
-          if (em && !em.includes("@bookvardi.local")) candidateEmails.add(em);
-        });
-      }
-    } catch (e) {}
-
-    // 3. Build identity filters
     const queryConditions = [];
 
-    candidateUserIds.forEach(id => {
-      queryConditions.push({ userId: id });
+    customerIdentity.candidateUserIds.forEach(id => {
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        queryConditions.push({ userId: id });
+      }
+      queryConditions.push({ customUserId: id });
     });
 
-    candidatePhones.forEach(p => {
+    customerIdentity.candidatePhones.forEach(p => {
       queryConditions.push({ contactPhone: new RegExp(p + "$", "i") });
       queryConditions.push({ userPhone: new RegExp(p + "$", "i") });
     });
 
-    candidateEmails.forEach(e => {
+    customerIdentity.candidateEmails.forEach(e => {
       queryConditions.push({ contactEmail: e });
       queryConditions.push({ userEmail: e });
     });
 
-    // 4. Parse reference IDs if provided by client (from localStorage)
-    if (rawRefIds) {
-      const refList = String(rawRefIds).split(",").map(s => s.trim()).filter(Boolean);
-      if (refList.length > 0) {
-        queryConditions.push({ referenceId: { $in: refList } });
-      }
-    }
-
-    // If caller has no identity credentials provided and no reference IDs, return empty
     if (queryConditions.length === 0) {
       return res.json({ success: true, count: 0, orders: [] });
     }
@@ -251,13 +359,16 @@ export const getCustomerSchoolOrders = async (req, res) => {
       .populate("quotations.sellerId", "storeName name phone email businessName")
       .sort({ createdAt: -1 });
 
-    res.json({ success: true, count: orders.length, orders });
+    // Secondary defence-in-depth: strictly keep only orders created by this user
+    const privateOrders = orders.filter(ord => isUserOrderCreator(ord, customerIdentity));
+
+    res.json({ success: true, count: privateOrders.length, orders: privateOrders });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to fetch customer bulk orders", error: error.message });
   }
 };
 
-// GET single School Bulk Order by ID or referenceId (with full vendor quotations for Buyer & Admin)
+// GET single School Bulk Order by ID or referenceId (Strictly Private to Creator, authorized Seller, or Admin)
 export const getSchoolOrderById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -276,28 +387,13 @@ export const getSchoolOrderById = async (req, res) => {
       { path: "quotations.sellerId", select: "storeName name phone email businessName" }
     ]);
 
-    // Check if requester is a seller
-    const sellerHeader = req.headers["x-seller-id"] || req.query.sellerId;
-    const authHeader = req.headers["authorization"] || "";
-    let isSellerReq = Boolean(sellerHeader);
-    let sellerAuthInfo = sellerHeader ? { id: sellerHeader } : null;
-
-    if (!isSellerReq && authHeader && authHeader.startsWith("Bearer ")) {
-      try {
-        const rawToken = authHeader.split(" ")[1]?.trim();
-        if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
-          const decoded = jwt.decode(rawToken);
-          if (decoded && (decoded.role === "seller" || decoded.sellerId)) {
-            isSellerReq = true;
-            sellerAuthInfo = {
-              id: decoded.sellerId || decoded.id || decoded._id,
-              phone: decoded.phone || decoded.mobile
-            };
-          }
-        }
-      } catch (e) {}
+    // 1. Admin Access
+    if (isRequestAdmin(req)) {
+      return res.json({ success: true, order });
     }
 
+    // 2. Seller Access Check
+    const { isSellerReq, sellerAuthInfo } = resolveSellerAuthInfo(req);
     if (isSellerReq && sellerAuthInfo) {
       const requestingSellerId = String(sellerAuthInfo.id || sellerAuthInfo._id || "").trim();
 
@@ -328,39 +424,29 @@ export const getSchoolOrderById = async (req, res) => {
       return res.json({ success: true, order: sanitized });
     }
 
-    // For Buyer and Admin: return full order with all quotations
+    // 3. Customer / Buyer Access Check: strictly verify that the caller is the order creator
+    const customerIdentity = await resolveCustomerIdentity(req);
+    if (!isUserOrderCreator(order, customerIdentity)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. This bulk order was created by another user and is strictly private."
+      });
+    }
+
+    // Requester is the authentic creator: return full order with all quotations
     res.json({ success: true, order });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to fetch bulk order", error: error.message });
   }
 };
 
-// GET all School Bulk Orders for Admin (or delegates to Customer view if requested by customer)
+// GET all School Bulk Orders for Admin (or delegates to Customer view if requested by non-admin)
 export const getAdminSchoolOrders = async (req, res) => {
   try {
-    const rawPhone = req.headers?.["x-user-phone"] || req.query?.phone || "";
-    const rawUserId = req.headers?.["x-user-id"] || req.query?.userId || "";
-    const authHeader = req.headers?.["authorization"] || "";
-    let isAdmin = req.user?.role === "admin" || req.user?.role === "super_admin" || authHeader.includes("admin");
+    const isAdmin = isRequestAdmin(req);
 
-    if (!isAdmin && authHeader && authHeader.startsWith("Bearer ")) {
-      try {
-        const rawToken = authHeader.split(" ")[1]?.trim();
-        if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
-          const decoded = jwt.verify(rawToken, process.env.JWT_SECRET || "your-secret-key");
-          if (decoded && (decoded.role === "admin" || decoded.role === "super_admin" || decoded.role === "subadmin")) {
-            isAdmin = true;
-          }
-        }
-      } catch (e) {
-        if (authHeader.includes("dev-admin-token") || authHeader.includes("super-admin-token") || authHeader.includes("mock-jwt-token")) {
-          isAdmin = true;
-        }
-      }
-    }
-
-    // If caller is a customer (phone or userId provided without admin privileges), make it strictly private!
-    if (!isAdmin && (rawPhone || rawUserId)) {
+    // If caller is NOT an admin, strictly delegate to getCustomerSchoolOrders so they only receive their own orders
+    if (!isAdmin) {
       return getCustomerSchoolOrders(req, res);
     }
 
@@ -1023,6 +1109,14 @@ export const submitBuyerCounterDemand = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
+    const customerIdentity = await resolveCustomerIdentity(req);
+    if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Only the user who created this bulk order can submit counter-demands."
+      });
+    }
+
     const quote = (bulkOrder.quotations || []).find(q => String(q._id) === String(quoteId) || String(q.id) === String(quoteId));
     if (!quote) {
       return res.status(404).json({ success: false, message: "Specified seller quotation not found" });
@@ -1238,6 +1332,8 @@ export const acceptBuyerCounterDemand = async (req, res) => {
       }
     }
 
+    const finalAgreedAmount = Number(counter.proposedAmount) > 0 ? Number(counter.proposedAmount) : Number(quote.quoteAmount);
+    quote.quoteAmount = finalAgreedAmount;
     quote.negotiationStage = "seller_accepted_counter";
     quote.status = "seller_accepted";
 
@@ -1255,12 +1351,12 @@ export const acceptBuyerCounterDemand = async (req, res) => {
     bulkOrder.sellerId = quoteSellerId;
     bulkOrder.status = "seller_accepted_counter";
     bulkOrder.deliveryMode = "self_delivery";
-    bulkOrder.targetBudgetPerKit = String(quote.quoteAmount);
-    bulkOrder.overallBudget = quote.quoteAmount;
+    bulkOrder.targetBudgetPerKit = String(finalAgreedAmount);
+    bulkOrder.overallBudget = finalAgreedAmount;
 
-    // Prepayment Requirement Setup using set percentage
-    const advPct = Number(counter.proposedAdvancePercentage || quote.prepaymentPercentage || quote.sellerAdvancePercentage || 20);
-    const advAmt = Math.round((quote.quoteAmount * advPct) / 100);
+    // Prepayment Requirement Setup using set percentage on FINAL agreed amount (e.g. ₹40,000 * 25% = ₹10,000)
+    const advPct = Number(counter.proposedAdvancePercentage || quote.prepaymentPercentage || quote.sellerAdvancePercentage || 25);
+    const advAmt = Math.round((finalAgreedAmount * advPct) / 100);
     const advType = quote.prepaymentType || quote.sellerAdvanceType || "percentage";
     const advTerms = quote.prepaymentTerms || quote.sellerAdvanceTerms || "";
 
@@ -1315,11 +1411,24 @@ export const acceptBuyerCounterDemand = async (req, res) => {
 // POST Buyer Confirm Seller's Acceptance of Counter-Demand & Proceed with Prepayment
 export const confirmBuyerAcceptance = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { quoteId } = req.body || {};
+    if (isRequestAdmin(req) || req.body?.callerRole === "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Admin cannot confirm buyer acceptance. Only the buyer can confirm acceptance."
+      });
+    }
+
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const customerIdentity = await resolveCustomerIdentity(req);
+    if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Only the user who created this bulk order can confirm acceptance."
+      });
     }
 
     const winningQuote = (bulkOrder.quotations || []).find(
@@ -1531,7 +1640,7 @@ export const approveSellerQuotation = async (req, res) => {
     const effectiveQuoteId = quoteId || req.params.quoteId;
 
     // Admin is an observer and distributor only; quotations can only be accepted by the buyer
-    if (req.user?.role === "admin" || req.user?.role === "super_admin" || req.user?.role === "subadmin" || callerRole === "admin") {
+    if (isRequestAdmin(req) || callerRole === "admin") {
       return res.status(403).json({
         success: false,
         message: "Admin cannot approve or reject bulk orders. Quotations can only be accepted by the buyer."
@@ -1541,6 +1650,14 @@ export const approveSellerQuotation = async (req, res) => {
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    const customerIdentity = await resolveCustomerIdentity(req);
+    if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Only the user who created this bulk order can approve quotations."
+      });
     }
 
     const winningQuote = (bulkOrder.quotations || []).find(q => String(q._id) === String(effectiveQuoteId) || String(q.id) === String(effectiveQuoteId));
@@ -2013,15 +2130,15 @@ export const downloadAdvanceReceipt = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
-    if (req.user) {
-      const reqUserIdStr = String(req.user.id || req.user._id || "");
-      const bulkUserIdStr = bulkOrder.userId ? String(bulkOrder.userId) : "";
-      const bulkSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId) : "";
-      const isOwner = Boolean(bulkUserIdStr && reqUserIdStr && bulkUserIdStr === reqUserIdStr);
-      const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
-      const isAwardedSeller = Boolean(bulkSellerIdStr && reqUserIdStr && bulkSellerIdStr === reqUserIdStr);
+    const isAdmin = isRequestAdmin(req);
+    const { isSellerReq, sellerAuthInfo } = resolveSellerAuthInfo(req);
+    const requestingSellerId = String(sellerAuthInfo?.id || sellerAuthInfo?._id || req.user?.id || req.user?._id || "").trim();
+    const bulkSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId) : "";
+    const isAwardedSeller = Boolean(bulkSellerIdStr && requestingSellerId && bulkSellerIdStr === requestingSellerId);
 
-      if (!isOwner && !isAdmin && !isAwardedSeller) {
+    if (!isAdmin && !isAwardedSeller) {
+      const customerIdentity = await resolveCustomerIdentity(req);
+      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
         return res.status(403).json({ success: false, message: "Not authorized to download advance receipt for this bulk order" });
       }
     }
@@ -2120,6 +2237,16 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    if (!isRequestAdmin(req)) {
+      const customerIdentity = await resolveCustomerIdentity(req);
+      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Only the user who created this bulk order can initiate prepayment."
+        });
+      }
     }
 
     const winningQuote = (bulkOrder.quotations || []).find(
@@ -2260,6 +2387,16 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
+    if (!isRequestAdmin(req)) {
+      const customerIdentity = await resolveCustomerIdentity(req);
+      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Only the user who created this bulk order can verify prepayment."
+        });
+      }
+    }
+
     const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";
 
     let isValidSignature = false;
@@ -2375,6 +2512,16 @@ export const createSchoolBulkRemainingPaymentOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
+    if (!isRequestAdmin(req)) {
+      const customerIdentity = await resolveCustomerIdentity(req);
+      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Only the user who created this bulk order can initiate remaining payment."
+        });
+      }
+    }
+
     const winningQuote = (bulkOrder.quotations || []).find(
       q => String(q._id) === String(bulkOrder.acceptedQuoteId) || q.negotiationStage === "seller_accepted_counter" || q.status === "approved"
     );
@@ -2470,6 +2617,16 @@ export const verifySchoolBulkRemainingPayment = async (req, res) => {
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
+    }
+
+    if (!isRequestAdmin(req)) {
+      const customerIdentity = await resolveCustomerIdentity(req);
+      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Only the user who created this bulk order can verify remaining payment."
+        });
+      }
     }
 
     const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";

@@ -634,13 +634,19 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
   return isArray ? orderList : orderList[0];
 };
 
-// 1. Get all orders (Admin / General)
+// 1. Get all orders (Admin / General) - Paginated & Lean
 export const getOrders = async (req, res) => {
   try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 100));
+    const skip = (page - 1) * limit;
+
     const orders = await Order.find()
       .populate("userId", "name email phone addresses")
       .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
     const enrichedOrders = await enrichOrdersWithSellerAndConsumer(orders);
     res.json(enrichedOrders);
@@ -1834,17 +1840,55 @@ export const downloadInvoice = async (req, res) => {
     let enrichedOrder = null;
 
     if (isBulkOrder && bulkOrderDoc) {
-      if (req.user) {
-        const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
-        const bulkUserIdStr = bulkOrderDoc.userId ? bulkOrderDoc.userId.toString() : "";
-        const bulkSellerIdStr = bulkOrderDoc.sellerId ? bulkOrderDoc.sellerId.toString() : "";
-        const isOwner = Boolean(bulkUserIdStr && reqUserIdStr && bulkUserIdStr === reqUserIdStr);
-        const isAdmin = req.user.role === "admin" || req.user.role === "super_admin";
-        const isAwardedSeller = Boolean(bulkSellerIdStr && reqUserIdStr && bulkSellerIdStr === reqUserIdStr);
+      const authHeader = req.headers?.["authorization"] || "";
+      let isAdmin = req.user?.role === "admin" || req.user?.role === "super_admin";
+      let authUserId = req.user?.id ? req.user.id.toString() : "";
+      let authUserPhone = String(req.user?.phone || req.user?.mobile || "").replace(/\D/g, "").slice(-10);
+      let authUserEmail = String(req.user?.email || "").trim().toLowerCase();
 
-        if (!isOwner && !isAdmin && !isAwardedSeller) {
-          return res.status(403).json({ message: "Not authorized to download this invoice" });
-        }
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        try {
+          const rawToken = authHeader.split(" ")[1]?.trim();
+          if (rawToken && rawToken !== "undefined" && rawToken !== "null") {
+            const jwtModule = (await import("jsonwebtoken")).default;
+            const decoded = jwtModule.decode(rawToken);
+            if (decoded) {
+              if (decoded.role === "admin" || decoded.role === "super_admin" || decoded.role === "subadmin") {
+                isAdmin = true;
+              }
+              if (!authUserId && (decoded.id || decoded._id || decoded.userId)) {
+                authUserId = String(decoded.id || decoded._id || decoded.userId);
+              }
+              if (!authUserPhone && (decoded.phone || decoded.mobile)) {
+                authUserPhone = String(decoded.phone || decoded.mobile).replace(/\D/g, "").slice(-10);
+              }
+              if (!authUserEmail && decoded.email) {
+                authUserEmail = String(decoded.email).trim().toLowerCase();
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
+      if (!authUserId) authUserId = String(req.headers?.["x-user-id"] || req.headers?.["x-seller-id"] || "");
+      if (!authUserPhone) authUserPhone = String(req.headers?.["x-user-phone"] || "").replace(/\D/g, "").slice(-10);
+      if (!authUserEmail) authUserEmail = String(req.headers?.["x-user-email"] || "").trim().toLowerCase();
+
+      const bulkUserIdStr = bulkOrderDoc.userId ? bulkOrderDoc.userId.toString() : "";
+      const bulkSellerIdStr = bulkOrderDoc.sellerId ? String(bulkOrderDoc.sellerId._id || bulkOrderDoc.sellerId) : "";
+      const isAwardedSeller = Boolean(bulkSellerIdStr && authUserId && bulkSellerIdStr === authUserId);
+
+      const bulkPhone = String(bulkOrderDoc.userPhone || bulkOrderDoc.contactPhone || "").replace(/\D/g, "").slice(-10);
+      const bulkEmail = String(bulkOrderDoc.userEmail || bulkOrderDoc.contactEmail || "").trim().toLowerCase();
+
+      const isOwner = Boolean(
+        (bulkUserIdStr && authUserId && bulkUserIdStr === authUserId) ||
+        (bulkPhone && authUserPhone && bulkPhone.length >= 10 && bulkPhone === authUserPhone) ||
+        (bulkEmail && authUserEmail && !bulkEmail.includes("@bookvardi.local") && bulkEmail === authUserEmail)
+      );
+
+      if (!isAdmin && !isAwardedSeller && !isOwner) {
+        return res.status(403).json({ message: "Not authorized to download this invoice" });
       }
 
       const winningQuote = (bulkOrderDoc.quotations || []).find(
@@ -2499,7 +2543,7 @@ export const updateReturnExchangeStatus = async (req, res) => {
         title = "Returned Item Received & Inspected";
         description = description || `Item received back at merchant warehouse and passed quality inspection.`;
         
-        if (Array.isArray(order.items)) {
+        if (!order.stockRestored && Array.isArray(order.items)) {
           for (const item of order.items) {
             try {
               await incrementItemStock(item);
@@ -2507,6 +2551,7 @@ export const updateReturnExchangeStatus = async (req, res) => {
               console.warn("Stock restoration warning:", err.message);
             }
           }
+          order.stockRestored = true;
         }
         break;
 
@@ -2520,12 +2565,13 @@ export const updateReturnExchangeStatus = async (req, res) => {
         title = "Refund Processed & Completed";
         description = description || `Refund successfully processed. Reference TXN: ${refundTxnId || "N/A"}.`;
 
-        if (Array.isArray(order.items)) {
+        if (!order.stockRestored && Array.isArray(order.items)) {
           for (const item of order.items) {
             try {
               await incrementItemStock(item);
             } catch (err) {}
           }
+          order.stockRestored = true;
         }
         break;
 

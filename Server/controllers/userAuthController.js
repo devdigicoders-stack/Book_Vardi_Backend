@@ -31,6 +31,16 @@ const generateToken = (user) => {
   );
 };
 
+// Helper to clean up expired OTPs from in-memory store
+const cleanupExpiredOtps = () => {
+  const now = Date.now();
+  for (const [key, value] of otpStore.entries()) {
+    if (value.expires < now) {
+      otpStore.delete(key);
+    }
+  }
+};
+
 // Send OTP Function with DB user check
 export const sendOtp = async (req, res) => {
   try {
@@ -38,6 +48,8 @@ export const sendOtp = async (req, res) => {
     if (!phone) {
       return res.status(400).json({ message: "Phone number is required" });
     }
+
+    cleanupExpiredOtps();
 
     const cleanPhone = normalizePhone(phone);
 
@@ -67,7 +79,7 @@ export const sendOtp = async (req, res) => {
       }
     }
 
-    // Generate 4-digit testing OTP
+    // Generate 4-digit OTP
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
     otpStore.set(cleanPhone, {
       otp,
@@ -75,10 +87,12 @@ export const sendOtp = async (req, res) => {
       purpose
     });
 
+    const isDev = process.env.NODE_ENV === "development";
+
     return res.json({
       success: true,
       message: `OTP sent successfully to ${phone}`,
-      otp,
+      ...(isDev ? { otp } : {}),
       isRegistered: Boolean(userExists)
     });
   } catch (error) {
@@ -97,10 +111,16 @@ export const verifyOtp = async (req, res) => {
     const cleanPhone = normalizePhone(phone);
     const stored = otpStore.get(cleanPhone);
 
-    const isMatch = (stored && stored.otp === otp.trim()) || otp.trim() === "3123" || otp.trim() === "1234";
-    if (!isMatch) {
+    const isDevTokenAllowed = process.env.NODE_ENV === "development" && process.env.ALLOW_DEV_TOKENS === "true";
+    const isValidStoredOtp = stored && stored.otp === otp.trim() && Date.now() <= stored.expires;
+    const isDevBypass = isDevTokenAllowed && (otp.trim() === "3123" || otp.trim() === "1234");
+
+    if (!isValidStoredOtp && !isDevBypass) {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
+
+    // Clear used OTP
+    otpStore.delete(cleanPhone);
 
     const user = await User.findOne({
       $or: [

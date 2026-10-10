@@ -74,6 +74,15 @@ export const createShipment = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
 
+    // 🔒 Prevent overriding an existing delivery partner assignment
+    if (order.trackingNumber || (order.deliveryMode === 'third_party' && order.courierName) || order.deliveryMode === 'self_delivery' || order.shipmentDetails?.awbNumber) {
+      const existingPartner = order.deliveryMode === 'self_delivery' ? 'Self-Delivery' : (order.courierName || order.shipmentDetails?.courierPartnerName || 'Courier');
+      return res.status(400).json({
+        success: false,
+        message: `A delivery partner (${existingPartner}) is already chosen and assigned to this order. It cannot be changed.`
+      });
+    }
+
     const result = await generateShipmentAwbService(order, courierCode || "SHIPROCKET", weightKg, dimensions);
 
     // Update order with AWB and shipment details

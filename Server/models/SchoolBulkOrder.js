@@ -167,6 +167,7 @@ const schoolBulkOrderSchema = new mongoose.Schema(
 
     // Private User Ownership
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    customUserId: { type: String, default: "", index: true },
     userPhone: { type: String, default: "", index: true },
     userEmail: { type: String, default: "" },
 

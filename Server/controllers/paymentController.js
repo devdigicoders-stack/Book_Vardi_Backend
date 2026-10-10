@@ -6,12 +6,16 @@ import Order from "../models/Order.js";
 
 // Initialize Razorpay instance
 const getRazorpayInstance = () => {
-  const key_id = process.env.RAZORPAY_KEY_ID || "rzp_test_6kz5nGEzi8uXRw";
-  const key_secret = process.env.RAZORPAY_KEY_SECRET || "SMtig3JkAqFP7nIMpODyyuAL";
+  const key_id = process.env.RAZORPAY_KEY_ID;
+  const key_secret = process.env.RAZORPAY_KEY_SECRET;
+
+  if (!key_id || !key_secret) {
+    console.warn("⚠️ Razorpay credentials not configured in environment variables.");
+  }
 
   return new Razorpay({
-    key_id,
-    key_secret
+    key_id: key_id || "dummy_key_id",
+    key_secret: key_secret || "dummy_key_secret"
   });
 };
 
@@ -19,13 +23,32 @@ const getRazorpayInstance = () => {
 export const createPayment = async (req, res) => {
   try {
     const orderId = req.body.orderId || req.body.order_id;
-    const { amount, currency = "INR", notes = {}, customer } = req.body;
+    let amount = Number(req.body.amount);
+    const { currency = "INR", notes = {}, customer } = req.body;
+
+    let targetOrder = null;
+    if (orderId) {
+      if (mongoose.Types.ObjectId.isValid(orderId)) {
+        targetOrder = await Order.findById(orderId);
+      }
+      if (!targetOrder) {
+        targetOrder = await Order.findOne({ $or: [{ orderId }, { id: orderId }] });
+      }
+
+      // If order exists in DB, ensure payment amount matches actual server-verified order payable amount
+      if (targetOrder) {
+        const truePayable = Number(targetOrder.payableAmount ?? targetOrder.totalAmount ?? targetOrder.total ?? 0);
+        if (truePayable > 0) {
+          amount = truePayable;
+        }
+      }
+    }
 
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ message: "Valid positive amount in INR is required" });
     }
 
-    const key_id = process.env.RAZORPAY_KEY_ID || "rzp_test_6kz5nGEzi8uXRw";
+    const key_id = process.env.RAZORPAY_KEY_ID || "";
     const receipt = `rcpt_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
 
     let razorpayOrder;
@@ -58,7 +81,7 @@ export const createPayment = async (req, res) => {
 
     // Save payment record in DB
     const payment = new Payment({
-      orderId: orderId || null,
+      orderId: targetOrder?._id || orderId || null,
       userId: req.user ? req.user.id : null,
       customer: customer || {
         name: req.user ? req.user.name : "Customer",
@@ -75,11 +98,10 @@ export const createPayment = async (req, res) => {
     });
     await payment.save();
 
-    // Link Razorpay Order ID to Order if orderId provided
-    if (orderId) {
-      await Order.findByIdAndUpdate(orderId, {
-        razorpayOrderId: razorpayOrder.id
-      });
+    // Link Razorpay Order ID to Order if targetOrder exists
+    if (targetOrder) {
+      targetOrder.razorpayOrderId = razorpayOrder.id;
+      await targetOrder.save();
     }
 
     res.status(201).json({
@@ -229,11 +251,29 @@ export const verifyPayment = async (req, res) => {
   }
 };
 
-// 3. Get All Payments (Admin)
+// 3. Get All Payments (Admin) - Paginated
 export const getPayments = async (req, res) => {
   try {
-    const payments = await Payment.find().sort({ createdAt: -1 });
-    res.json(payments);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const skip = (page - 1) * limit;
+
+    const [payments, total] = await Promise.all([
+      Payment.find().sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Payment.countDocuments()
+    ]);
+
+    // Backwards compatibility: support both paginated array and pagination metadata
+    if (req.query.paginated === "true") {
+      res.json({
+        payments,
+        total,
+        page,
+        totalPages: Math.ceil(total / limit)
+      });
+    } else {
+      res.json(payments);
+    }
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch payments", error: error.message });
   }

@@ -571,9 +571,9 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     if (!text) return '';
     const str = String(text).toLowerCase();
     const states = [
-      { key: 'uttarpradesh', aliases: ['uttar pradesh', 'uttarpradesh', 'up', 'noida', 'lucknow', 'kanpur', 'ghaziabad', 'agra', 'varanasi', 'prayagraj'] },
-      { key: 'delhi', aliases: ['delhi', 'new delhi', 'nct of delhi', 'nct', 'dl'] },
-      { key: 'maharashtra', aliases: ['maharashtra', 'mumbai', 'pune', 'nagpur', 'thane', 'mh'] },
+      { key: 'uttarpradesh', aliases: ['uttar pradesh', 'uttarpradesh', 'u.p.', 'u.p', 'up', 'noida', 'lucknow', 'kanpur', 'ghaziabad', 'agra', 'varanasi', 'prayagraj', 'gorakhpur', 'meerut', 'bareilly', 'aligarh', 'moradabad', 'saharanpur'] },
+      { key: 'delhi', aliases: ['delhi', 'new delhi', 'nct of delhi', 'nct', 'dl', 'newdelhi'] },
+      { key: 'maharashtra', aliases: ['maharashtra', 'mumbai', 'pune', 'nagpur', 'thane', 'mh', 'navi mumbai'] },
       { key: 'karnataka', aliases: ['karnataka', 'bangalore', 'bengaluru', 'mysore', 'ka'] },
       { key: 'tamilnadu', aliases: ['tamil nadu', 'tamilnadu', 'chennai', 'coimbatore', 'tn'] },
       { key: 'haryana', aliases: ['haryana', 'gurugram', 'gurgaon', 'faridabad', 'hr'] },
@@ -591,7 +591,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
 
     for (const st of states) {
       for (const alias of st.aliases) {
-        if (new RegExp(`\\b${alias}\\b`, 'i').test(str)) {
+        if (new RegExp(`\\b${alias}\\b`, 'i').test(str) || str.includes(alias)) {
           return st.key;
         }
       }
@@ -608,12 +608,36 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     return parseStateKeyFromText(fallbackText || '');
   };
 
-  const sellerStateKey = getDynamicState(resolvedSeller, `${resolvedSeller?.state || ''} ${resolvedSeller?.city || ''} ${resolvedSeller?.address || ''}`);
-  const customerStateKey = getDynamicState(order.shippingAddress, `${resolvedConsumer?.street || ''} ${resolvedConsumer?.cityStatePin || ''}`);
+  const isFilteredMultiSeller = Boolean(filterSellerId && itemsToRender.length < (order.items || []).length);
+  const allItemsSum = (order.items || []).reduce(
+    (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
+    0
+  ) || 1;
+  const ratio = isFilteredMultiSeller ? (subtotal / allItemsSum) : 1;
+
+  const rawShipping = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
+  const rawDiscount = Number(order.discount ?? order.discountAmount ?? 0);
+  const rawPointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
+
+  const shippingCost = isFilteredMultiSeller ? Math.round(rawShipping * ratio) : rawShipping;
+  const discountAmount = isFilteredMultiSeller ? Math.round(rawDiscount * ratio) : rawDiscount;
+  const pointsDiscount = isFilteredMultiSeller ? Math.round(rawPointsDiscount * ratio) : rawPointsDiscount;
+
+  // Include Delivery GST into total taxable value & total tax collected for full order grand total breakdown
+  if (shippingCost > 0) {
+    const shippingGstRate = 18;
+    const shippingTaxable = shippingCost / (1 + shippingGstRate / 100);
+    const shippingTax = shippingCost - shippingTaxable;
+    totalTaxableValue += shippingTaxable;
+    totalTaxAmount += shippingTax;
+  }
+
+  const sellerStateKey = getDynamicState(resolvedSeller, `${resolvedSeller?.state || ''} ${resolvedSeller?.city || ''} ${resolvedSeller?.address || ''}`) || 'uttarpradesh';
+  const customerStateKey = getDynamicState(order.shippingAddress, `${resolvedConsumer?.street || ''} ${resolvedConsumer?.cityStatePin || ''}`) || 'uttarpradesh';
 
   const isSameState = !sellerStateKey || !customerStateKey || sellerStateKey === customerStateKey;
-  const sellerStateStr = resolvedSeller?.state || resolvedSeller?.city || sellerStateKey || "Seller Location";
-  const customerStateStr = order.shippingAddress?.state || order.shippingAddress?.city || customerStateKey || "Customer Location";
+  const sellerStateStr = resolvedSeller?.state || resolvedSeller?.city || (sellerStateKey === 'uttarpradesh' ? 'Uttar Pradesh' : sellerStateKey) || "Uttar Pradesh";
+  const customerStateStr = order.shippingAddress?.state || order.shippingAddress?.city || (customerStateKey === 'uttarpradesh' ? 'Uttar Pradesh' : customerStateKey) || "Uttar Pradesh";
 
   const taxableValue = Math.round(totalTaxableValue * 100) / 100;
   const totalTax = Math.round(totalTaxAmount * 100) / 100;
@@ -661,21 +685,6 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   }
 
   // Financial Summary (Right)
-  const isFilteredMultiSeller = Boolean(filterSellerId && itemsToRender.length < (order.items || []).length);
-  const allItemsSum = (order.items || []).reduce(
-    (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
-    0
-  ) || 1;
-  const ratio = isFilteredMultiSeller ? (subtotal / allItemsSum) : 1;
-
-  const rawShipping = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
-  const rawDiscount = Number(order.discount ?? order.discountAmount ?? 0);
-  const rawPointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
-
-  const shippingCost = isFilteredMultiSeller ? Math.round(rawShipping * ratio) : rawShipping;
-  const discountAmount = isFilteredMultiSeller ? Math.round(rawDiscount * ratio) : rawDiscount;
-  const pointsDiscount = isFilteredMultiSeller ? Math.round(rawPointsDiscount * ratio) : rawPointsDiscount;
-
   const calculatedGrandTotal = isFilteredMultiSeller
     ? Math.max(0, Math.round((subtotal + shippingCost - discountAmount - pointsDiscount) * 100) / 100)
     : Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
