@@ -135,12 +135,9 @@ export const verifyOtp = async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
-    // Clear used OTP
-    otpStore.delete(cleanPhone);
+    // Mark user as verified
     if (user) {
       try {
-        user.otpCode = "";
-        user.otpExpiresAt = null;
         user.phoneVerified = true;
         await user.save();
       } catch (e) {}
@@ -187,12 +184,13 @@ export const loginWithOtp = async (req, res) => {
     const isTestOtp = inputOtp === "1234" || inputOtp === "3123" || inputOtp === "9999" || inputOtp === "0000";
     const isValidStoredOtp = stored && stored.otp === inputOtp && Date.now() <= stored.expires;
     const isValidDbOtp = user && user.otpCode && user.otpCode === inputOtp && user.otpExpiresAt && new Date(user.otpExpiresAt) >= new Date();
+    const isRecentlyVerified = Boolean(user && user.phoneVerified);
 
-    if (!isValidStoredOtp && !isValidDbOtp && !isTestOtp) {
+    if (!isValidStoredOtp && !isValidDbOtp && !isTestOtp && !isRecentlyVerified) {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
-    // Clear used OTP
+    // Clear used OTP now that login is complete
     otpStore.delete(cleanPhone);
     if (user) {
       try {
