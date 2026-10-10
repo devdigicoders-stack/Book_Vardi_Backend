@@ -49,6 +49,92 @@ const withTimeout = (promise, ms = 15000) => {
 // Clean fallback (no dummy products)
 const FALLBACK_PRODUCTS = [];
 
+// Helper to build flexible and case-insensitive category/subcategory filter queries
+const buildCategoryFilter = (category) => {
+  if (!category || category === "all" || category === "undefined" || category === "null") {
+    return null;
+  }
+  const cleanCat = String(category).trim().replace(/[-_]+/g, " ");
+  const lower = cleanCat.toLowerCase();
+
+  if (category === "school_specific" || lower.includes("uniform")) {
+    return {
+      $or: [
+        { category: new RegExp("uniform", "i") },
+        { category: "school_specific" },
+        { isSchoolSpecific: true }
+      ]
+    };
+  }
+
+  if (lower.includes("kit") || lower.includes("bundle")) {
+    return {
+      $or: [
+        { category: new RegExp("kit", "i") },
+        { category: new RegExp("bundle", "i") },
+        { bundleType: "kit" },
+        { subCategory: new RegExp("kit|bundle", "i") }
+      ]
+    };
+  }
+
+  if (lower.includes("ncert")) {
+    return {
+      $or: [
+        { subCategory: new RegExp("ncert", "i") },
+        { category: new RegExp("book", "i") },
+        { name: new RegExp("ncert", "i") }
+      ]
+    };
+  }
+
+  if (lower.includes("practice")) {
+    return {
+      $or: [
+        { subCategory: new RegExp("practice|olympiad", "i") },
+        { name: new RegExp("practice", "i") }
+      ]
+    };
+  }
+
+  if (lower.includes("drawing")) {
+    return {
+      $or: [
+        { subCategory: new RegExp("drawing", "i") },
+        { category: new RegExp("drawing", "i") },
+        { name: new RegExp("drawing", "i") }
+      ]
+    };
+  }
+
+  if (lower.includes("station") || lower.includes("notebook")) {
+    return {
+      $or: [
+        { category: new RegExp("station|notebook", "i") },
+        { subCategory: new RegExp("station|notebook", "i") }
+      ]
+    };
+  }
+
+  if (lower.includes("footwear") || lower.includes("shoe") || lower.includes("sock")) {
+    return {
+      $or: [
+        { category: new RegExp("footwear|shoe|sock", "i") },
+        { subCategory: new RegExp("shoe|sock", "i") }
+      ]
+    };
+  }
+
+  return {
+    $or: [
+      { category: new RegExp(`^${category}$`, "i") },
+      { category: new RegExp(`^${cleanCat}$`, "i") },
+      { category: new RegExp(cleanCat, "i") },
+      { subCategory: new RegExp(cleanCat, "i") }
+    ]
+  };
+};
+
 // Get all products (with optional filtering by category, search, school, size, age, discount, offer, ids, tag)
 export const getProducts = async (req, res) => {
   try {
@@ -98,12 +184,9 @@ export const getProducts = async (req, res) => {
       const validObjectIds = parsedIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
       if (validObjectIds.length > 0) filter._id = { $in: validObjectIds };
     }
-    if (category && category !== "all" && category !== "undefined" && category !== "null") {
-      if (category === "school_specific") {
-        filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
-      } else {
-        filter.category = category;
-      }
+    const catQuery = buildCategoryFilter(category);
+    if (catQuery) {
+      Object.assign(filter, catQuery);
     }
     if (subCategory) filter.subCategory = subCategory;
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
@@ -242,10 +325,8 @@ export const getRecentlyViewedProducts = async (req, res) => {
     const parsedIds = parseArray(ids);
     const validObjectIds = parsedIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
     let filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category && category !== "all" && category !== "undefined" && category !== "null") {
-      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
-      else filter.category = category;
-    }
+    const catQuery = buildCategoryFilter(category);
+    if (catQuery) Object.assign(filter, catQuery);
 
     let products = [];
     try {
@@ -291,10 +372,8 @@ export const getFeaturedProducts = async (req, res) => {
     }
 
     const filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category && category !== "all" && category !== "undefined" && category !== "null") {
-      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
-      else filter.category = category;
-    }
+    const catQuery = buildCategoryFilter(category);
+    if (catQuery) Object.assign(filter, catQuery);
 
     let products = [];
     try {
@@ -333,10 +412,8 @@ export const getSpecialOffers = async (req, res) => {
       isDeleted: { $ne: true },
       approvalStatus: { $nin: ["Pending", "Rejected"] }
     };
-    if (category && category !== "all" && category !== "undefined" && category !== "null") {
-      if (category === "school_specific") filter.category = "uniforms";
-      else filter.category = category;
-    }
+    const catQuery = buildCategoryFilter(category);
+    if (catQuery) Object.assign(filter, catQuery);
 
     let products = [];
     try {
@@ -371,10 +448,8 @@ export const getRecommendedProducts = async (req, res) => {
     }
 
     const filter = { status: { $nin: ["deleted"] }, isDeleted: { $ne: true }, approvalStatus: { $nin: ["Pending", "Rejected"] } };
-    if (category && category !== "all" && category !== "undefined" && category !== "null") {
-      if (category === "school_specific") filter.$or = [{ category: "uniforms" }, { category: "school_specific" }, { isSchoolSpecific: true }];
-      else filter.category = category;
-    }
+    const catQuery = buildCategoryFilter(category);
+    if (catQuery) Object.assign(filter, catQuery);
     if (schoolName) filter.schoolName = { $regex: schoolName, $options: "i" };
     if (classGrade) filter.classGrade = { $regex: classGrade, $options: "i" };
 
