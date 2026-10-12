@@ -105,8 +105,14 @@ router.post("/", async (req, res) => {
     if (!schoolData.name) {
       return res.status(400).json({ success: false, message: "School name is required." });
     }
+    const shortName = schoolData.shortName || schoolData.code || schoolData.name.split(" ").map(w => w[0]).join("").slice(0, 8).toUpperCase();
+    const code = schoolData.code || shortName;
+    const schoolId = schoolData.schoolId || `SCH-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 900 + 100)}`;
     const school = new School({
       ...schoolData,
+      shortName,
+      code,
+      schoolId,
       status: schoolData.status || "Partner Active"
     });
     await school.save();

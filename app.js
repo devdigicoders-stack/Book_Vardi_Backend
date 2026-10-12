@@ -53,7 +53,6 @@ const app = express();
 connectDB()
   .then(async () => {
     await initDefaultAdmin();
-    await initDefaultSeller();
   })
   .catch(() => {});
 
@@ -73,15 +72,25 @@ app.use(async (req, res, next) => {
 // 2. Create Default Admin & ensure Phone 1231231232 has admin role
 const initDefaultAdmin = async () => {
   try {
-    const adminExists = await Admin.findOne({ email: "admin@admin.com" });
-    if (!adminExists) {
-      const hashedPassword = await bcrypt.hash("admin123", 10);
-      await Admin.create({
+    let admin = await Admin.findOne({ email: "admin@admin.com" });
+    if (!admin) {
+      admin = new Admin({
         name: "Super Admin",
         email: "admin@admin.com",
-        password: hashedPassword
+        phone: "1231231232",
+        password: "admin123",
+        role: "super_admin",
+        status: "active"
       });
-      console.log("Default admin created: admin@admin.com / admin123");
+      await admin.save();
+      console.log("Default admin created in DB: admin@admin.com / admin123");
+    } else {
+      const isValid = await bcrypt.compare("admin123", admin.password).catch(() => false);
+      if (!isValid && admin.password !== "admin123") {
+        admin.password = "admin123";
+        await admin.save();
+        console.log("Default admin password re-synchronized in DB with bcrypt hash.");
+      }
     }
 
     const phoneAdmin = await User.findOne({
@@ -102,45 +111,7 @@ const initDefaultAdmin = async () => {
   }
 };
 
-// Auto-seed default approved seller for seamless onboarding & testing
-const initDefaultSeller = async () => {
-  try {
-    const existingSeller = await Seller.findOne({
-      $or: [
-        { phone: "1231231232" },
-        { phone: "+911231231232" },
-        { phone: "+91 1231231232" }
-      ]
-    });
-    if (!existingSeller) {
-      const hashedPassword = await bcrypt.hash("seller123", 10);
-      await Seller.create({
-        name: "Rahul Enterprise",
-        storeName: "Rahul Enterprise",
-        email: "seller@bookvardi.in",
-        phone: "+911231231232",
-        password: hashedPassword,
-        address: "Commercial Market, Near Civil Hospital",
-        city: "Lucknow",
-        state: "Uttar Pradesh",
-        pincode: "226001",
-        status: "approved",
-        approvedAt: new Date()
-      });
-      console.log("Default approved seller initialized (+911231231232)");
-    }
 
-    const defaultSellerDoc = existingSeller || await Seller.findOne({ phone: "+911231231232" });
-    if (defaultSellerDoc) {
-      await Kit.updateMany(
-        { $or: [{ sellerId: { $exists: false } }, { sellerId: null }] },
-        { $set: { sellerId: defaultSellerDoc._id } }
-      );
-    }
-  } catch (err) {
-    console.error("Default seller creation error:", err.message);
-  }
-};
 
 // 3. Security Middlewares (Helmet & Rate Limiting)
 app.use(helmet({ crossOriginResourcePolicy: false })); // Secure HTTP Headers

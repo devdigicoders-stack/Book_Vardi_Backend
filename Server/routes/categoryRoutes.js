@@ -72,23 +72,14 @@ const DEFAULT_CATEGORIES = [
   }
 ];
 
-async function ensureDefaultCategories() {
-  let categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
-  if (categories.length === 0) {
-    try {
-      await Category.insertMany(DEFAULT_CATEGORIES);
-      categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
-    } catch (e) {
-      console.error('Error auto-seeding categories:', e);
-    }
-  }
-  return categories;
+async function getCategoriesFromDB() {
+  return await Category.find().sort({ sortOrder: 1, createdAt: 1 });
 }
 
 // Get all categories (Public for header and store browsing)
 router.get('/', cacheMiddleware(120), async (req, res) => {
   try {
-    const categories = await ensureDefaultCategories();
+    const categories = await getCategoriesFromDB();
     res.json(categories);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -98,7 +89,7 @@ router.get('/', cacheMiddleware(120), async (req, res) => {
 // Get category tree with subcategories (Public)
 router.get('/tree', cacheMiddleware(120), async (req, res) => {
   try {
-    const categories = await ensureDefaultCategories();
+    const categories = await getCategoriesFromDB();
     res.json(categories);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
