@@ -2957,9 +2957,9 @@ export const updateReturnExchangeStatus = async (req, res) => {
       return currentRetStatus;
     })();
 
-    // Only enforce the transition guard when the current status is a known state.
-    // If the current status is unknown (e.g. legacy data), allow the update to proceed.
-    if (normalizedCurrent && RETURN_STATUS_TRANSITIONS[normalizedCurrent] !== undefined) {
+    // Only enforce the transition guard when transitioning to a DIFFERENT state.
+    // Idempotent calls (setting to the already current status) are permitted safely.
+    if (normalizedCurrent && normalizedCurrent !== normalizedTarget && RETURN_STATUS_TRANSITIONS[normalizedCurrent] !== undefined) {
       const allowed = RETURN_STATUS_TRANSITIONS[normalizedCurrent];
       if (!allowed.includes(normalizedTarget) && !allowed.includes(rawStatus)) {
         return res.status(422).json({
