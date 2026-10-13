@@ -2347,7 +2347,7 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
       }
     }
 
-    const winningQuote = (bulkOrder.quotations || []).find(
+    let winningQuote = (bulkOrder.quotations || []).find(
       q => (quoteId && (String(q._id) === String(quoteId) || String(q.id) === String(quoteId))) ||
            (bulkOrder.acceptedQuoteId && (String(q._id) === String(bulkOrder.acceptedQuoteId) || String(q.id) === String(bulkOrder.acceptedQuoteId))) ||
            q.status === "approved" ||
@@ -2357,18 +2357,27 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
            q.negotiationStage === "seller_accepted_counter"
     );
 
+    if (!winningQuote && Array.isArray(bulkOrder.quotations) && bulkOrder.quotations.length > 0) {
+      winningQuote = bulkOrder.quotations[0];
+    }
+
     // Mutual Verification Guard: Both buyer and seller must have agreed/verified terms
     const isUnderCounter = bulkOrder.status === "buyer_countered" || winningQuote?.negotiationStage === "buyer_countered";
-    const isVerifiedByBoth = winningQuote && !isUnderCounter && (
+    const isVerifiedByBoth = Boolean(winningQuote) && !isUnderCounter && (
       winningQuote.status === "approved" ||
       winningQuote.status === "seller_accepted" ||
+      winningQuote.status === "buyer_accepted" ||
+      winningQuote.status === "submitted" || // Buyer paying online accepts the pitched quotation!
       winningQuote.negotiationStage === "approved" ||
       winningQuote.negotiationStage === "seller_accepted_counter" ||
+      winningQuote.negotiationStage === "revised_by_seller" ||
+      winningQuote.negotiationStage === "first_pitch" ||
       bulkOrder.status === "accepted" ||
       bulkOrder.status === "confirmed" ||
       bulkOrder.status === "quote_accepted" ||
       bulkOrder.status === "seller_accepted_counter" ||
-      bulkOrder.status === "buyer_accepted"
+      bulkOrder.status === "buyer_accepted" ||
+      bulkOrder.status === "assigned"
     );
 
     if (isUnderCounter) {
@@ -2386,16 +2395,38 @@ export const createSchoolBulkPrepaymentOrder = async (req, res) => {
     }
 
     const setPct = Number(
-      bulkOrder.sellerAdvancePercentage ||
-      bulkOrder.prepaymentPercentage ||
       winningQuote?.prepaymentPercentage ||
       winningQuote?.sellerAdvancePercentage ||
+      bulkOrder.sellerAdvancePercentage ||
+      bulkOrder.prepaymentPercentage ||
       20
     );
 
-    const requiredAdvance = (bulkOrder.sellerAdvanceAmount > 0 && (!bulkOrder.sellerAdvancePercentage || bulkOrder.sellerAdvancePercentage <= 0))
-      ? Number(bulkOrder.sellerAdvanceAmount)
-      : Math.round((Number(bulkOrder.overallBudget || winningQuote?.quoteAmount || bulkOrder.targetBudgetPerKit || 0) * setPct) / 100);
+    const quoteTotal = Number(winningQuote?.quoteAmount || bulkOrder.overallBudget || bulkOrder.targetBudgetPerKit || 0);
+
+    const requiredAdvance = Number(winningQuote?.prepaymentAmount) > 0
+      ? Number(winningQuote.prepaymentAmount)
+      : (bulkOrder.sellerAdvanceAmount > 0 && (!bulkOrder.sellerAdvancePercentage || bulkOrder.sellerAdvancePercentage <= 0))
+        ? Number(bulkOrder.sellerAdvanceAmount)
+        : Math.round((quoteTotal * setPct) / 100);
+
+    if (winningQuote) {
+      if (winningQuote.status !== "approved") {
+        winningQuote.status = "buyer_accepted";
+      }
+      bulkOrder.acceptedQuoteId = winningQuote._id;
+      if (winningQuote.sellerId) {
+        bulkOrder.assignedSellerId = winningQuote.sellerId;
+        bulkOrder.sellerId = winningQuote.sellerId;
+      }
+      if (bulkOrder.status === "assigned" || bulkOrder.status === "rfq_open" || bulkOrder.status === "open") {
+        bulkOrder.status = "buyer_accepted";
+      }
+      bulkOrder.sellerAdvanceAmount = requiredAdvance;
+      bulkOrder.sellerAdvancePercentage = setPct;
+      bulkOrder.markModified("quotations");
+      await bulkOrder.save();
+    }
 
     if (requiredAdvance <= 0) {
       return res.status(400).json({ success: false, message: "No advance prepayment required for this bulk order." });
@@ -2520,9 +2551,11 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
     const winningQuote = (bulkOrder.quotations || []).find(
       q => (effectiveQuoteId && (String(q._id) === String(effectiveQuoteId) || String(q.id) === String(effectiveQuoteId))) ||
            q.status === "approved" ||
+           q.status === "buyer_accepted" ||
+           q.status === "seller_accepted" ||
            q.negotiationStage === "approved" ||
            q.negotiationStage === "seller_accepted_counter"
-    );
+    ) || (bulkOrder.quotations && bulkOrder.quotations.length > 0 ? bulkOrder.quotations[0] : null);
 
     const paidAmt = Number(clientPaidAmount) || bulkOrder.sellerAdvanceAmount || (
       bulkOrder.sellerAdvancePercentage > 0
@@ -2544,6 +2577,7 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
       bulkOrder.acceptedQuoteId = winningQuote._id;
       if (winningQuote.sellerId) {
         bulkOrder.sellerId = winningQuote.sellerId;
+        bulkOrder.assignedSellerId = winningQuote.sellerId;
       }
     }
 
