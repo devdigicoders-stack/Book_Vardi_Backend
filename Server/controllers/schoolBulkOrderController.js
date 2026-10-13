@@ -489,20 +489,30 @@ export const distributeSchoolOrder = async (req, res) => {
     bulkOrder.assignmentMode = assignmentMode;
 
     if (assignmentMode === "direct") {
-      if (!sellerId) {
+      const cleanSellerId = sellerId ? (typeof sellerId === "object" ? (sellerId._id || sellerId.id) : sellerId) : null;
+      if (!cleanSellerId) {
         return res.status(400).json({ success: false, message: "Seller ID is required for direct assignment." });
       }
-      bulkOrder.sellerId = sellerId;
+      bulkOrder.sellerId = cleanSellerId;
       bulkOrder.invitedSellerIds = [];
       bulkOrder.isGlobalRfq = false;
       bulkOrder.isGlobal = false;
       bulkOrder.isPublic = false;
       bulkOrder.status = "assigned";
+
+      // Also set seller store/name on bulkOrder directly so all panels have immediate display
+      try {
+        const assignedSellerDoc = await Seller.findById(cleanSellerId).select("name storeName phone email city businessName ownerName");
+        if (assignedSellerDoc) {
+          bulkOrder.acceptedSellerName = assignedSellerDoc.storeName || assignedSellerDoc.businessName || assignedSellerDoc.name || "Approved Seller";
+        }
+      } catch (sErr) {}
     } else if (assignmentMode === "selected") {
       if (!Array.isArray(invitedSellerIds) || invitedSellerIds.length === 0) {
         return res.status(400).json({ success: false, message: "Please select at least one seller to invite." });
       }
-      bulkOrder.invitedSellerIds = invitedSellerIds;
+      const cleanInvited = invitedSellerIds.map(s => (typeof s === "object" ? (s._id || s.id) : s)).filter(Boolean);
+      bulkOrder.invitedSellerIds = cleanInvited;
       bulkOrder.sellerId = null;
       bulkOrder.isGlobalRfq = false;
       bulkOrder.isGlobal = false;
@@ -531,7 +541,9 @@ export const distributeSchoolOrder = async (req, res) => {
       broadcastRealtimeEvent({
         type: "SCHOOL_ORDER_UPDATED",
         orderId: bulkOrder.referenceId,
-        status: bulkOrder.status
+        status: bulkOrder.status,
+        assignmentMode: bulkOrder.assignmentMode,
+        sellerId: bulkOrder.sellerId ? String(bulkOrder.sellerId) : null
       });
     } catch (rtErr) {}
 
@@ -562,18 +574,34 @@ export const getSellerSchoolOrders = async (req, res) => {
       req.headers["x-seller-id"]
     ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
-    const validObjectIds = possibleIds
-      .filter(id => mongoose.Types.ObjectId.isValid(String(id)))
-      .map(id => new mongoose.Types.ObjectId(id));
-
-    const stringIds = possibleIds.map(id => String(id));
-
     const candidatePhones = [
       req.user?.phone,
       req.seller?.phone,
       req.headers["x-seller-phone"],
       req.headers["x-user-phone"]
     ].filter(Boolean);
+
+    // If candidate phones exist, also lookup matching Seller accounts to grab their _ids
+    if (candidatePhones.length > 0) {
+      try {
+        const phoneVariants = candidatePhones.flatMap(p => {
+          const cl = String(p).replace(/\D/g, "").slice(-10);
+          return cl.length >= 10 ? [{ phone: cl }, { phone: `+91${cl}` }, { phone: `+91 ${cl}` }] : [];
+        });
+        if (phoneVariants.length > 0) {
+          const matchedByPhone = await Seller.find({ $or: phoneVariants }).select("_id").lean();
+          matchedByPhone.forEach(m => {
+            if (m?._id) possibleIds.push(String(m._id));
+          });
+        }
+      } catch (pErr) {}
+    }
+
+    const validObjectIds = possibleIds
+      .filter(id => mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    const stringIds = possibleIds.map(id => String(id));
 
     const matchIds = [...validObjectIds, ...stringIds];
 
@@ -610,7 +638,10 @@ export const getSellerSchoolOrders = async (req, res) => {
 
     const orders = await SchoolBulkOrder.find({
       $or: queryConditions
-    }).sort({ createdAt: -1 });
+    })
+      .populate("sellerId", "storeName name phone email businessName")
+      .populate("invitedSellerIds", "storeName name phone email businessName")
+      .sort({ createdAt: -1 });
 
     const sanitizedOrders = orders.map(ord => sanitizeOrderForSeller(ord, {
       candidateIds: possibleIds,
@@ -627,7 +658,10 @@ export const getSellerSchoolOrders = async (req, res) => {
 export const acceptSchoolOrderDirect = async (req, res) => {
   try {
     const { id } = req.params;
-    const sellerId = req.user.id;
+    const sellerId = req.user?.id || req.seller?._id || req.seller?.id || req.headers["x-seller-id"];
+    if (!sellerId) {
+      return res.status(401).json({ success: false, message: "Seller authentication required." });
+    }
 
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
@@ -864,7 +898,10 @@ export const setBulkOrderPrepaymentPercentage = async (req, res) => {
 export const submitSellerQuotation = async (req, res) => {
   try {
     const { id } = req.params;
-    const sellerId = req.user.id;
+    const sellerId = req.user?.id || req.seller?._id || req.seller?.id || req.headers["x-seller-id"];
+    if (!sellerId) {
+      return res.status(401).json({ success: false, message: "Seller authentication required." });
+    }
     const {
       quoteAmount,
       unitPrice,
@@ -1942,55 +1979,99 @@ export const createSellerSchoolOrder = async (req, res) => {
 export const updateItemSellerPrices = async (req, res) => {
   try {
     const { id } = req.params;
-    const { itemPrices } = req.body; // [{ itemId: string, sellerPricePerUnit: number }]
-    const sellerId = String(req.user?.id || req.seller?._id || req.user?._id || "");
+    const { itemPrices, callerRole } = req.body; // [{ itemId: string, itemName: string, sellerPricePerUnit: number }]
+    const authInfo = resolveSellerAuthInfo(req);
+    const sellerId = String(
+      req.body.sellerId ||
+      req.headers["x-seller-id"] ||
+      authInfo?.sellerId ||
+      req.user?.id ||
+      req.seller?._id ||
+      req.user?._id ||
+      ""
+    );
 
     const bulkOrder = await findSchoolBulkOrderByIdOrRef(id);
     if (!bulkOrder) {
-      return res.status(404).json({ message: "School bulk requirement request not found" });
+      return res.status(404).json({ success: false, message: "School bulk requirement request not found" });
     }
 
-    // Update itemPrices inside the seller's active quotation
-    const myQuote = Array.isArray(bulkOrder.quotations)
-      ? bulkOrder.quotations.find(q => String(q.sellerId) === sellerId)
-      : null;
+    const isAdmin = isRequestAdmin(req) || req.user?.role === "admin" || req.user?.role === "super_admin" || callerRole === "admin";
+    const isAwardedSeller = bulkOrder.sellerId && String(bulkOrder.sellerId?._id || bulkOrder.sellerId?.id || bulkOrder.sellerId) === sellerId;
 
-    if (myQuote && Array.isArray(itemPrices)) {
-      if (!Array.isArray(myQuote.itemPrices)) myQuote.itemPrices = [];
+    // 1. Update shared requirements sellerPricePerUnit
+    if (Array.isArray(itemPrices) && Array.isArray(bulkOrder.requirements)) {
       itemPrices.forEach((ip) => {
-        const existing = myQuote.itemPrices.find(p => String(p.itemId) === String(ip.itemId) || String(p.itemName) === String(ip.itemName));
-        if (existing) {
-          existing.pricePerUnit = Number(ip.sellerPricePerUnit) || 0;
-          existing.totalPrice = (Number(existing.quantity) || 1) * existing.pricePerUnit;
+        const reqItem = bulkOrder.requirements.find(
+          (r, idx) => String(r._id || idx) === String(ip.itemId) ||
+          (ip.itemName && String(r.itemName).trim().toLowerCase() === String(ip.itemName).trim().toLowerCase())
+        );
+        if (reqItem) {
+          reqItem.sellerPricePerUnit = Number(ip.sellerPricePerUnit) || 0;
         }
       });
     }
 
-    // Only update shared requirements if admin or if this seller has been awarded the order
-    const isAwardedSeller = bulkOrder.sellerId && String(bulkOrder.sellerId) === sellerId;
-    if (req.user?.role === "admin" || isAwardedSeller) {
-      if (Array.isArray(itemPrices) && Array.isArray(bulkOrder.requirements)) {
-        itemPrices.forEach((ip) => {
-          const reqItem = bulkOrder.requirements.find((r, idx) => String(r._id || idx) === String(ip.itemId) || String(r.itemName) === String(ip.itemName));
-          if (reqItem) {
-            reqItem.sellerPricePerUnit = Number(ip.sellerPricePerUnit) || 0;
-          }
-        });
+    // 2. Update itemPrices inside the seller's quotation if quote exists
+    let myQuote = null;
+    if (Array.isArray(bulkOrder.quotations)) {
+      myQuote = bulkOrder.quotations.find(q => String(q.sellerId?._id || q.sellerId?.id || q.sellerId) === sellerId);
+      if (!myQuote && sellerId && bulkOrder.quotations.length > 0) {
+        myQuote = bulkOrder.quotations[0];
+      }
+    }
+
+    if (myQuote && Array.isArray(itemPrices)) {
+      if (!Array.isArray(myQuote.itemPrices)) myQuote.itemPrices = [];
+      itemPrices.forEach((ip) => {
+        const existing = myQuote.itemPrices.find(
+          p => String(p.itemId) === String(ip.itemId) ||
+          (ip.itemName && String(p.itemName).trim().toLowerCase() === String(ip.itemName).trim().toLowerCase())
+        );
+        if (existing) {
+          existing.pricePerUnit = Number(ip.sellerPricePerUnit) || 0;
+          existing.sellerPricePerUnit = Number(ip.sellerPricePerUnit) || 0;
+          existing.totalPrice = (Number(existing.quantity) || 1) * existing.pricePerUnit;
+        } else {
+          myQuote.itemPrices.push({
+            itemId: String(ip.itemId || ""),
+            itemName: String(ip.itemName || ""),
+            quantity: Number(ip.quantity) || 1,
+            pricePerUnit: Number(ip.sellerPricePerUnit) || 0,
+            sellerPricePerUnit: Number(ip.sellerPricePerUnit) || 0,
+            totalPrice: (Number(ip.quantity) || 1) * (Number(ip.sellerPricePerUnit) || 0)
+          });
+        }
+      });
+
+      const sumItemPrices = myQuote.itemPrices.reduce(
+        (sum, p) => sum + (Number(p.totalPrice) || ((Number(p.quantity) || 1) * (Number(p.pricePerUnit) || 0)) || 0),
+        0
+      );
+      if (sumItemPrices > 0) {
+        myQuote.quoteAmount = sumItemPrices;
       }
     }
 
     await bulkOrder.save();
 
-    const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers["x-seller-id"]].filter(Boolean).map(String);
+    broadcastRealtimeEvent("school_bulk_order_updated", {
+      orderId: bulkOrder._id,
+      referenceId: bulkOrder.referenceId,
+      order: bulkOrder
+    });
+
+    const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers["x-seller-id"], sellerId].filter(Boolean).map(String);
     const candidatePhones = [req.user?.phone, req.seller?.phone].filter(Boolean);
 
-    const responseOrder = (req.user?.role === "admin" || req.user?.role === "super_admin")
+    const responseOrder = (isAdmin)
       ? bulkOrder
       : sanitizeOrderForSeller(bulkOrder, { candidateIds, candidatePhones });
 
     res.json({ success: true, message: "Item seller prices updated successfully", order: responseOrder });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update item seller prices", error: error.message });
+    console.error("[updateItemSellerPrices] Error:", error);
+    res.status(500).json({ success: false, message: "Failed to update item seller prices", error: error.message });
   }
 };
 
