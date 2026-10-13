@@ -5,90 +5,14 @@ import { cacheMiddleware, clearCache } from '../utils/cache.js';
 
 const router = express.Router();
 
-const DEFAULT_CATEGORIES = [
-  {
-    name: 'School Uniform',
-    slug: 'school-uniform',
-    description: 'School uniforms, readymade apparel, unstitched fabric, winter wear & sports wear',
-    gstPercentage: 5,
-    icon: 'Shirt',
-    sortOrder: 1,
-    subCategories: [
-      { name: 'Ready to wear', slug: 'ready-to-wear' },
-      { name: 'Unstitched', slug: 'unstitched' },
-      { name: 'Winter wear', slug: 'winter-wear' },
-      { name: 'Sports Wear', slug: 'sports-wear' }
-    ]
-  },
-  {
-    name: 'Books',
-    slug: 'books',
-    description: 'NCERT textbooks, private publisher reference books, practice & olympiad workbooks',
-    gstPercentage: 0,
-    icon: 'BookOpen',
-    sortOrder: 2,
-    subCategories: [
-      { name: 'NCERT Books', slug: 'ncert-books' },
-      { name: 'Private Publisher Book', slug: 'private-publisher-book' },
-      { name: 'Practice & Olympiad Books', slug: 'practice-olympiad-books' }
-    ]
-  },
-  {
-    name: 'Notebook & Stationary',
-    slug: 'notebook-stationary',
-    description: 'School notebooks, registers, general stationary supplies, drawing and craft tools',
-    gstPercentage: 12,
-    icon: 'Edit3',
-    sortOrder: 3,
-    subCategories: [
-      { name: 'Notebooks and Register', slug: 'notebooks-and-register' },
-      { name: 'General Stationary', slug: 'general-stationary' },
-      { name: 'Drawing and supplies', slug: 'drawing-and-supplies' }
-    ]
-  },
-  {
-    name: 'Footwear',
-    slug: 'footwear',
-    description: 'School uniform shoes, socks and athletic footwear',
-    gstPercentage: 12,
-    icon: 'Footprints',
-    sortOrder: 4,
-    subCategories: [
-      { name: 'School shoes', slug: 'school-shoes' },
-      { name: 'School Socks', slug: 'school-socks' }
-    ]
-  },
-  {
-    name: 'School Bags And Kit',
-    slug: 'school-bags-and-kit',
-    description: 'Ergonomic school bags, backpacks, student combos and complete school kits',
-    gstPercentage: 18,
-    icon: 'ShoppingBag',
-    sortOrder: 5,
-    subCategories: [
-      { name: 'School Bags', slug: 'school-bags' },
-      { name: 'Kit and Bundle', slug: 'kit-and-bundle' }
-    ]
-  }
-];
-
-async function ensureDefaultCategories() {
-  let categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
-  if (categories.length === 0) {
-    try {
-      await Category.insertMany(DEFAULT_CATEGORIES);
-      categories = await Category.find().sort({ sortOrder: 1, createdAt: 1 });
-    } catch (e) {
-      console.error('Error auto-seeding categories:', e);
-    }
-  }
-  return categories;
+async function getCategoriesFromDB() {
+  return await Category.find().sort({ sortOrder: 1, createdAt: 1 });
 }
 
 // Get all categories (Public for header and store browsing)
-router.get('/', cacheMiddleware(120), async (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const categories = await ensureDefaultCategories();
+    const categories = await getCategoriesFromDB();
     res.json(categories);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -96,9 +20,9 @@ router.get('/', cacheMiddleware(120), async (req, res) => {
 });
 
 // Get category tree with subcategories (Public)
-router.get('/tree', cacheMiddleware(120), async (req, res) => {
+router.get('/tree', async (req, res) => {
   try {
-    const categories = await ensureDefaultCategories();
+    const categories = await getCategoriesFromDB();
     res.json(categories);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });

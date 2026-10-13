@@ -1139,6 +1139,7 @@ export const createOrder = async (req, res) => {
       item.gstPercent = resolvedGst;
       item.gstPercentage = resolvedGst;
       item.gstRate = resolvedGst;
+      item.isGstInclusive = item.isGstInclusive !== undefined ? item.isGstInclusive : (prod?.isGstInclusive !== undefined ? prod.isGstInclusive : true);
     }
 
     const orderIdVal = (orderId && !/^[0-9a-fA-F]{24}$/.test(orderId))
@@ -1247,7 +1248,17 @@ export const createOrder = async (req, res) => {
           : Math.round(totalShipping * (grp.items.length / (orderItems.length || 1)));
         accumulatedShipping += groupShipping;
 
-        const groupTotal = Math.max(0, Math.round((groupSubtotal + groupShipping - groupDiscount) * 100) / 100);
+        const groupTax = grp.items.reduce((sum, it) => {
+          const isInc = it.isGstInclusive !== false;
+          if (!isInc) {
+            const rate = Number(it.gst || it.gstRate || it.gstPercent || 5);
+            const itemSub = Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1);
+            return sum + (itemSub * rate) / 100;
+          }
+          return sum;
+        }, 0);
+
+        const groupTotal = Math.max(0, Math.round((groupSubtotal + groupShipping - groupDiscount + groupTax) * 100) / 100);
 
         const subOrder = new Order({
           orderId: subOrderId,
@@ -1264,6 +1275,7 @@ export const createOrder = async (req, res) => {
           },
           items: grp.items,
           subtotal: groupSubtotal,
+          taxAmount: Math.round(groupTax * 100) / 100,
           shippingCost: groupShipping,
           shippingFee: groupShipping,
           discount: groupDiscount,
@@ -1365,6 +1377,7 @@ export const createOrder = async (req, res) => {
       },
       items: orderItems,
       subtotal: subtotal || 0,
+      taxAmount: req.body.taxAmount !== undefined ? req.body.taxAmount : 0,
       shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
       shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
       discount: discount || discountAmount || 0,

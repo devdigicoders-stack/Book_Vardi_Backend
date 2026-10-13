@@ -2,12 +2,12 @@ import mongoose from "mongoose";
 
 const schoolSchema = new mongoose.Schema(
   {
-    schoolId: { type: String, unique: true },
+    schoolId: { type: String },
     name: { type: String, required: true },
-    shortName: { type: String, required: true },
-    code: { type: String },
+    shortName: { type: String, default: "" },
+    code: { type: String, default: "" },
     board: { type: String, default: "CBSE" },
-    city: { type: String, required: true },
+    city: { type: String, default: "General" },
     district: { type: String, default: "" },
     subdistrict: { type: String, default: "" },
     address: { type: String },
@@ -27,5 +27,18 @@ const schoolSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+schoolSchema.pre("validate", function (next) {
+  if (!this.shortName) {
+    this.shortName = this.code || (this.name ? this.name.split(" ").map(w => w[0]).join("").slice(0, 8).toUpperCase() : "SCH");
+  }
+  if (!this.code) {
+    this.code = this.shortName;
+  }
+  if (!this.schoolId) {
+    this.schoolId = `SCH-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 900 + 100)}`;
+  }
+  next();
+});
 
 export default mongoose.model("School", schoolSchema);

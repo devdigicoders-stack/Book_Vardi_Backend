@@ -12,70 +12,84 @@ const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 
 export const loginAdmin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, phone } = req.body;
+    const identifier = (email || phone || "").trim();
 
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+    if (!identifier || !password) {
+      return res.status(400).json({ message: "Email or phone number, and password are required" });
     }
 
-    const admin = await Admin.findOne({ email: email.toLowerCase() });
-    if (admin) {
-      if (admin.status === "suspended") {
-        return res.status(403).json({ message: "Account suspended. Please contact Super Administrator." });
-      }
+    // 1. Search dynamically in Admin collection by email or phone
+    let admin = await Admin.findOne({
+      $or: [
+        { email: identifier.toLowerCase() },
+        { phone: identifier }
+      ]
+    });
 
-      const isMatch = await bcrypt.compare(password, admin.password);
-      if (isMatch || password === admin.password) {
-        const token = jwt.sign(
-          {
-            id: admin._id,
-            email: admin.email,
-            role: admin.role || "admin",
-            permissions: admin.permissions || {}
-          },
-          JWT_SECRET,
-          { expiresIn: "7d" }
-        );
-
-        return res.json({
-          message: "Admin login successful",
-          token,
-          admin: {
-            id: admin._id,
-            name: admin.name,
-            email: admin.email,
-            phone: admin.phone || "",
-            role: admin.role || "admin",
-            permissions: admin.permissions || {},
-            status: admin.status || "active"
-          }
-        });
-      }
-    }
-
-    // Default Fallback
-    if (email === "admin@admin.com" && password === "admin123") {
-      const token = jwt.sign(
-        { id: "507f1f77bcf86cd799439011", email: "admin@admin.com", role: "super_admin", permissions: {} },
-        JWT_SECRET,
-        { expiresIn: "7d" }
-      );
-
-      return res.json({
-        message: "Admin login successful",
-        token,
-        admin: {
-          id: "507f1f77bcf86cd799439011",
-          name: "Super Admin",
-          email: "admin@admin.com",
-          role: "super_admin",
-          permissions: {},
-          status: "active"
-        }
+    // 2. Fallback to User collection if registered with administrative privileges
+    if (!admin) {
+      const userAdmin = await User.findOne({
+        $or: [
+          { email: identifier.toLowerCase() },
+          { phone: identifier }
+        ],
+        role: { $in: ["admin", "super_admin"] }
       });
+
+      if (userAdmin) {
+        admin = userAdmin;
+      }
     }
 
-    return res.status(401).json({ message: "Invalid credentials." });
+    if (!admin) {
+      return res.status(401).json({ message: "Invalid credentials: No admin account found with these details." });
+    }
+
+    if (admin.status === "suspended") {
+      return res.status(403).json({ message: "Account suspended. Please contact Super Administrator." });
+    }
+
+    // Dynamic password verification via bcrypt
+    let isMatch = false;
+    try {
+      isMatch = await bcrypt.compare(password, admin.password);
+    } catch (err) {
+      isMatch = false;
+    }
+
+    if (!isMatch && password === admin.password) {
+      isMatch = true;
+    }
+
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid credentials: Password does not match." });
+    }
+
+    const token = jwt.sign(
+      {
+        id: admin._id,
+        email: admin.email,
+        role: admin.role || "admin",
+        permissions: admin.permissions || {}
+      },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.json({
+      message: "Admin login successful",
+      token,
+      admin: {
+        id: admin._id,
+        name: admin.name || "Admin",
+        email: admin.email,
+        phone: admin.phone || "",
+        role: admin.role || "admin",
+        permissions: admin.permissions || {},
+        status: admin.status || "active"
+      }
+    });
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).json({ message: "Server error", error: error.message });

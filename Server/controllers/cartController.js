@@ -1,4 +1,5 @@
 import Cart from "../models/Cart.js";
+import Product from "../models/Product.js";
 
 // Helper to extract cart item ID or product ID + variant key as string
 const extractCartItemId = (item) => {
@@ -134,10 +135,39 @@ export const getCart = async (req, res) => {
     let cart = await getOrCreateCart(userId, userPhone);
     const normalizedItems = getNormalizedCartItems(cart);
 
-    if (JSON.stringify(cart.items) !== JSON.stringify(normalizedItems)) {
-      cart.items = normalizedItems;
-      cart = await saveCartSafely(cart);
+    // Sync cart items with live product data (paymentMethodAllowed, isGstInclusive, gst, price)
+    for (const item of normalizedItems) {
+      const pId = item.productId || item.id || item._id;
+      if (pId) {
+        let liveProd = null;
+        if (/^[0-9a-fA-F]{24}$/.test(String(pId))) {
+          liveProd = await Product.findById(pId).catch(() => null);
+        }
+        if (!liveProd && item.name) {
+          liveProd = await Product.findOne({ name: item.name }).catch(() => null);
+        }
+        if (liveProd) {
+          if (liveProd.paymentMethodAllowed) {
+            item.paymentMethodAllowed = liveProd.paymentMethodAllowed;
+            item.paymentMethodsAllowed = liveProd.paymentMethodAllowed === 'Online_Only'
+              ? ['Online']
+              : (liveProd.paymentMethodAllowed === 'COD_Only' ? ['COD'] : ['COD', 'Online']);
+          }
+          if (liveProd.isGstInclusive !== undefined) {
+            item.isGstInclusive = liveProd.isGstInclusive;
+          }
+          if (liveProd.gst !== undefined) {
+            item.gst = liveProd.gst;
+          }
+          if (liveProd.price !== undefined) {
+            item.price = Number(liveProd.price);
+          }
+        }
+      }
     }
+
+    cart.items = normalizedItems;
+    cart = await saveCartSafely(cart);
 
     return res.json({ success: true, cart });
   } catch (error) {

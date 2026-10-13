@@ -519,6 +519,23 @@ export const createProduct = async (req, res) => {
     if (payload._id && !mongoose.Types.ObjectId.isValid(String(payload._id))) {
       delete payload._id;
     }
+    if (payload.sellerId) {
+      if (payload.sellerId === "self" || !mongoose.Types.ObjectId.isValid(String(payload.sellerId))) {
+        const foundSeller = await Seller.findOne({
+          $or: [
+            { sellerCode: payload.sellerId },
+            { email: payload.sellerId }
+          ]
+        });
+        if (foundSeller) {
+          payload.sellerId = foundSeller._id;
+        } else {
+          delete payload.sellerId;
+        }
+      }
+    } else {
+      delete payload.sellerId;
+    }
     if (typeof payload.sizeVariants === "string") {
       try { payload.sizeVariants = JSON.parse(payload.sizeVariants); } catch (e) { payload.sizeVariants = []; }
     }
@@ -595,7 +612,12 @@ export const createProduct = async (req, res) => {
     clearCache("product");
     console.log("New Product Added! Product ID:", savedProduct._id);
 
-    res.status(201).json(savedProduct);
+    res.status(201).json({
+      success: true,
+      message: "Product created successfully",
+      product: savedProduct,
+      ...savedProduct.toObject()
+    });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
@@ -610,6 +632,23 @@ export const updateProduct = async (req, res) => {
     }
 
     const updates = { ...req.body };
+    if (updates.sellerId) {
+      if (updates.sellerId === "self" || !mongoose.Types.ObjectId.isValid(String(updates.sellerId))) {
+        const foundSeller = await Seller.findOne({
+          $or: [
+            { sellerCode: updates.sellerId },
+            { email: updates.sellerId }
+          ]
+        });
+        if (foundSeller) {
+          updates.sellerId = foundSeller._id;
+        } else {
+          delete updates.sellerId;
+        }
+      }
+    } else if (updates.sellerId === "" || updates.sellerId === null) {
+      delete updates.sellerId;
+    }
     if (typeof updates.sizeVariants === "string") {
       try { updates.sizeVariants = JSON.parse(updates.sizeVariants); } catch (e) { updates.sizeVariants = []; }
     }
