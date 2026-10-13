@@ -28,7 +28,7 @@ router.get("/:id/exchange-invoice", optionalUserAuth, downloadExchangeInvoice);
 
 router.get("/admin/all", optionalUserAuth, getOrders);
 router.get("/all", optionalUserAuth, getOrders);
-router.get("/", authenticateToken, getOrders);
+router.get("/", optionalUserAuth, getOrders);
 router.get("/:id", authenticateToken, getOrderById);
 router.post("/", optionalUserAuth, createOrder);
 router.post("/:id/cancel", optionalUserAuth, cancelOrder);

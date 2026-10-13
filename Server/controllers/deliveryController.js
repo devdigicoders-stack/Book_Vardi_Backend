@@ -16,37 +16,57 @@ const findOrderByTokenOrId = async (tokenOrId) => {
   normalizedToken = normalizedToken.trim();
 
   const tokenPattern = { $regex: `^${normalizedToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" };
+  const cleanId = normalizedToken.replace(/^(DLV|BV-SLF|SLF)[-_]/i, '').trim();
+  const cleanPattern = cleanId ? { $regex: `^${cleanId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" } : null;
 
-  let order = null;
-  // 1. Direct match on retail Order selfDeliveryDetails
-  order = await Order.findOne({
-    $or: [
-      { "selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
-      { "selfDeliveryDetails.deliveryPartnerToken": tokenPattern },
-      { "items.selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
-      { "items.selfDeliveryDetails.deliveryPartnerToken": tokenPattern }
-    ]
-  });
+  // 1. Direct match on retail Order
+  const retailConditions = [
+    { "selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
+    { "selfDeliveryDetails.deliveryPartnerToken": tokenPattern },
+    { "items.selfDeliveryDetails.deliveryPartnerToken": normalizedToken },
+    { "items.selfDeliveryDetails.deliveryPartnerToken": tokenPattern },
+    { trackingNumber: normalizedToken },
+    { trackingNumber: tokenPattern },
+    { orderId: normalizedToken },
+    { orderId: tokenPattern },
+    { id: normalizedToken }
+  ];
 
-  // 2. Lookup by ObjectId or orderId or id
-  if (!order) {
-    const query = [
-      { orderId: normalizedToken },
-      { id: normalizedToken },
-      { orderId: { $regex: `^${normalizedToken}$`, $options: "i" } }
-    ];
-    if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
-      query.push({ _id: normalizedToken });
-    }
-    order = await Order.findOne({ $or: query });
+  if (cleanId && cleanId !== normalizedToken) {
+    retailConditions.push(
+      { orderId: cleanId },
+      { orderId: cleanPattern },
+      { id: cleanId },
+      { trackingNumber: cleanId },
+      { "selfDeliveryDetails.deliveryPartnerToken": cleanId }
+    );
   }
 
-  // 3. Array elemMatch fallback
+  if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
+    retailConditions.push({ _id: normalizedToken });
+  }
+  if (cleanId && mongoose.Types.ObjectId.isValid(cleanId)) {
+    retailConditions.push({ _id: cleanId });
+  }
+
+  let order = await Order.findOne({ $or: retailConditions });
+
+  // 2. Array elemMatch fallback
   if (!order) {
+    const elemOrConditions = [
+      { "deliveryPartnerToken": normalizedToken },
+      { "deliveryPartnerToken": tokenPattern }
+    ];
+    if (cleanId && cleanId !== normalizedToken) {
+      elemOrConditions.push(
+        { "deliveryPartnerToken": cleanId },
+        { "deliveryPartnerToken": cleanPattern }
+      );
+    }
     order = await Order.findOne({
       "items.selfDeliveryDetails": {
         $elemMatch: {
-          deliveryPartnerToken: tokenPattern
+          $or: elemOrConditions
         }
       }
     });
@@ -56,8 +76,8 @@ const findOrderByTokenOrId = async (tokenOrId) => {
     return { order, isBulk: false };
   }
 
-  // 4. Check SchoolBulkOrder (Institutional B2B Orders)
-  const bulkQuery = [
+  // 3. Check SchoolBulkOrder (Institutional B2B Orders)
+  const bulkConditions = [
     { "deliveryDetails.deliveryPartnerToken": normalizedToken },
     { "deliveryDetails.deliveryPartnerToken": tokenPattern },
     { "deliveryDetails.trackingId": normalizedToken },
@@ -65,10 +85,24 @@ const findOrderByTokenOrId = async (tokenOrId) => {
     { referenceId: normalizedToken },
     { referenceId: tokenPattern }
   ];
-  if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
-    bulkQuery.push({ _id: normalizedToken });
+
+  if (cleanId && cleanId !== normalizedToken) {
+    bulkConditions.push(
+      { referenceId: cleanId },
+      { referenceId: cleanPattern },
+      { "deliveryDetails.trackingId": cleanId },
+      { "deliveryDetails.deliveryPartnerToken": cleanId }
+    );
   }
-  const bulkOrder = await SchoolBulkOrder.findOne({ $or: bulkQuery });
+
+  if (mongoose.Types.ObjectId.isValid(normalizedToken)) {
+    bulkConditions.push({ _id: normalizedToken });
+  }
+  if (cleanId && mongoose.Types.ObjectId.isValid(cleanId)) {
+    bulkConditions.push({ _id: cleanId });
+  }
+
+  const bulkOrder = await SchoolBulkOrder.findOne({ $or: bulkConditions });
   if (bulkOrder) {
     return { order: bulkOrder, isBulk: true };
   }
@@ -173,6 +207,17 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       otpLastSentAt: selfDetails.otpLastSentAt || null
     };
 
+    const isExchangeOrder = Boolean(
+      order.returnRequest?.type === 'exchange' ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('exchange')
+    );
+    const isReturnOrder = Boolean(
+      order.returnRequest?.type === 'return' ||
+      (!isExchangeOrder && Boolean(order.returnRequest?.type || order.returnRequest?.reason)) ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('return') ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('pickup')
+    );
+
     const sanitizedOrder = {
       id: order._id,
       orderId: order.orderId || order.id || order._id,
@@ -188,6 +233,7 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       gst: order.gst || order.taxAmount || 0,
       paymentMethod: order.paymentMethod || "COD",
       paymentStatus: (() => {
+        if (isReturnOrder) return "return_in_progress";
         const rawMethod = String(order.paymentMethod || "").toLowerCase();
         const isCodOrder = rawMethod.includes("cod") || rawMethod.includes("cash") || Boolean(order.isCod);
         const isDelivered = order.overallStatus === "Delivered" || order.status === "Delivered" || Boolean(order.codCollectedAt);
@@ -227,6 +273,8 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         email: order.items?.[0]?.sellerEmail || "",
         address: order.items?.[0]?.sellerAddress || ""
       },
+      isExchangeTask: isExchangeOrder,
+      isReturnTask: isReturnOrder,
       returnRequest: order.returnRequest ? {
         type: order.returnRequest.type,
         reason: order.returnRequest.reason,
@@ -240,8 +288,10 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         priceAdjustmentType: order.returnRequest.priceAdjustmentType || 'none',
         originalItemPrice: order.returnRequest.originalItemPrice || 0,
         replacementItemPrice: order.returnRequest.replacementItemPrice || 0,
+        refundAmount: order.returnRequest.refundAmount || order.totalAmount || order.total || 0,
         refundDetails: order.returnRequest.refundDetails || null,
-        status: order.returnRequest.status
+        status: order.returnRequest.status,
+        pickupDate: order.returnRequest.pickupDate
       } : null,
       selfDeliveryDetails: sanitizedSelfDetails
     };
@@ -296,16 +346,39 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     }
 
     const order = lookup.order;
+    const isExchangeOrder = Boolean(
+      order.returnRequest?.type === 'exchange' ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('exchange')
+    );
+    const isReturnOrder = Boolean(
+      order.returnRequest?.type === 'return' ||
+      (!isExchangeOrder && Boolean(order.returnRequest?.type || order.returnRequest?.reason)) ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('return') ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('pickup')
+    );
+
+    const returnReq = order.returnRequest || {};
+    const exchangeDiff = Number(returnReq.priceDifference || 0);
+    const exchangeAdjType = returnReq.priceAdjustmentType || (exchangeDiff > 0 ? 'extra_payment' : exchangeDiff < 0 ? 'partial_refund' : 'none');
+    const isExchangeExtraPayment = isExchangeOrder && exchangeAdjType === 'extra_payment' && exchangeDiff > 0;
+
     const rawMethod = String(order.paymentMethod || "").toLowerCase();
-    const isCodOrder = rawMethod.includes("cod") || rawMethod.includes("cash") || Boolean(order.isCod);
-    const isPaid = isCodOrder
-      ? Boolean(isCashCollected || order.overallStatus === "Delivered" || order.codCollectedAt)
-      : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || isCashCollected);
+    const isCodOrder = !isExchangeOrder && !isReturnOrder && (rawMethod.includes("cod") || rawMethod.includes("cash") || Boolean(order.isCod));
+
+    const isPaid = isReturnOrder
+      ? true
+      : (isExchangeOrder
+        ? (!isExchangeExtraPayment || isCashCollected)
+        : (isCodOrder
+          ? Boolean(isCashCollected || order.overallStatus === "Delivered" || order.codCollectedAt)
+          : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || isCashCollected)));
 
     if (!isPaid) {
       return res.status(400).json({
         success: false,
-        message: "🔒 Cash payment must be collected & verified by executive before sending OTP."
+        message: isExchangeExtraPayment
+          ? `🔒 Extra exchange charge of ₹${exchangeDiff} must be collected from customer before sending OTP.`
+          : "🔒 Cash payment must be collected & verified by executive before sending OTP."
       });
     }
 
@@ -327,11 +400,12 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     await order.save();
 
     const customerPhone = order.customer?.phone || order.shippingAddress?.phone || "Customer";
-    console.log(`📲 [SMS/OTP RESENT] Delivery OTP ${freshOtp} dispatched to Customer (${customerPhone}) for Order #${order.orderId}`);
+    const taskTypeName = isReturnOrder ? "Return Pickup OTP" : (isExchangeOrder ? "Exchange Delivery OTP" : "Delivery OTP");
+    console.log(`📲 [SMS/OTP RESENT] ${taskTypeName} ${freshOtp} dispatched to Customer (${customerPhone}) for Order #${order.orderId}`);
 
     return res.json({
       success: true,
-      message: `Delivery OTP has been resent securely to Customer (${customerPhone}).`,
+      message: `${taskTypeName} (${freshOtp}) has been sent securely to Customer (${customerPhone}).`,
       otpLastSentAt: order.selfDeliveryDetails.otpLastSentAt
     });
   } catch (error) {
@@ -339,18 +413,17 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
   }
 };
 
-// 3. Verify Delivery OTP and Complete Order
+// 3. Verify Delivery OTP and Complete Order / Exchange / Return
 export const verifyDeliveryOtp = async (req, res) => {
   try {
     const { token } = req.params;
     const { otp, isCashCollected, isPaymentVerified } = req.body;
 
     if (!otp) {
-      return res.status(400).json({ success: false, message: "4-digit Delivery OTP is required." });
+      return res.status(400).json({ success: false, message: "4-digit OTP is required." });
     }
 
     const providedOtp = String(otp).trim();
-
     const lookup = await findOrderByTokenOrId(token);
 
     if (!lookup) {
@@ -371,7 +444,6 @@ export const verifyDeliveryOtp = async (req, res) => {
       }
 
       const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || bulkOrder.deliveryOtp || "").trim();
-      const providedOtp = String(otp).trim();
 
       if (!expectedOtp || providedOtp !== expectedOtp) {
         return res.status(400).json({
@@ -414,20 +486,29 @@ export const verifyDeliveryOtp = async (req, res) => {
       order.returnRequest?.type === 'exchange' ||
       String(order.overallStatus || order.status || '').toLowerCase().includes('exchange')
     );
+    const isReturnOrder = Boolean(
+      order.returnRequest?.type === 'return' ||
+      (!isExchangeOrder && Boolean(order.returnRequest?.type || order.returnRequest?.reason)) ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('return') ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('pickup')
+    );
+
     const returnReq = order.returnRequest || {};
     const exchangeDiff = Number(returnReq.priceDifference || 0);
     const exchangeAdjType = returnReq.priceAdjustmentType || (exchangeDiff > 0 ? 'extra_payment' : exchangeDiff < 0 ? 'partial_refund' : 'none');
     const isExchangeExtraPayment = isExchangeOrder && exchangeAdjType === 'extra_payment' && exchangeDiff > 0;
 
-    const isPaid = isExchangeOrder
-      ? (!isExchangeExtraPayment || hasConfirmedPayment)
-      : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || hasConfirmedPayment);
+    const isPaid = isReturnOrder
+      ? true
+      : (isExchangeOrder
+        ? (!isExchangeExtraPayment || hasConfirmedPayment)
+        : (order.paymentStatus === "paid" || order.paymentStatus === "Paid" || hasConfirmedPayment));
 
     if (!isPaid) {
       return res.status(400).json({
         success: false,
         message: isExchangeExtraPayment
-          ? `🔒 Extra payment of ₹${exchangeDiff} must be collected from customer before delivery OTP can be verified.`
+          ? `🔒 Extra payment of ₹${exchangeDiff} must be collected from customer before exchange OTP can be verified.`
           : "🔒 Payment must be collected & verified before delivery OTP can be verified."
       });
     }
@@ -443,64 +524,75 @@ export const verifyDeliveryOtp = async (req, res) => {
     if (!expectedOtp || providedOtp !== expectedOtp) {
       return res.status(400).json({
         success: false,
-        message: "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer."
+        message: isReturnOrder
+          ? "Invalid Return Pickup OTP. Please ask customer for the correct 4-digit Return PIN."
+          : (isExchangeOrder
+            ? "Invalid Exchange OTP. Please ask customer for the correct 4-digit Exchange PIN."
+            : "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer.")
       });
     }
 
-    // Mark order as Delivered or Exchanged upon OTP verification
+    // Mark order as Delivered, Exchanged, or Product Received upon OTP verification
     const previousStatus = order.overallStatus;
-    const isCodOrder = !isExchangeOrder && (String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid");
+    const isCodOrder = !isExchangeOrder && !isReturnOrder && (String(order.paymentMethod || '').toUpperCase().includes("COD") || order.paymentStatus !== "paid");
     const deliveryExecName = order.selfDeliveryDetails?.deliveryPersonName || "Delivery Executive";
     const now = new Date();
 
-    const finalStatus = isExchangeOrder ? "exchanged" : "Delivered";
+    const finalStatus = isReturnOrder ? "product_received" : (isExchangeOrder ? "exchanged" : "Delivered");
     order.overallStatus = finalStatus;
     order.status = finalStatus;
-    order.deliveryStatus = "Delivered";
-    order.paymentStatus = "paid";
-    order.deliveredAt = now;
-    if (isCodOrder || isExchangeExtraPayment) {
-      order.codCollectedAt = now;
-      order.codCollectedBy = deliveryExecName;
+    order.deliveryStatus = isReturnOrder ? "Returned (Product Received)" : (isExchangeOrder ? "Exchange Completed" : "Delivered");
+
+    if (!isReturnOrder) {
+      order.paymentStatus = "paid";
+      order.deliveredAt = now;
+      if (isCodOrder || isExchangeExtraPayment) {
+        order.codCollectedAt = now;
+        order.codCollectedBy = deliveryExecName;
+      }
     }
 
-    if (isExchangeOrder && order.returnRequest) {
+    if (isReturnOrder && order.returnRequest) {
+      order.returnRequest.status = "product_received";
+      order.returnRequest.pickupDate = now;
+      order.returnRequest.updatedAt = now;
+    } else if (isExchangeOrder && order.returnRequest) {
       order.returnRequest.status = "exchanged";
       order.returnRequest.updatedAt = now;
     }
 
     if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
     order.selfDeliveryDetails.deliveredAt = now;
-    order.selfDeliveryDetails.status = "Delivered";
+    order.selfDeliveryDetails.status = isReturnOrder ? "Pickup Completed" : (isExchangeOrder ? "Exchange Completed" : "Delivered");
 
     if (Array.isArray(order.items)) {
       order.items.forEach((it) => {
         it.status = finalStatus;
         if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
         it.selfDeliveryDetails.deliveredAt = now;
-        it.selfDeliveryDetails.status = "Delivered";
+        it.selfDeliveryDetails.status = isReturnOrder ? "Pickup Completed" : (isExchangeOrder ? "Exchange Completed" : "Delivered");
       });
     }
 
-    // Append timeline event
-    order.timeline = order.timeline || [];
-    order.timeline.push({
-      status: finalStatus.toLowerCase(),
-      title: isExchangeOrder
-        ? (isExchangeExtraPayment ? `Exchange Completed & Extra ₹${exchangeDiff} Collected` : "Exchange Completed via OTP Verification")
-        : (isCodOrder ? "COD Payment Collected & Order Delivered" : "Order Delivered via OTP Verification"),
-      description: isExchangeOrder
-        ? `Exchange handover completed by ${deliveryExecName} and customer OTP verified.${isExchangeExtraPayment ? ` Extra amount of ₹${exchangeDiff} collected.` : ''}`
-        : (isCodOrder
-          ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
-          : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`),
-      location: order.shippingAddress?.city || order.shippingAddress?.town || "Destination Address",
-      timestamp: now,
-      updatedBy: "Delivery Executive"
-    });
+    // Auto-restore stock for returned items upon OTP verification
+    if (isReturnOrder) {
+      try {
+        const Product = (await import("../models/Product.js")).default;
+        for (const item of order.items || []) {
+          const pId = item.productId || item._id;
+          const qty = Number(item.quantity || 1);
+          if (pId && Product) {
+            await Product.findByIdAndUpdate(pId, { $inc: { stock: qty } });
+            console.log(`📦 [AUTO-RESTOCK] Restored ${qty} units to product ${pId} on return pickup verification.`);
+          }
+        }
+      } catch (stockErr) {
+        console.warn("Stock auto-restoration notice:", stockErr.message);
+      }
+    }
 
     // Credit seller wallet earnings if newly delivered
-    if (previousStatus !== "Delivered" && previousStatus !== "delivered") {
+    if (!isReturnOrder && !isExchangeOrder && previousStatus !== "Delivered" && previousStatus !== "delivered") {
       try {
         const Seller = (await import("../models/Seller.js")).default;
         for (const item of order.items || []) {
@@ -523,22 +615,48 @@ export const verifyDeliveryOtp = async (req, res) => {
       }
     }
 
+    // Append timeline event
+    order.timeline = order.timeline || [];
+    order.timeline.push({
+      status: finalStatus.toLowerCase(),
+      title: isReturnOrder
+        ? "Return Pickup Completed via OTP Verification"
+        : (isExchangeOrder
+          ? (isExchangeExtraPayment ? `Exchange Completed & Extra ₹${exchangeDiff} Collected` : "Exchange Completed via OTP Verification")
+          : (isCodOrder ? "COD Payment Collected & Order Delivered" : "Order Delivered via OTP Verification")),
+      description: isReturnOrder
+        ? `Return item collected from customer by ${deliveryExecName} and customer OTP verified. Item marked as Product Received.`
+        : (isExchangeOrder
+          ? `Exchange handover completed by ${deliveryExecName} and customer OTP verified.${isExchangeExtraPayment ? ` Extra amount of ₹${exchangeDiff} collected.` : ''}`
+          : (isCodOrder
+            ? `Cash on Delivery (₹${order.totalAmount || order.total || 0}) collected by ${deliveryExecName} and customer OTP verified.`
+            : `Order successfully delivered by ${deliveryExecName} and customer OTP verified.`)),
+      location: order.shippingAddress?.city || order.shippingAddress?.town || "Customer Address",
+      timestamp: now,
+      updatedBy: "Delivery Executive"
+    });
+
     await order.save();
 
     try {
       broadcastRealtimeEvent({
         type: "ORDER_UPDATED",
-        orderId: order.orderId,
+        orderId: order.orderId || order.id || order._id,
         masterOrderId: order.masterOrderId,
         sellerId: order.sellerId,
-        status: "Delivered"
+        status: finalStatus
       });
     } catch (rtErr) {}
 
     return res.json({
       success: true,
-      message: "🎉 Delivery OTP verified successfully! Order marked as Delivered.",
-      orderId: order.orderId
+      message: isReturnOrder
+        ? "🎉 Return Pickup OTP verified successfully! Item collected and marked as Product Received."
+        : (isExchangeOrder
+          ? "🎉 Exchange OTP verified successfully! Replacement delivered & original item collected."
+          : "🎉 Delivery OTP verified successfully! Order marked as Delivered."),
+      orderId: order.orderId,
+      status: finalStatus
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Failed to verify OTP", error: error.message });

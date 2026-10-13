@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Cart from "../models/Cart.js";
 import Product from "../models/Product.js";
 
@@ -16,21 +17,32 @@ const extractCartItemId = (item) => {
   return String(item);
 };
 
-// Helper to get or create cart for user
-const getOrCreateCart = async (userId, userPhone) => {
+// Helper to locate existing cart for user without creating a dummy empty document
+const findUserCart = async (userId, userPhone) => {
   const query = [];
   if (userId) {
     query.push({ userId });
     query.push({ userId: String(userId) });
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      query.push({ userId: new mongoose.Types.ObjectId(userId) });
+    }
   }
   if (userPhone && String(userPhone).trim()) {
-    query.push({ userPhone: String(userPhone).trim() });
+    const rawPhone = String(userPhone).trim();
+    query.push({ userPhone: rawPhone });
+    const digits = rawPhone.replace(/\D/g, "");
+    if (digits.length >= 10) {
+      query.push({ userPhone: { $regex: digits.slice(-10) + "$" } });
+    }
   }
 
-  let cart = null;
-  if (query.length > 0) {
-    cart = await Cart.findOne({ $or: query });
-  }
+  if (query.length === 0) return null;
+  return await Cart.findOne({ $or: query });
+};
+
+// Helper to get or create cart for user ONLY when adding items
+const getOrCreateCart = async (userId, userPhone) => {
+  let cart = await findUserCart(userId, userPhone);
 
   if (!cart) {
     cart = await Cart.create({
@@ -132,7 +144,25 @@ export const getCart = async (req, res) => {
       return res.json({ success: true, cart: { items: [], totalAmount: 0 } });
     }
 
-    let cart = await getOrCreateCart(userId, userPhone);
+    let cart = await findUserCart(userId, userPhone);
+
+    // If no cart exists or it has 0 items, return empty response WITHOUT creating a document in MongoDB!
+    if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
+      if (cart && cart._id) {
+        // Clean up any empty phantom cart document from MongoDB
+        await Cart.deleteOne({ _id: cart._id }).catch(() => {});
+      }
+      return res.json({
+        success: true,
+        cart: {
+          userId: userId || null,
+          userPhone: userPhone ? String(userPhone).trim() : "",
+          items: [],
+          totalAmount: 0
+        }
+      });
+    }
+
     const normalizedItems = getNormalizedCartItems(cart);
 
     // Sync cart items with live product data (paymentMethodAllowed, isGstInclusive, gst, price)
@@ -291,14 +321,23 @@ export const removeFromCart = async (req, res) => {
     const userId = req.body?.userId || req.user?.id || req.headers["x-user-id"];
     const userPhone = req.user?.phone || req.headers["x-user-phone"] || req.body?.phone;
 
-    let cart = await getOrCreateCart(userId, userPhone);
+    let cart = await findUserCart(userId, userPhone);
+    if (!cart) {
+      return res.json({ message: "Cart is empty", cart: { userId, userPhone, items: [], totalAmount: 0 } });
+    }
     const strId = String(itemId);
 
-    const items = getNormalizedCartItems(cart);
-    cart.items = items.filter(
+    const items = getNormalizedCartItems(cart).filter(
       (it) => extractCartItemId(it) !== strId
     );
 
+    if (items.length === 0) {
+      // If all items removed, completely remove the cart document from MongoDB
+      await Cart.deleteOne({ _id: cart._id }).catch(() => {});
+      return res.json({ message: "Item removed from cart", cart: { userId, userPhone, items: [], totalAmount: 0 } });
+    }
+
+    cart.items = items;
     cart = await saveCartSafely(cart);
 
     return res.json({ message: "Item removed from cart", cart });
@@ -311,14 +350,39 @@ export const removeFromCart = async (req, res) => {
 // 5. Clear Entire Cart
 export const clearCart = async (req, res) => {
   try {
-    const userId = req.user?.id || req.headers["x-user-id"] || req.body?.userId;
-    const userPhone = req.user?.phone || req.headers["x-user-phone"] || req.body?.phone || req.body?.userPhone;
+    const userId = req.user?.id || req.headers["x-user-id"] || req.query?.userId || req.body?.userId;
+    const userPhone = req.user?.phone || req.headers["x-user-phone"] || req.query?.phone || req.query?.userPhone || req.body?.phone || req.body?.userPhone;
 
-    let cart = await getOrCreateCart(userId, userPhone);
-    cart.items = [];
-    cart = await saveCartSafely(cart);
+    const orClauses = [];
+    if (userId) {
+      orClauses.push({ userId: String(userId) });
+      if (mongoose.Types.ObjectId.isValid(userId)) {
+        orClauses.push({ userId: new mongoose.Types.ObjectId(userId) });
+      }
+    }
+    if (userPhone) {
+      const digits = String(userPhone).replace(/\D/g, "");
+      if (digits.length >= 10) {
+        orClauses.push({ userPhone: { $regex: digits.slice(-10) + "$" } });
+      } else {
+        orClauses.push({ userPhone: String(userPhone).trim() });
+      }
+    }
 
-    return res.json({ message: "Cart cleared", cart });
+    if (orClauses.length > 0) {
+      // Permanently remove the cart documents from MongoDB so 0 phantom data remains
+      await Cart.deleteMany({ $or: orClauses }).catch(() => {});
+    }
+
+    return res.json({
+      message: "Cart cleared",
+      cart: {
+        userId: userId || null,
+        userPhone: userPhone ? String(userPhone).trim() : "",
+        items: [],
+        totalAmount: 0
+      }
+    });
   } catch (error) {
     console.error("Error in clearCart:", error);
     return res.status(500).json({ message: "Failed to clear cart", error: error.message });

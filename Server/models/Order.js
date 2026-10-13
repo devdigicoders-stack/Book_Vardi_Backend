@@ -32,11 +32,33 @@ const orderItemSchema = new mongoose.Schema({
   sellerCommissionRate: { type: Number, default: 5 },
   name: { type: String, required: true },
   price: { type: Number, required: true },
-  image: { type: String, default: "" },
+  image: {
+    type: mongoose.Schema.Types.Mixed,
+    default: "",
+    set: function (v) {
+      if (Array.isArray(v)) return v[0] || "";
+      if (typeof v === "object" && v !== null) return v.url || v.dataUrl || v.src || "";
+      return typeof v === "string" ? v : String(v || "");
+    }
+  },
   category: { type: String, default: "Stationery" },
-  size: { type: String, default: "" },
+  size: {
+    type: mongoose.Schema.Types.Mixed,
+    default: "",
+    set: function (v) {
+      if (typeof v === "object" && v !== null) return v.size || v.name || v.label || "";
+      return typeof v === "string" ? v : String(v || "");
+    }
+  },
   age: { type: String, default: "" },
-  color: { type: String, default: "" },
+  color: {
+    type: mongoose.Schema.Types.Mixed,
+    default: "",
+    set: function (v) {
+      if (typeof v === "object" && v !== null) return v.color || v.name || "";
+      return typeof v === "string" ? v : String(v || "");
+    }
+  },
   discountPercentage: { type: Number, default: 0 },
   offerDiscount: { type: Number, default: 0 },
   finalPrice: { type: Number, default: function () { return this.price; } },
