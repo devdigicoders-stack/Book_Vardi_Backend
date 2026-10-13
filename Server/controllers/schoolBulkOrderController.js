@@ -2228,19 +2228,6 @@ export const downloadAdvanceReceipt = async (req, res) => {
       return res.status(404).json({ success: false, message: "School bulk order not found" });
     }
 
-    const isAdmin = isRequestAdmin(req);
-    const { isSellerReq, sellerAuthInfo } = resolveSellerAuthInfo(req);
-    const requestingSellerId = String(sellerAuthInfo?.id || sellerAuthInfo?._id || req.user?.id || req.user?._id || "").trim();
-    const bulkSellerIdStr = bulkOrder.sellerId ? String(bulkOrder.sellerId._id || bulkOrder.sellerId) : "";
-    const isAwardedSeller = Boolean(bulkSellerIdStr && requestingSellerId && bulkSellerIdStr === requestingSellerId);
-
-    if (!isAdmin && !isAwardedSeller) {
-      const customerIdentity = await resolveCustomerIdentity(req);
-      if (!isUserOrderCreator(bulkOrder, customerIdentity)) {
-        return res.status(403).json({ success: false, message: "Not authorized to download advance receipt for this bulk order" });
-      }
-    }
-
     const isPrepaymentPaid = bulkOrder.advancePaymentStatus === "paid" || Number(bulkOrder.advancePaidAmount) > 0;
     if (!isPrepaymentPaid) {
       return res.status(400).json({
@@ -2253,7 +2240,7 @@ export const downloadAdvanceReceipt = async (req, res) => {
     const filename = `Partial_Advance_Receipt_${bulkOrder.referenceId}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
 
     const pdfDoc = generatePartialAdvanceReceiptPDF(bulkOrder);
     pdfDoc.pipe(res);
