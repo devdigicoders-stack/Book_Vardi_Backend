@@ -455,5 +455,8 @@ productSchema.pre("save", function (next) {
 productSchema.index({ sellerId: 1 });
 productSchema.index({ seller: 1 });
 productSchema.index({ status: 1 });
+productSchema.index({ approvalStatus: 1 });
+productSchema.index({ category: 1 });
+productSchema.index({ createdAt: -1 });
 
 export default mongoose.model("Product", productSchema);

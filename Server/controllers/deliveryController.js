@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 // Helper to locate order or bulk requisition by token or ID
 const findOrderByTokenOrId = async (tokenOrId) => {
@@ -95,7 +96,6 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       const remainingAmount = Math.max(0, totalAmount - advancePaidAmount);
       const isPaid = bulkOrder.remainingPaymentStatus === "paid" || bulkOrder.status === "completed" || bulkOrder.status === "delivered";
 
-      const phoneFallback = (bulkOrder.contactPhone || bulkOrder.userPhone || "").replace(/\D/g, "").slice(-4);
       const sanitizedSelfDetails = {
         deliveryPersonName: bulkOrder.deliveryDetails?.deliveryBoyName || "Store Fleet Rider",
         deliveryPersonPhone: bulkOrder.deliveryDetails?.deliveryBoyPhone || "",
@@ -103,8 +103,7 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         deliveryPartnerToken: bulkOrder.deliveryDetails?.deliveryPartnerToken || token,
         trackingUrl: bulkOrder.deliveryDetails?.trackingUrl || "",
         driverLocation: bulkOrder.deliveryDetails?.driverLocation || null,
-        notes: bulkOrder.deliveryDetails?.notes || "",
-        fallbackOtpHint: phoneFallback ? `Customer Phone last 4 digits (${phoneFallback}) or testing code 1234` : "Testing code 1234 or 4829"
+        notes: bulkOrder.deliveryDetails?.notes || ""
       };
 
       const sanitizedOrder = {
@@ -153,10 +152,17 @@ export const getDeliveryPartnerOrder = async (req, res) => {
 
     const order = lookup.order;
 
-    // Prepare sanitized self delivery details (omit deliveryOtp for security, include fallback hints)
+    // Ensure order has a valid dynamic 4-digit deliveryOtp in DB
+    if (!order.deliveryOtp || !/^\d{4}$/.test(String(order.deliveryOtp))) {
+      const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString();
+      order.deliveryOtp = generatedOtp;
+      if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
+      order.selfDeliveryDetails.deliveryOtp = generatedOtp;
+      await order.save();
+    }
+
+    // Prepare sanitized self delivery details (omit deliveryOtp for security)
     const selfDetails = order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || {};
-    const customerPhoneNum = order.customer?.phone || order.shippingAddress?.phone || order.userPhone || "";
-    const phoneFallback = customerPhoneNum.replace(/\D/g, "").slice(-4);
     const sanitizedSelfDetails = {
       deliveryPersonName: selfDetails.deliveryPersonName || "",
       deliveryPersonPhone: selfDetails.deliveryPersonPhone || "",
@@ -164,8 +170,7 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       deliveryPartnerToken: selfDetails.deliveryPartnerToken || token,
       trackingUrl: selfDetails.trackingUrl || "",
       driverLocation: selfDetails.driverLocation || null,
-      otpLastSentAt: selfDetails.otpLastSentAt || null,
-      fallbackOtpHint: phoneFallback ? `Customer Phone last 4 digits (${phoneFallback}) or testing code 1234` : "Testing code 1234 or 4829"
+      otpLastSentAt: selfDetails.otpLastSentAt || null
     };
 
     const sanitizedOrder = {
@@ -207,7 +212,9 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         isMeterBased: it.isMeterBased || false,
         subCategory: it.subCategory || "",
         category: it.category || "Stationery",
-        image: it.image || "",
+        image: (it.image && it.image.startsWith("data:") && it.image.length > 30000)
+          ? "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=500&auto=format&fit=crop&q=80"
+          : (it.image || ""),
         sellerName: it.sellerName || it.storeName || order.sellerDetails?.storeName || "",
         storeName: it.storeName || it.sellerName || order.sellerDetails?.storeName || "",
         sellerPhone: it.sellerPhone || order.sellerDetails?.phone || "",
@@ -275,6 +282,7 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
 
       if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
       bulkOrder.deliveryDetails.deliveryOtp = freshOtp;
+      bulkOrder.deliveryOtp = freshOtp;
       await bulkOrder.save();
 
       const customerPhone = bulkOrder.contactPhone || bulkOrder.userPhone || "School Campus Admin";
@@ -301,6 +309,7 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
       });
     }
 
+    order.deliveryOtp = freshOtp;
     if (!order.selfDeliveryDetails) {
       order.selfDeliveryDetails = {};
     }
@@ -309,6 +318,7 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
 
     if (Array.isArray(order.items)) {
       order.items.forEach((item) => {
+        item.deliveryOtp = freshOtp;
         if (!item.selfDeliveryDetails) item.selfDeliveryDetails = {};
         item.selfDeliveryDetails.deliveryOtp = freshOtp;
       });
@@ -339,6 +349,8 @@ export const verifyDeliveryOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: "4-digit Delivery OTP is required." });
     }
 
+    const providedOtp = String(otp).trim();
+
     const lookup = await findOrderByTokenOrId(token);
 
     if (!lookup) {
@@ -358,32 +370,13 @@ export const verifyDeliveryOtp = async (req, res) => {
         });
       }
 
-      const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || "4829").trim();
+      const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || bulkOrder.deliveryOtp || "").trim();
       const providedOtp = String(otp).trim();
 
-      const validBulkOtps = new Set([
-        expectedOtp,
-        "1234",
-        "3123",
-        "4829",
-        "0000",
-        "9999"
-      ]);
-
-      const phoneDigits = String(bulkOrder.contactPhone || bulkOrder.userPhone || "").replace(/\D/g, "");
-      if (phoneDigits.length >= 4) {
-        validBulkOtps.add(phoneDigits.slice(-4));
-      }
-
-      const refIdDigits = String(bulkOrder.referenceId || "").replace(/\D/g, "");
-      if (refIdDigits.length >= 4) {
-        validBulkOtps.add(refIdDigits.slice(-4));
-      }
-
-      if (!validBulkOtps.has(providedOtp)) {
+      if (!expectedOtp || providedOtp !== expectedOtp) {
         return res.status(400).json({
           success: false,
-          message: `Invalid Delivery OTP. Ask representative for PIN sent via SMS, or try fallback code (1234, 4829, or last 4 digits of phone ${phoneDigits.slice(-4) || ""}).`
+          message: "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer."
         });
       }
 
@@ -399,6 +392,14 @@ export const verifyDeliveryOtp = async (req, res) => {
         bulkOrder.remainingPaymentMode = "Razorpay / UPI Verified";
       }
       await bulkOrder.save();
+
+      try {
+        broadcastRealtimeEvent({
+          type: "SCHOOL_ORDER_UPDATED",
+          orderId: bulkOrder.referenceId || bulkOrder._id,
+          status: "Delivered"
+        });
+      } catch (rtErr) {}
 
       return res.json({
         success: true,
@@ -431,37 +432,18 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
-    const validOtps = new Set([
-      "1234",
-      "3123",
-      "4829",
-      "0000",
-      "9999"
-    ]);
+    const expectedOtp = String(
+      order.deliveryOtp ||
+      order.selfDeliveryDetails?.deliveryOtp ||
+      order.items?.[0]?.deliveryOtp ||
+      order.items?.[0]?.selfDeliveryDetails?.deliveryOtp ||
+      ""
+    ).trim();
 
-    if (order.deliveryOtp) validOtps.add(String(order.deliveryOtp).trim());
-    if (order.selfDeliveryDetails?.deliveryOtp) validOtps.add(String(order.selfDeliveryDetails.deliveryOtp).trim());
-    if (order.items?.[0]?.deliveryOtp) validOtps.add(String(order.items[0].deliveryOtp).trim());
-    if (order.items?.[0]?.selfDeliveryDetails?.deliveryOtp) validOtps.add(String(order.items[0].selfDeliveryDetails.deliveryOtp).trim());
-
-    const phoneDigits = String(order.customer?.phone || order.shippingAddress?.phone || order.userPhone || "").replace(/\D/g, "");
-    if (phoneDigits.length >= 4) {
-      validOtps.add(phoneDigits.slice(-4));
-    }
-
-    const orderIdDigits = String(order.orderId || order.id || "").replace(/\D/g, "");
-    if (orderIdDigits.length >= 4) {
-      validOtps.add(orderIdDigits.slice(-4));
-    }
-
-    if (order.selfDeliveryDetails?.fallbackOtp) {
-      validOtps.add(String(order.selfDeliveryDetails.fallbackOtp).trim());
-    }
-
-    if (!validOtps.has(providedOtp)) {
+    if (!expectedOtp || providedOtp !== expectedOtp) {
       return res.status(400).json({
         success: false,
-        message: `Invalid Delivery OTP. Ask customer for PIN sent via SMS, or try fallback OTP (1234, 4829, or last 4 digits of customer phone ${phoneDigits.slice(-4) || ""}).`
+        message: "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer."
       });
     }
 
@@ -542,6 +524,16 @@ export const verifyDeliveryOtp = async (req, res) => {
     }
 
     await order.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: order.orderId,
+        masterOrderId: order.masterOrderId,
+        sellerId: order.sellerId,
+        status: "Delivered"
+      });
+    } catch (rtErr) {}
 
     return res.json({
       success: true,

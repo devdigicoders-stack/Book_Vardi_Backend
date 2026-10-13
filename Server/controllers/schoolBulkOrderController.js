@@ -4,6 +4,7 @@ import crypto from "crypto";
 import Razorpay from "razorpay";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import Seller from "../models/Seller.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 // Initialize Razorpay instance for School Bulk Orders
 const getRazorpayInstance = () => {
@@ -318,6 +319,14 @@ export const sanitizeOrderForSeller = (orderDoc, sellerAuthInfo) => {
     ord.winningQuoteId = null;
   }
 
+  // 6. Strictly sanitize delivery OTP so seller never sees customer delivery OTP
+  if (ord.deliveryDetails) {
+    delete ord.deliveryDetails.deliveryOtp;
+    delete ord.deliveryDetails.otp;
+    delete ord.deliveryDetails.fallbackOtpHint;
+  }
+  delete ord.deliveryOtp;
+
   return ord;
 };
 
@@ -517,6 +526,14 @@ export const distributeSchoolOrder = async (req, res) => {
     }
 
     await bulkOrder.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "SCHOOL_ORDER_UPDATED",
+        orderId: bulkOrder.referenceId,
+        status: bulkOrder.status
+      });
+    } catch (rtErr) {}
 
     const updatedOrder = await SchoolBulkOrder.findById(bulkOrder._id)
       .populate("sellerId", "storeName name phone email businessName")
@@ -2487,6 +2504,14 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
     }
 
     await bulkOrder.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "SCHOOL_ORDER_UPDATED",
+        orderId: bulkOrder.referenceId,
+        status: bulkOrder.status
+      });
+    } catch (rtErr) {}
 
     return res.json({
       success: true,

@@ -34,16 +34,26 @@ export const getAllSellers = async (req, res) => {
       ];
     }
 
-    const sellers = await Seller.find(filter)
+    const sellersPromise = Seller.find(filter)
       .select("-password")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const [sellers, total, pending, approved, rejected, suspended] = await Promise.all([
+      sellersPromise,
+      Seller.countDocuments(),
+      Seller.countDocuments({ status: "pending" }),
+      Seller.countDocuments({ status: "approved" }),
+      Seller.countDocuments({ status: "rejected" }),
+      Seller.countDocuments({ status: "suspended" })
+    ]);
 
     const counts = {
-      total: await Seller.countDocuments(),
-      pending: await Seller.countDocuments({ status: "pending" }),
-      approved: await Seller.countDocuments({ status: "approved" }),
-      rejected: await Seller.countDocuments({ status: "rejected" }),
-      suspended: await Seller.countDocuments({ status: "suspended" })
+      total,
+      pending,
+      approved,
+      rejected,
+      suspended
     };
 
     res.json({

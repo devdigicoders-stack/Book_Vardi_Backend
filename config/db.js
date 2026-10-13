@@ -7,8 +7,11 @@ export const connectDB = async () => {
   if (primaryUri) {
     try {
       await mongoose.connect(primaryUri, {
-        serverSelectionTimeoutMS: 15000,
-        connectTimeoutMS: 15000
+        maxPoolSize: 25,
+        minPoolSize: 5,
+        socketTimeoutMS: 45000,
+        serverSelectionTimeoutMS: 8000,
+        maxIdleTimeMS: 30000
       });
       console.log("✅ MongoDB Connected successfully to Atlas:", primaryUri.split("@").pop().split("?")[0]);
       return;
@@ -21,8 +24,10 @@ export const connectDB = async () => {
 
   try {
     await mongoose.connect(localUri, {
-      serverSelectionTimeoutMS: 13000,
-      connectTimeoutMS: 13000
+      maxPoolSize: 20,
+      minPoolSize: 2,
+      serverSelectionTimeoutMS: 8000,
+      socketTimeoutMS: 30000
     });
     console.log("✅ MongoDB Connected successfully to Local DB:", localUri);
   } catch (error) {

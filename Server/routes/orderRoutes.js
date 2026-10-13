@@ -21,6 +21,7 @@ const router = express.Router();
 
 router.get("/my-orders", optionalUserAuth, getMyOrders);
 router.get("/track/:orderId", trackOrder); // Public & User order tracking by Order ID
+router.get("/:id/tracking", optionalUserAuth, trackOrder);
 router.get("/:id/invoice", optionalUserAuth, downloadInvoice);
 router.get("/:id/credit-note", optionalUserAuth, downloadCreditNote);
 router.get("/:id/exchange-invoice", optionalUserAuth, downloadExchangeInvoice);

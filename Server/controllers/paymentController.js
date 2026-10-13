@@ -3,6 +3,7 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 import Payment from "../models/Payment.js";
 import Order from "../models/Order.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 // Initialize Razorpay instance
 const getRazorpayInstance = () => {
@@ -237,6 +238,20 @@ export const verifyPayment = async (req, res) => {
       );
 
       updatedOrder = await Order.findOne({ $or: orderQuery });
+
+      try {
+        if (updatedOrder) {
+          broadcastRealtimeEvent({
+            type: "ORDER_UPDATED",
+            orderId: updatedOrder.orderId,
+            masterOrderId: updatedOrder.masterOrderId,
+            sellerId: updatedOrder.sellerId,
+            total: updatedOrder.totalAmount,
+            status: "processing",
+            paymentStatus: "paid"
+          });
+        }
+      } catch (rtErr) {}
     }
 
     res.json({
