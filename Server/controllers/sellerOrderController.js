@@ -33,7 +33,7 @@ export const normalizeOrderStatus = (raw) => {
 };
 
 // Use the configured frontend app base URL so delivery links work on local and deployed hosts.
-const frontendBaseUrl = process.env.FRONTEND_BASE_URL || process.env.CLIENT_URL || "http://localhost:3000";
+const frontendBaseUrl = process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173";
 
 // Helper to extract authenticated seller ID
 const resolveSellerId = (req) => {
