@@ -61,6 +61,12 @@ export const sendDeliveryPartnerWhatsAppDispatch = async ({
       order.returnRequest?.type === 'exchange' ||
       String(order.overallStatus || order.status || '').toLowerCase().includes('exchange')
     );
+    const isReturn = Boolean(
+      order.returnRequest?.type === 'return' ||
+      (!isExchange && Boolean(order.returnRequest?.type || order.returnRequest?.reason)) ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('return') ||
+      String(order.overallStatus || order.status || '').toLowerCase().includes('pickup')
+    );
 
     const returnReq = order.returnRequest || {};
     const priceDiff = Number(returnReq.priceDifference || 0);
@@ -72,8 +78,24 @@ export const sendDeliveryPartnerWhatsAppDispatch = async ({
       ? "Cash on Delivery (Collect ₹" + totalAmount + ")"
       : "Prepaid Online (No Cash Collection)";
 
-    let exchangeSection = "";
-    if (isExchange) {
+    let taskInstructionSection = "";
+    if (isReturn) {
+      paymentMode = "DOORSTEP RETURN: Collect ₹0 (Refund transferred directly to customer bank/UPI)";
+      const returnItemName = returnReq.itemName || (order.items && order.items[0]?.name) || "Purchased Product";
+      const returnSpec = (order.items && order.items[0]?.size)
+        ? `Size: ${order.items[0]?.size}`
+        : (returnReq.isMeterBased && order.items && order.items[0]?.quantity)
+        ? `Length: ${order.items[0]?.quantity}m`
+        : "Original Piece";
+
+      taskInstructionSection =
+`\n📦 *RETURN PICKUP INSTRUCTIONS:*
+1. ITEM TO COLLECT: ${returnItemName} (${returnSpec})
+2. QUALITY CHECK: Verify tags intact, undamaged, unwashed.
+3. CASH COLLECTION: COLLECT ₹0 (Refund sent directly to customer account).
+4. VERIFY OTP: Ask customer for 4-digit Return Pickup OTP before leaving.
+`;
+    } else if (isExchange) {
       const oldItemName = returnReq.itemName || (order.items && order.items[0]?.name) || "Delivered Product";
       const oldSpec = (order.items && order.items[0]?.size)
         ? `Size: ${order.items[0]?.size}`
@@ -93,11 +115,12 @@ export const sendDeliveryPartnerWhatsAppDispatch = async ({
         paymentMode = `EQUAL VALUE EXCHANGE: Collect ₹0 (No Payment Needed)`;
       }
 
-      exchangeSection =
+      taskInstructionSection =
 `\n🔄 *EXCHANGE TASK INSTRUCTIONS:*
 1. TAKE BACK FROM CUSTOMER: ${oldItemName} (${oldSpec})
 2. HAND OVER TO CUSTOMER: ${oldItemName} (${newSpec})
 3. PAYMENT INSTRUCTION: ${paymentMode}
+4. VERIFY OTP: Ask customer for 4-digit Exchange OTP after handover.
 `;
     }
 
@@ -105,16 +128,20 @@ export const sendDeliveryPartnerWhatsAppDispatch = async ({
       ? order.items.map(it => `• ${it.name || 'Product'} (Qty: ${it.quantity || 1})`).join('\n')
       : `• ${order.itemsCount || 1} package items`;
 
+    const taskTitlePrefix = isReturn ? 'Return Pickup ' : (isExchange ? 'Exchange ' : '');
+    const taskTypeTag = isReturn
+      ? '⚠️ TASK TYPE: REVERSE PICKUP (PRODUCT RETURN)\n'
+      : (isExchange ? '⚠️ TASK TYPE: 2-WAY PRODUCT EXCHANGE\n' : '');
+
     const whatsappMessage =
-`🚚 *BookVardi ${isExchange ? 'Exchange ' : ''}Delivery Assignment*
+`🚚 *BookVardi ${taskTitlePrefix}Delivery Assignment*
 Order ID: #${orderIdStr}
 Rider Assigned: ${driverName} (${selfDeliveryDetails?.vehicleNumber || "Partner Vehicle"})
-${isExchange ? '⚠️ TASK TYPE: 2-WAY PRODUCT EXCHANGE\n' : ''}
-📍 *Customer Delivery Address:*
+${taskTypeTag}📍 *Customer Address:*
 Name: ${customerName}
 Contact: ${customerPhone}
 Address: ${addressStr}
-${exchangeSection}
+${taskInstructionSection}
 🛒 *Package Items:*
 ${itemsSummary}
 Payment: ${paymentMode}
@@ -122,7 +149,7 @@ Payment: ${paymentMode}
 🔗 *Live Delivery Partner Portal & Navigation Link:*
 ${trackingLink}
 
-_Please tap the link to start real-time navigation, verify exchange items, and enter the customer OTP upon successful delivery._`;
+_Please tap the link to start real-time navigation, verify items, and enter the customer OTP upon successful completion._`;
 
     const messageId = `WA-MSG-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 

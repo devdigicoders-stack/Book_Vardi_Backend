@@ -195,12 +195,13 @@ const getExpandedSellerScope = async (req) => {
     const allProductKeys = [...new Set([...productIds, ...strProductIds, ...customProductIds, ...numericProductIds])];
 
     const orderOrConditions = [];
-    if (validScopeObjectIds.length > 0) {
+    const combinedSellerKeys = [...new Set([...validScopeObjectIds, ...strExpandedSellerIds])];
+    if (combinedSellerKeys.length > 0) {
       orderOrConditions.push(
-        { sellerId: { $in: validScopeObjectIds } },
-        { seller: { $in: validScopeObjectIds } },
-        { "items.sellerId": { $in: validScopeObjectIds } },
-        { "items.seller": { $in: validScopeObjectIds } }
+        { sellerId: { $in: combinedSellerKeys } },
+        { seller: { $in: combinedSellerKeys } },
+        { "items.sellerId": { $in: combinedSellerKeys } },
+        { "items.seller": { $in: combinedSellerKeys } }
       );
     }
     if (strExpandedSellerIds.length > 0) {

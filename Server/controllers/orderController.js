@@ -6,6 +6,7 @@ import Seller from "../models/Seller.js";
 import Coupon from "../models/Coupon.js";
 import SellerOffer from "../models/SellerOffer.js";
 import PlatformSetting from "../models/PlatformSetting.js";
+import Cart from "../models/Cart.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
@@ -724,13 +725,22 @@ export const getMyOrders = async (req, res) => {
     const user = await findUserByIdentifier(req);
     const userPhone = req.headers["x-user-phone"] || req.query.phone || req.query.userPhone || user?.phone;
     const userEmail = req.query.email || req.query.userEmail || user?.email;
+    const userExplicitId = req.query.userId || req.headers["x-user-id"] || req.user?.id || user?._id;
 
     const query = [];
     if (user && user._id) {
       query.push({ userId: user._id });
+      query.push({ userId: String(user._id) });
     }
     if (req.user && req.user.id) {
       query.push({ userId: req.user.id });
+      query.push({ userId: String(req.user.id) });
+    }
+    if (userExplicitId) {
+      query.push({ userId: String(userExplicitId) });
+      if (mongoose.Types.ObjectId.isValid(userExplicitId)) {
+        query.push({ userId: new mongoose.Types.ObjectId(userExplicitId) });
+      }
     }
     if (userPhone) {
       const cleanPhone = String(userPhone).replace(/\D/g, "");
@@ -828,6 +838,10 @@ export const getMyOrders = async (req, res) => {
         date: ord.date || new Date(ord.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
         status: canonicalStatus,
         overallStatus: canonicalStatus,
+        customer: ord.customer || { name: ord.userName, email: ord.userEmail, phone: ord.userPhone },
+        customerName: ord.customer?.name || ord.userName || ord.customerName || '',
+        customerEmail: ord.customer?.email || ord.userEmail || ord.customerEmail || '',
+        customerPhone: ord.customer?.phone || ord.userPhone || ord.customerPhone || '',
         deliveryMode: resolvedDeliveryMode,
         courierName: resolvedDeliveryMode === 'self_delivery' ? '' : (ord.courierName || ord.carrier || firstItem.thirdPartyDetails?.courierName || ''),
         carrier: resolvedDeliveryMode === 'self_delivery' ? '' : (ord.carrier || ord.courierName || ''),
@@ -853,6 +867,7 @@ export const getMyOrders = async (req, res) => {
         shippingFee: ord.shippingFee !== undefined ? ord.shippingFee : (ord.shippingCost || 0),
         discount: ord.discount || ord.discountAmount || 0,
         total: ord.total || ord.totalAmount || 0,
+        totalAmount: ord.totalAmount || ord.total || 0,
         shippingAddress: ord.shippingAddress || { street: ord.address || '' },
         paymentMethod: ord.paymentMethod || 'UPI',
         paymentStatus: ord.paymentStatus || 'paid',
@@ -898,6 +913,33 @@ export const getOrderById = async (req, res) => {
     res.json(enrichedOrder);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch order", error: error.message });
+  }
+};
+
+// Helper to immediately delete MongoDB cart documents for a user upon order placement
+const autoClearUserCart = async (userId, userPhone) => {
+  try {
+    const clearQuery = [];
+    if (userId) {
+      clearQuery.push({ userId: String(userId) });
+      if (mongoose.Types.ObjectId.isValid(userId)) {
+        clearQuery.push({ userId: new mongoose.Types.ObjectId(userId) });
+      }
+    }
+    if (userPhone) {
+      const cleanPhone = String(userPhone).replace(/\D/g, "");
+      if (cleanPhone.length >= 10) {
+        clearQuery.push({ userPhone: { $regex: cleanPhone.slice(-10) + "$" } });
+      } else {
+        clearQuery.push({ userPhone: String(userPhone).trim() });
+      }
+    }
+    if (clearQuery.length > 0) {
+      const delRes = await Cart.deleteMany({ $or: clearQuery });
+      console.log(`🛒 [BACKEND] Auto-cleared user cart in MongoDB (${delRes.deletedCount} docs deleted) for user:`, userId || userPhone);
+    }
+  } catch (err) {
+    console.warn("⚠️ [BACKEND] Auto-clear user cart warning:", err.message);
   }
 };
 
@@ -967,6 +1009,38 @@ export const createOrder = async (req, res) => {
 
     // Auto-populate productId, sellerId, sellerName, storeName, and GST on order items from Product & User collections
     for (const item of orderItems) {
+      // 1. Sanitize image safely (prevent array or object CastError)
+      if (Array.isArray(item.image)) {
+        item.image = item.image[0] || "";
+      } else if (typeof item.image === "object" && item.image !== null) {
+        item.image = item.image.url || item.image.dataUrl || item.image.src || "";
+      }
+      if (!item.image && Array.isArray(item.images) && item.images.length > 0) {
+        item.image = typeof item.images[0] === "string" ? item.images[0] : (item.images[0]?.url || "");
+      }
+      if (typeof item.image !== "string") {
+        item.image = String(item.image || "");
+      }
+
+      // 2. Sanitize price, quantity & total
+      const rawPrice = item.finalPrice !== undefined ? item.finalPrice : (item.price !== undefined ? item.price : 0);
+      item.price = Number(rawPrice) || 0;
+      item.finalPrice = item.price;
+      item.quantity = Math.max(1, Number(item.quantity) || 1);
+      item.total = Math.round(item.price * item.quantity * 100) / 100;
+      item.name = String(item.name || "BookVardi Product").trim();
+
+      // 3. Sanitize size & color
+      if (typeof item.size === "object" && item.size !== null) {
+        item.size = item.size.size || item.size.name || item.size.label || "";
+      }
+      item.size = String(item.size || item.selectedSize || "");
+
+      if (typeof item.color === "object" && item.color !== null) {
+        item.color = item.color.color || item.color.name || "";
+      }
+      item.color = String(item.color || item.selectedColor || "");
+
       const searchId = item.productId || item.id || item._id;
       let prod = await findProductByIdOrCustomId(searchId);
       if (!prod && item.name) {
@@ -1007,7 +1081,12 @@ export const createOrder = async (req, res) => {
         if (!item.productId) item.productId = prod._id;
         if (!item.id) item.id = prod._id;
         if (!item.sellerId && prod.sellerId) item.sellerId = prod.sellerId;
-        if (!item.image && prod.images && prod.images.length > 0) item.image = prod.images[0];
+        if (!item.image && prod.images && prod.images.length > 0) {
+          const firstImg = prod.images[0];
+          item.image = typeof firstImg === "string" ? firstImg : (firstImg?.url || "");
+        } else if (!item.image && prod.image) {
+          item.image = typeof prod.image === "string" ? prod.image : (prod.image?.url || "");
+        }
         if (!sellerStoreName && prod.sellerStoreName && !isPlaceholder(prod.sellerStoreName)) sellerStoreName = prod.sellerStoreName;
         if (!sellerStoreName && prod.storeName && !isPlaceholder(prod.storeName)) sellerStoreName = prod.storeName;
         if (!sellerStoreName && prod.tradeName && !isPlaceholder(prod.tradeName)) sellerStoreName = prod.tradeName;
@@ -1331,6 +1410,9 @@ export const createOrder = async (req, res) => {
         }
       } catch (couponErr) {}
 
+      // Auto-clear cart in MongoDB database for user
+      await autoClearUserCart(resolvedUserId, resolvedPhone);
+
       try {
         for (const sub of createdSubOrders) {
           broadcastRealtimeEvent({
@@ -1340,7 +1422,10 @@ export const createOrder = async (req, res) => {
             sellerId: sub.sellerId,
             total: sub.totalAmount,
             customerName: sub.customer?.name,
-            status: sub.overallStatus || sub.status || "Pending"
+            customerPhone: sub.customer?.phone,
+            userId: sub.userId,
+            status: sub.overallStatus || sub.status || "Pending",
+            order: sub
           });
         }
       } catch (rtErr) {
@@ -1437,21 +1522,27 @@ export const createOrder = async (req, res) => {
       console.warn("⚠️ Coupon redemption increment warning:", couponErr.message);
     }
 
-    try {
-      broadcastRealtimeEvent({
-        type: "ORDER_CREATED",
-        orderId: newOrder.orderId,
-        masterOrderId: newOrder.masterOrderId,
-        sellerId: newOrder.sellerId,
-        total: newOrder.totalAmount,
-        customerName: newOrder.customer?.name,
-        status: newOrder.overallStatus || newOrder.status || "Pending"
-      });
-    } catch (rtErr) {
-      console.warn("⚠️ Realtime broadcast error (Branch B):", rtErr.message);
-    }
+      // Auto-clear cart in MongoDB database for user
+      await autoClearUserCart(resolvedUserId, resolvedPhone);
 
-    return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
+      try {
+        broadcastRealtimeEvent({
+          type: "ORDER_CREATED",
+          orderId: newOrder.orderId,
+          masterOrderId: newOrder.masterOrderId,
+          sellerId: newOrder.sellerId,
+          total: newOrder.totalAmount,
+          customerName: newOrder.customer?.name,
+          customerPhone: newOrder.customer?.phone,
+          userId: newOrder.userId,
+          status: newOrder.overallStatus || newOrder.status || "Pending",
+          order: newOrder
+        });
+      } catch (rtErr) {
+        console.warn("⚠️ Realtime broadcast error (Branch B):", rtErr.message);
+      }
+
+      return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
     console.error("❌ [POST /api/orders] Error creating order:", error);
     return res.status(400).json({ message: "Failed to create order", error: error.message });
@@ -1661,6 +1752,20 @@ export const updateOrder = async (req, res) => {
     const rawNewStatus = req.body.overallStatus || req.body.status;
     const newStatusKey = rawNewStatus ? String(rawNewStatus).toLowerCase().trim().replace(/[\s-]+/g, "_") : null;
     const canonicalStatus = rawNewStatus ? normalizeOrderStatus(rawNewStatus) : null;
+
+    // Guard against bypassing sequential return/exchange workflow via generic updateOrder
+    const returnRestrictedStatuses = [
+      "return_requested", "exchange_requested", "return_approved", "exchange_approved", "approved",
+      "pickup_scheduled", "product_received", "product_return_received",
+      "refund_initiated", "refund_completed", "refunded", "refund_processed", "refund_approved",
+      "exchange_dispatched", "exchanged"
+    ];
+    if (existingOrder.returnRequest && existingOrder.returnRequest.type && newStatusKey && returnRestrictedStatuses.includes(newStatusKey)) {
+      return res.status(422).json({
+        message: "This order has an active Return/Exchange request. Please manage status transitions sequentially through the Return/Exchange action panel.",
+        currentStatus: existingOrder.returnRequest.status
+      });
+    }
 
     const {
       statusTitle,
@@ -2792,6 +2897,81 @@ export const updateReturnExchangeStatus = async (req, res) => {
 
     const type = order.returnRequest.type; // "return" or "exchange"
     const rawStatus = String(status).toLowerCase().trim().replace(/[\s-]+/g, "_");
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Server-side state-machine: enforce approval-first sequential transitions
+    // ─────────────────────────────────────────────────────────────────────────
+    const RETURN_STATUS_TRANSITIONS = {
+      // Customer-initiated → Admin/Seller decision
+      "return_requested":    ["return_approved", "return_rejected", "rejected", "approved"],
+      "exchange_requested":  ["exchange_approved", "exchange_rejected", "rejected", "approved"],
+      // Approved → pickup
+      "return_approved":     ["pickup_scheduled", "return_rejected", "rejected"],
+      "exchange_approved":   ["pickup_scheduled", "exchange_rejected", "rejected"],
+      // Pickup → received
+      "pickup_scheduled":    ["product_received", "product_return_received"],
+      // Received → refund or dispatch
+      "product_received":    ["refund_initiated", "refund_completed", "refunded", "refund_processed", "exchange_dispatched"],
+      "product_return_received": ["refund_initiated", "refund_completed", "refunded", "refund_processed", "exchange_dispatched"],
+      // Refund progression
+      "refund_initiated":    ["refund_completed", "refunded", "refund_processed"],
+      // Exchange dispatch → complete
+      "exchange_dispatched": ["exchanged"],
+      // Terminal states – no further automated transitions
+      "return_rejected":     [],
+      "exchange_rejected":   [],
+      "rejected":            [],
+      "refund_completed":    [],
+      "refunded":            [],
+      "refund_processed":    [],
+      "exchanged":           [],
+    };
+
+    const currentRetStatus = String(order.returnRequest.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
+
+    // Normalize the incoming target status to the canonical key for the transition check
+    const normalizedTarget = (() => {
+      if (["approved", "return_approved", "exchange_approved"].includes(rawStatus)) {
+        return type === "exchange" ? "exchange_approved" : "return_approved";
+      }
+      if (["rejected", "return_rejected", "exchange_rejected"].includes(rawStatus)) {
+        return type === "exchange" ? "exchange_rejected" : "return_rejected";
+      }
+      if (["refund_completed", "refund_processed", "refunded"].includes(rawStatus)) return "refund_completed";
+      if (rawStatus === "product_return_received") return "product_received";
+      return rawStatus;
+    })();
+
+    const normalizedCurrent = (() => {
+      if (["requested", "return_requested", "exchange_requested"].includes(currentRetStatus)) {
+        return type === "exchange" ? "exchange_requested" : "return_requested";
+      }
+      if (["approved", "return_approved", "exchange_approved"].includes(currentRetStatus)) {
+        return type === "exchange" ? "exchange_approved" : "return_approved";
+      }
+      if (["rejected", "return_rejected", "exchange_rejected"].includes(currentRetStatus)) {
+        return type === "exchange" ? "exchange_rejected" : "return_rejected";
+      }
+      if (["refund_completed", "refund_processed", "refunded"].includes(currentRetStatus)) return "refund_completed";
+      if (currentRetStatus === "product_return_received") return "product_received";
+      return currentRetStatus;
+    })();
+
+    // Only enforce the transition guard when the current status is a known state.
+    // If the current status is unknown (e.g. legacy data), allow the update to proceed.
+    if (normalizedCurrent && RETURN_STATUS_TRANSITIONS[normalizedCurrent] !== undefined) {
+      const allowed = RETURN_STATUS_TRANSITIONS[normalizedCurrent];
+      if (!allowed.includes(normalizedTarget) && !allowed.includes(rawStatus)) {
+        return res.status(422).json({
+          message: `Invalid status transition: cannot move from '${normalizedCurrent.replace(/_/g, " ")}' to '${normalizedTarget.replace(/_/g, " ")}'. ` +
+            `Allowed next steps: ${allowed.length > 0 ? allowed.map(s => s.replace(/_/g, " ")).join(", ") : "none (terminal state)"}.`,
+          currentStatus: normalizedCurrent,
+          requestedStatus: normalizedTarget,
+          allowedTransitions: allowed
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     let canonicalReturnStatus = rawStatus;
     let overallStatus = order.overallStatus;
