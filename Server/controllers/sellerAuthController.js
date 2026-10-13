@@ -6,10 +6,11 @@ import { upsertFcmToken } from "../utils/fcmHelper.js";
 
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 
-// Helper: Convert Base64 data URL to physical file on disk
+// Helper: Convert Base64 data URL to physical file on disk (deduplicated by content hash)
 export const saveBase64ToFile = (dataUrl, folder = "documents", fieldName = "doc") => {
   if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
     return dataUrl || "";
@@ -33,9 +34,15 @@ export const saveBase64ToFile = (dataUrl, folder = "documents", fieldName = "doc
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    const filename = `${fieldName}-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    // Hash the buffer content so identical images produce the exact same filename
+    const hash = crypto.createHash("md5").update(buffer).digest("hex").slice(0, 16);
+    const prefix = folder === "products" ? "prod" : fieldName;
+    const filename = `${prefix}-${hash}${ext}`;
     const filePath = path.join(uploadDir, filename);
-    fs.writeFileSync(filePath, buffer);
+
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, buffer);
+    }
 
     return `/uploads/${targetSubfolder}/${filename}`;
   } catch (err) {

@@ -565,10 +565,21 @@ export const createProduct = async (req, res) => {
         const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
         
         const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
-        const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
+        const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", "prod") : "";
         
-        const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
-        const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`));
+        let savedVImgs = [];
+        if (Array.isArray(v.images) && v.images.length > 0) {
+          savedVImgs = v.images.map((img, i) => {
+            if (!img) return "";
+            if (img === rawVImg && savedVImg) return savedVImg;
+            return saveBase64ToFile(img, "products", "prod");
+          }).filter(Boolean);
+        }
+        if (savedVImg && !savedVImgs.includes(savedVImg)) {
+          savedVImgs.unshift(savedVImg);
+        }
+        const finalVImg = savedVImg || (savedVImgs[0] || "");
+        const finalVImgs = Array.from(new Set([finalVImg, ...savedVImgs].filter(Boolean)));
 
         return {
           size: sz || mv || `Variant #${vIdx + 1}`,
@@ -580,8 +591,8 @@ export const createProduct = async (req, res) => {
           originalPrice: m,
           stock: st,
           stockQuantity: st,
-          image: savedVImg || (savedVImgs[0] || ""),
-          images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+          image: finalVImg,
+          images: finalVImgs,
           sku: v.sku || `SKU-VAR-${vIdx + 1}`
         };
       }).filter(Boolean);

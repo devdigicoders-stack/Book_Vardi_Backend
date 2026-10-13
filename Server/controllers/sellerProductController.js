@@ -360,10 +360,21 @@ export const createProduct = async (req, res) => {
           const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
           
           const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
-          const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
+          const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", "prod") : "";
           
-          const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
-          const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`));
+          let savedVImgs = [];
+          if (Array.isArray(v.images) && v.images.length > 0) {
+            savedVImgs = v.images.map((img, i) => {
+              if (!img) return "";
+              if (img === rawVImg && savedVImg) return savedVImg;
+              return saveBase64ToFile(img, "products", "prod");
+            }).filter(Boolean);
+          }
+          if (savedVImg && !savedVImgs.includes(savedVImg)) {
+            savedVImgs.unshift(savedVImg);
+          }
+          const finalVImg = savedVImg || (savedVImgs[0] || "");
+          const finalVImgs = Array.from(new Set([finalVImg, ...savedVImgs].filter(Boolean)));
 
           return {
             size: sz || mv || `Variant #${vIdx + 1}`,
@@ -375,8 +386,8 @@ export const createProduct = async (req, res) => {
             originalPrice: m,
             stock: st,
             stockQuantity: st,
-            image: savedVImg || (savedVImgs[0] || ""),
-            images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+            image: finalVImg,
+            images: finalVImgs,
             sku: v.sku || `SKU-VAR-${vIdx + 1}`
           };
         }).filter(Boolean)
@@ -583,9 +594,20 @@ export const updateProduct = async (req, res) => {
             const st = Number(v.stock !== undefined ? v.stock : (v.stockQuantity !== undefined ? v.stockQuantity : 0)) || 0;
 
             const rawVImg = v.image || (Array.isArray(v.images) && v.images[0]) || "";
-            const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", `variant-${vIdx}`) : "";
-            const rawVImgs = Array.isArray(v.images) && v.images.length > 0 ? v.images : (savedVImg ? [savedVImg] : []);
-            const savedVImgs = rawVImgs.map((img, i) => saveBase64ToFile(img, "products", `variant-${vIdx}-${i}`)).filter(Boolean);
+            const savedVImg = rawVImg ? saveBase64ToFile(rawVImg, "products", "prod") : "";
+            let savedVImgs = [];
+            if (Array.isArray(v.images) && v.images.length > 0) {
+              savedVImgs = v.images.map((img, i) => {
+                if (!img) return "";
+                if (img === rawVImg && savedVImg) return savedVImg;
+                return saveBase64ToFile(img, "products", "prod");
+              }).filter(Boolean);
+            }
+            if (savedVImg && !savedVImgs.includes(savedVImg)) {
+              savedVImgs.unshift(savedVImg);
+            }
+            const finalVImg = savedVImg || (savedVImgs[0] || "");
+            const finalVImgs = Array.from(new Set([finalVImg, ...savedVImgs].filter(Boolean)));
 
             return {
               size: sz || mv || `Variant #${vIdx + 1}`,
@@ -597,8 +619,8 @@ export const updateProduct = async (req, res) => {
               originalPrice: m,
               stock: st,
               stockQuantity: st,
-              image: savedVImg || (savedVImgs[0] || ""),
-              images: savedVImgs.length > 0 ? savedVImgs : (savedVImg ? [savedVImg] : []),
+              image: finalVImg,
+              images: finalVImgs,
               sku: v.sku || `SKU-VAR-${vIdx + 1}`
             };
           }).filter(Boolean)
@@ -669,6 +691,18 @@ export const updateProduct = async (req, res) => {
       updates.images = Array.from(new Set(updatedImagePaths)).filter(Boolean);
     } else if (updatedImagePaths.length > 0) {
       updates.images = Array.from(new Set([...(product.images || []), ...updatedImagePaths])).filter(Boolean);
+    }
+
+    const effectivePrimaryImg = (updates.images && updates.images[0]) || (product.images && product.images[0]) || updates.image || product.image || "";
+    if (effectivePrimaryImg && Array.isArray(updates.sizeVariants) && updates.sizeVariants.length > 0) {
+      updates.sizeVariants = updates.sizeVariants.map(v => {
+        const isPlaceholder = !v.image || (typeof v.image === "string" && (v.image.includes("unsplash.com") || v.image.includes("placeholder")));
+        if (isPlaceholder) {
+          return { ...v, image: effectivePrimaryImg, images: [effectivePrimaryImg] };
+        }
+        return v;
+      });
+      updates.variants = updates.sizeVariants;
     }
 
     // Whenever a product is updated by a seller, set approvalStatus to "Pending" for admin review
