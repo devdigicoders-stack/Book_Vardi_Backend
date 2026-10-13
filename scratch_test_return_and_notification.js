@@ -217,7 +217,7 @@ async function runTests() {
       const res = createMockRes();
       await updateReturnExchangeStatus(req, res);
       const updatedOrd = res.data?.order;
-      const isOk = res.statusCode === 200 && res.data?.success === true && updatedOrd?.returnRequest?.status === "approved";
+      const isOk = res.statusCode === 200 && res.data?.success === true && ["approved", "return_approved"].includes(updatedOrd?.returnRequest?.status);
       recordTestResult("Return API", "PATCH /api/orders/:id/return-exchange/status (Status: Approved)", isOk, res.statusCode, res.data?.message || "Approved successfully", {
         success: res.data?.success,
         overallStatus: updatedOrd?.overallStatus,

@@ -5,6 +5,7 @@ import School from "../models/School.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { cacheMiddleware, clearCache } from "../utils/cache.js";
 import { downloadInvoice } from "../controllers/orderController.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 const router = express.Router();
 
@@ -267,6 +268,15 @@ router.post("/bulk-order", async (req, res) => {
     });
 
     await bulkOrder.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "SCHOOL_ORDER_UPDATED",
+        orderId: bulkOrder.referenceId,
+        institutionName: bulkOrder.institutionName,
+        status: bulkOrder.status
+      });
+    } catch (rtErr) {}
 
     return res.status(201).json({
       success: true,

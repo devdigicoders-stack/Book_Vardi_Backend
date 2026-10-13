@@ -37,6 +37,8 @@ import {
   updateSellerOrderItemStatus,
   updateSellerOrderStatus,
   downloadSellerInvoice,
+  downloadSellerCreditNote,
+  downloadSellerExchangeInvoice,
   resendSellerDeliveryBoyWhatsApp
 } from "../controllers/sellerOrderController.js";
 import { updateReturnExchangeStatus } from "../controllers/orderController.js";
@@ -131,6 +133,8 @@ router.get("/customers", authenticateSeller, getSellerCustomers);
 router.get("/orders", authenticateSeller, getSellerOrders);
 router.get("/orders/export", authenticateSeller, exportSellerOrders);
 router.get("/orders/:orderId/invoice", authenticateSeller, downloadSellerInvoice);
+router.get("/orders/:orderId/credit-note", authenticateSeller, downloadSellerCreditNote);
+router.get("/orders/:orderId/exchange-invoice", authenticateSeller, downloadSellerExchangeInvoice);
 router.patch("/orders/:orderId/status", authenticateSeller, updateSellerOrderStatus);
 router.put("/orders/:orderId/status", authenticateSeller, updateSellerOrderStatus);
 router.post("/orders/:orderId/resend-whatsapp", authenticateSeller, resendSellerDeliveryBoyWhatsApp);

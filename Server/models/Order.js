@@ -27,6 +27,9 @@ const orderItemSchema = new mongoose.Schema({
   gstPercent: { type: Number, default: 5 },
   gstPercentage: { type: Number, default: 5 },
   gstRate: { type: Number, default: 5 },
+  commissionRate: { type: Number, default: 5 },
+  commissionPercentage: { type: Number, default: 5 },
+  sellerCommissionRate: { type: Number, default: 5 },
   name: { type: String, required: true },
   price: { type: Number, required: true },
   image: { type: String, default: "" },
@@ -151,6 +154,9 @@ const orderSchema = new mongoose.Schema(
     shippingFee: { type: Number, default: 0 },
     discount: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
+    commissionRate: { type: Number, default: 5 },
+    commissionPercentage: { type: Number, default: 5 },
+    sellerCommissionRate: { type: Number, default: 5 },
     totalAmount: {
       type: Number,
       required: true,
@@ -298,7 +304,27 @@ const orderSchema = new mongoose.Schema(
       exchangeCourier: { type: String, default: "" },
       status: {
         type: String,
-        enum: ["no_request","requested", "approved", "rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"],
+        enum: [
+          "no_request",
+          "requested",
+          "return_requested",
+          "exchange_requested",
+          "approved",
+          "return_approved",
+          "exchange_approved",
+          "rejected",
+          "return_rejected",
+          "exchange_rejected",
+          "pickup_scheduled",
+          "product_received",
+          "product_return_received",
+          "refund_initiated",
+          "refund_processed",
+          "refund_completed",
+          "refunded",
+          "exchange_dispatched",
+          "exchanged"
+        ],
         default: "no_request"
       },
       returnEligibleUntil: { type: Date, default: null }
@@ -319,28 +345,42 @@ const orderSchema = new mongoose.Schema(
 
 // Pre-save hook to initialize first timeline entry and unify delivery OTP
 orderSchema.pre("save", function (next) {
-  // Synchronize deliveryOtp across order and item fields only if already generated
-  const canonicalOtp = this.deliveryOtp ||
-    this.selfDeliveryDetails?.deliveryOtp ||
-    (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
-    (this.items?.[0]?.deliveryOtp) ||
-    "";
+  // Synchronize deliveryOtp across order and item fields
+  let canonicalOtp = "";
 
-  if (canonicalOtp) {
-    this.deliveryOtp = canonicalOtp;
-    if (!this.selfDeliveryDetails) {
-      this.selfDeliveryDetails = {};
-    }
-    this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+  // If selfDeliveryDetails.deliveryOtp was explicitly modified (e.g. resend OTP), prioritize it
+  if (this.isModified && this.isModified("selfDeliveryDetails.deliveryOtp") && this.selfDeliveryDetails?.deliveryOtp) {
+    canonicalOtp = String(this.selfDeliveryDetails.deliveryOtp).trim();
+  } else if (this.isModified && this.isModified("deliveryOtp") && this.deliveryOtp) {
+    canonicalOtp = String(this.deliveryOtp).trim();
+  } else {
+    canonicalOtp = String(
+      this.deliveryOtp ||
+      this.selfDeliveryDetails?.deliveryOtp ||
+      (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
+      (this.items?.[0]?.deliveryOtp) ||
+      ""
+    ).trim();
+  }
 
-    if (Array.isArray(this.items)) {
-      this.items.forEach(it => {
-        it.deliveryOtp = canonicalOtp;
-        if (it.selfDeliveryDetails) {
-          it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
-        }
-      });
-    }
+  // Ensure every order has a secure, permanent 4-digit OTP
+  if (!canonicalOtp || !/^\d{4}$/.test(canonicalOtp)) {
+    canonicalOtp = Math.floor(1000 + Math.random() * 9000).toString();
+  }
+
+  this.deliveryOtp = canonicalOtp;
+  if (!this.selfDeliveryDetails) {
+    this.selfDeliveryDetails = {};
+  }
+  this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+
+  if (Array.isArray(this.items)) {
+    this.items.forEach(it => {
+      it.deliveryOtp = canonicalOtp;
+      if (it.selfDeliveryDetails) {
+        it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+      }
+    });
   }
 
   if (this.isNew && (!this.timeline || this.timeline.length === 0)) {
@@ -371,6 +411,11 @@ orderSchema.pre("save", function (next) {
   next();
 });
 
+orderSchema.index({ orderId: 1 });
+orderSchema.index({ id: 1 });
+orderSchema.index({ userId: 1 });
+orderSchema.index({ "customer.phone": 1 });
+orderSchema.index({ "customer.email": 1 });
 orderSchema.index({ masterOrderId: 1 });
 orderSchema.index({ sellerId: 1 });
 orderSchema.index({ seller: 1 });

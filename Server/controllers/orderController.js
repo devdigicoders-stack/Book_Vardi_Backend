@@ -8,6 +8,7 @@ import SellerOffer from "../models/SellerOffer.js";
 import PlatformSetting from "../models/PlatformSetting.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 // Helper to locate user document by ID, email, or phone
 const findUserByIdentifier = async (req) => {
@@ -36,7 +37,7 @@ const findUserByIdentifier = async (req) => {
 };
 
 // Canonical Order Status Normalizer
-export const normalizeOrderStatus = (raw) => {
+export const normalizeOrderStatus = (raw, contextOrder = null) => {
   if (!raw) return "Pending";
   const s = String(raw).toLowerCase().trim().replace(/[\s-]+/g, "_");
   if (s === "delivered" || s === "completed") return "Delivered";
@@ -48,15 +49,30 @@ export const normalizeOrderStatus = (raw) => {
   if (s === "cancelled" || s === "canceled") return "Cancelled";
   if (s === "return_requested") return "Return Requested";
   if (s === "return_approved") return "Return Approved";
-  if (s === "product_return_received" || s === "product_received") return "Product Return Received";
+  if (s === "return_rejected") return "Return Rejected";
+  if (s === "exchange_requested") return "Exchange Requested";
+  if (s === "exchange_approved") return "Exchange Approved";
+  if (s === "exchange_rejected") return "Exchange Rejected";
+  if (s === "pickup_scheduled") return "Pickup Scheduled";
+  if (s === "product_return_received" || s === "product_received") return "Product Received";
   if (s === "refund_requested") return "Refund Requested";
   if (s === "refund_approved") return "Refund Approved";
   if (s === "refund_initiated") return "Refund Initiated";
   if (s === "refund_completed" || s === "refunded") return "Refund Completed";
-  if (s === "exchange_requested") return "Exchange Requested";
-  if (s === "exchange_approved") return "Exchange Approved";
   if (s === "exchange_dispatched") return "Exchange Dispatched";
   if (s === "exchanged") return "Exchanged";
+  if (s === "requested") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Requested" : "Return Requested";
+  }
+  if (s === "approved") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Approved" : "Return Approved";
+  }
+  if (s === "rejected") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Rejected" : "Return Rejected";
+  }
   if (s === "pending" || s === "placed") return "Pending";
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
@@ -72,7 +88,23 @@ export const STAGE_RANK = {
   in_transit: 4,
   out_for_delivery: 5,
   delivered: 6,
-  completed: 6
+  completed: 6,
+  return_requested: 6,
+  return_approved: 6,
+  return_rejected: 6,
+  pickup_scheduled: 6,
+  product_received: 6,
+  product_return_received: 6,
+  refund_requested: 6,
+  refund_approved: 6,
+  refund_initiated: 6,
+  refund_completed: 6,
+  refunded: 6,
+  exchange_requested: 6,
+  exchange_approved: 6,
+  exchange_rejected: 6,
+  exchange_dispatched: 6,
+  exchanged: 6
 };
 
 export const RANK_TO_STATUS = [
@@ -86,8 +118,11 @@ export const RANK_TO_STATUS = [
 ];
 
 // Calculate Overall Order Status across all items in a multi-product order
-export const calculateOverallOrderStatus = (items = []) => {
+export const calculateOverallOrderStatus = (items = [], orderContext = null) => {
   if (!Array.isArray(items) || items.length === 0) {
+    if (orderContext?.returnRequest && orderContext.returnRequest.type && !['none', 'no_request', ''].includes(String(orderContext.returnRequest.status).toLowerCase())) {
+      return normalizeOrderStatus(orderContext.returnRequest.status, orderContext);
+    }
     return "Pending";
   }
 
@@ -102,22 +137,41 @@ export const calculateOverallOrderStatus = (items = []) => {
   }
 
   const normalizedStatuses = nonCancelledItems.map(it => {
-    return normalizeOrderStatus(it.status || 'Pending');
+    return normalizeOrderStatus(it.status || 'Pending', orderContext);
   });
+
+  // If any active item is in return/exchange/refund governance, preserve that governance status!
+  const isGovernanceStatus = (s) => {
+    if (!s) return false;
+    const low = String(s).toLowerCase().trim().replace(/[\s-]+/g, '_');
+    return (
+      low.startsWith('return') ||
+      low.startsWith('refund') ||
+      low.startsWith('exchange') ||
+      low === 'exchanged' ||
+      low === 'product_received' ||
+      low === 'product_return_received' ||
+      low === 'pickup_scheduled'
+    );
+  };
+
+  const governanceItem = normalizedStatuses.find(isGovernanceStatus);
+  if (governanceItem) {
+    return governanceItem;
+  }
+
+  // If order context has an active return request, prioritize it
+  if (orderContext?.returnRequest && orderContext.returnRequest.type) {
+    const reqStatus = String(orderContext.returnRequest.status || '').toLowerCase().trim();
+    if (reqStatus && !['none', 'no_request', 'normal', ''].includes(reqStatus)) {
+      return normalizeOrderStatus(reqStatus, orderContext);
+    }
+  }
 
   // If all active items share the exact same status
   const firstStatus = normalizedStatuses[0];
   const allSame = normalizedStatuses.every(s => s.toLowerCase() === firstStatus.toLowerCase());
   if (allSame) {
-    return firstStatus;
-  }
-
-  // If all active items are in return/exchange governance
-  const isGovernanceStatus = (s) => {
-    const low = s.toLowerCase();
-    return low.startsWith('return') || low.startsWith('refund') || low.startsWith('exchange') || low === 'exchanged';
-  };
-  if (normalizedStatuses.every(isGovernanceStatus)) {
     return firstStatus;
   }
 
@@ -412,9 +466,17 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
       });
     });
 
-    const sellers = sellerIds.size > 0 
-      ? await Seller.find({ _id: { $in: Array.from(sellerIds) } }).lean()
-      : [];
+    const [sellers, users, prods] = await Promise.all([
+      sellerIds.size > 0 
+        ? Seller.find({ _id: { $in: Array.from(sellerIds) } }).lean()
+        : [],
+      userIds.size > 0 
+        ? User.find({ _id: { $in: Array.from(userIds) } }).lean()
+        : [],
+      productIds.size > 0 
+        ? Product.find({ _id: { $in: Array.from(productIds) } }).select("_id sellerId sellerStoreName storeName").lean()
+        : []
+    ]);
 
     const sellerMap = new Map();
     sellers.forEach(s => {
@@ -431,6 +493,18 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         pincode: s.pincode || "",
         gstNumber: s.gstNumber || ""
       });
+    });
+
+    const userMap = new Map();
+    users.forEach(u => userMap.set(u._id.toString(), u));
+
+    const productMap = new Map();
+    const missingSellerIds = new Set();
+    prods.forEach(p => {
+      productMap.set(p._id.toString(), p);
+      if (p.sellerId && !sellerMap.has(p.sellerId.toString())) {
+        missingSellerIds.add(p.sellerId.toString());
+      }
     });
 
     // Check User collection for seller IDs that might be users
@@ -454,43 +528,24 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
       });
     }
 
-    // Check Products for items with unknown sellers
-    const productMap = new Map();
-    if (productIds.size > 0) {
-      const prods = await Product.find({ _id: { $in: Array.from(productIds) } }).lean();
-      prods.forEach(p => {
-        productMap.set(p._id.toString(), p);
-        if (p.sellerId && !sellerMap.has(p.sellerId.toString())) {
-          sellerIds.add(p.sellerId.toString());
-        }
-      });
-      // Fetch any newly discovered sellerIds from products
-      const newSellerIds = Array.from(sellerIds).filter(id => !sellerMap.has(id));
-      if (newSellerIds.length > 0) {
-        const extraSellers = await Seller.find({ _id: { $in: newSellerIds } }).lean();
-        extraSellers.forEach(s => {
-          sellerMap.set(s._id.toString(), {
-            sellerId: s._id,
-            storeName: s.storeName || s.name,
-            sellerName: s.name || s.storeName,
-            name: s.name,
-            phone: s.phone || "",
-            email: s.email || "",
-            address: s.address || "",
-            city: s.city || "",
-            state: s.state || "",
-            pincode: s.pincode || "",
-            gstNumber: s.gstNumber || ""
-          });
+    // Fetch any newly discovered sellerIds from products
+    if (missingSellerIds.size > 0) {
+      const extraSellers = await Seller.find({ _id: { $in: Array.from(missingSellerIds) } }).lean();
+      extraSellers.forEach(s => {
+        sellerMap.set(s._id.toString(), {
+          sellerId: s._id,
+          storeName: s.storeName || s.name,
+          sellerName: s.name || s.storeName,
+          name: s.name,
+          phone: s.phone || "",
+          email: s.email || "",
+          address: s.address || "",
+          city: s.city || "",
+          state: s.state || "",
+          pincode: s.pincode || "",
+          gstNumber: s.gstNumber || ""
         });
-      }
-    }
-
-    // Lookup users for consumer details
-    const userMap = new Map();
-    if (userIds.size > 0) {
-      const users = await User.find({ _id: { $in: Array.from(userIds) } }).lean();
-      users.forEach(u => userMap.set(u._id.toString(), u));
+      });
     }
 
     orderList.forEach(ord => {
@@ -609,12 +664,21 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
       if (primarySellerDetails) {
         if (!ord.sellerDetails || isPlaceholderSeller(ord.sellerDetails.storeName)) {
           ord.sellerDetails = primarySellerDetails;
+        } else {
+          ord.sellerDetails.state = ord.sellerDetails.state || primarySellerDetails.state || "";
+          ord.sellerDetails.city = ord.sellerDetails.city || primarySellerDetails.city || "";
+          ord.sellerDetails.pincode = ord.sellerDetails.pincode || primarySellerDetails.pincode || "";
+          ord.sellerDetails.gstNumber = ord.sellerDetails.gstNumber || primarySellerDetails.gstNumber || "";
+          ord.sellerDetails.address = ord.sellerDetails.address || primarySellerDetails.address || "";
         }
         ord.sellerName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
         ord.sellerStoreName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
         ord.storeName = primarySellerDetails.storeName || primarySellerDetails.sellerName;
         ord.sellerPhone = primarySellerDetails.phone || ord.sellerPhone || "";
         ord.sellerCity = primarySellerDetails.city || ord.sellerCity || "";
+        ord.sellerState = primarySellerDetails.state || ord.sellerState || "";
+        ord.sellerPincode = primarySellerDetails.pincode || ord.sellerPincode || "";
+        ord.sellerGst = primarySellerDetails.gstNumber || ord.sellerGst || "";
       }
 
       // Canonicalize status across overall order and individual items
@@ -643,7 +707,6 @@ export const getOrders = async (req, res) => {
 
     const orders = await Order.find()
       .populate("userId", "name email phone addresses")
-      .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -737,6 +800,11 @@ export const getMyOrders = async (req, res) => {
           color: it.color || "",
           image: it.image || "",
           category: it.category || "Stationery",
+          gst: it.gst !== undefined ? it.gst : (it.gstRate ?? it.gstPercent ?? 5),
+          gstPercent: it.gstPercent !== undefined ? it.gstPercent : (it.gstRate ?? it.gst ?? 5),
+          gstPercentage: it.gstPercentage !== undefined ? it.gstPercentage : (it.gstRate ?? it.gst ?? 5),
+          gstRate: it.gstRate !== undefined ? it.gstRate : (it.gstPercent ?? it.gst ?? 5),
+          isGstInclusive: it.isGstInclusive !== false,
           deliveryType: it.deliveryType || resolvedDeliveryMode || "pending_choice",
           sellerId: it.sellerId,
           sellerName: it.sellerName || itemSellerDetails.sellerName,
@@ -761,13 +829,23 @@ export const getMyOrders = async (req, res) => {
         status: canonicalStatus,
         overallStatus: canonicalStatus,
         deliveryMode: resolvedDeliveryMode,
-        courierName: ord.courierName || ord.carrier || firstItem.thirdPartyDetails?.courierName || '',
-        carrier: ord.carrier || ord.courierName || '',
-        trackingNumber: ord.trackingNumber || firstItem.thirdPartyDetails?.trackingNumber || '',
-        trackingUrl: ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || '',
+        courierName: resolvedDeliveryMode === 'self_delivery' ? '' : (ord.courierName || ord.carrier || firstItem.thirdPartyDetails?.courierName || ''),
+        carrier: resolvedDeliveryMode === 'self_delivery' ? '' : (ord.carrier || ord.courierName || ''),
+        trackingNumber: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.deliveryPartnerToken || ord.trackingNumber || '') : (ord.trackingNumber || firstItem.thirdPartyDetails?.trackingNumber || ''),
+        trackingUrl: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.trackingUrl || ord.trackingUrl || '') : (ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || ''),
         sellerDetails: resolvedSellerDetails,
         selfDeliveryDetails: ord.selfDeliveryDetails || firstItem.selfDeliveryDetails || null,
-        deliveryOtp: ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || firstItem.selfDeliveryDetails?.deliveryOtp || firstItem.deliveryOtp || (ord.orderId ? String(ord.orderId).replace(/\D/g, '').slice(-4) : '') || "4829",
+        deliveryOtp: (() => {
+          let resolvedOtp = String(ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || firstItem.selfDeliveryDetails?.deliveryOtp || firstItem.deliveryOtp || '').trim();
+          if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
+            resolvedOtp = Math.floor(1000 + Math.random() * 9000).toString();
+            ord.deliveryOtp = resolvedOtp;
+            if (ord._id) {
+              Order.updateOne({ _id: ord._id }, { $set: { deliveryOtp: resolvedOtp, "selfDeliveryDetails.deliveryOtp": resolvedOtp } }).catch(() => {});
+            }
+          }
+          return resolvedOtp;
+        })(),
         itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
         items: formattedItems,
         subtotal: ord.subtotal || ord.totalAmount || ord.total || 0,
@@ -782,7 +860,10 @@ export const getMyOrders = async (req, res) => {
         cancellationReason: ord.cancellationReason || '',
         cancelledBy: ord.cancelledBy || '',
         cancelledAt: ord.cancelledAt || null,
-        refundStatus: ord.refundStatus || ''
+        refundStatus: ord.refundStatus || '',
+        refundDetails: ord.refundDetails || ord.returnRequest?.refundDetails || null,
+        returnRequest: ord.returnRequest || null,
+        timeline: ord.timeline || []
       };
     });
 
@@ -1024,18 +1105,29 @@ export const createOrder = async (req, res) => {
       }
       if ((itemCommRate === undefined || itemCommRate === null || isNaN(Number(itemCommRate))) && item.sellerId) {
         try {
-          let sUser = await User.findById(item.sellerId).catch(() => null);
-          if (!sUser && typeof item.sellerId === "string") {
-            sUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
+          const SellerModel = (await import("../models/Seller.js")).default;
+          let sSeller = await SellerModel.findById(item.sellerId).catch(() => null);
+          if (!sSeller && typeof item.sellerId === "string") {
+            sSeller = await SellerModel.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
           }
-          if (sUser && (sUser.commissionRate !== undefined || sUser.commissionPercentage !== undefined)) {
-            itemCommRate = sUser.commissionRate ?? sUser.commissionPercentage;
+          if (sSeller && (sSeller.commissionRate !== undefined || sSeller.commissionPercentage !== undefined)) {
+            itemCommRate = sSeller.commissionRate ?? sSeller.commissionPercentage;
+          }
+          if (!sSeller) {
+            let sUser = await User.findById(item.sellerId).catch(() => null);
+            if (!sUser && typeof item.sellerId === "string") {
+              sUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
+            }
+            if (sUser && (sUser.commissionRate !== undefined || sUser.commissionPercentage !== undefined)) {
+              itemCommRate = sUser.commissionRate ?? sUser.commissionPercentage;
+            }
           }
         } catch (e) {}
       }
-      const resolvedCommRate = (itemCommRate !== undefined && itemCommRate !== null && !isNaN(Number(itemCommRate))) ? Number(itemCommRate) : 8;
+      const resolvedCommRate = (itemCommRate !== undefined && itemCommRate !== null && !isNaN(Number(itemCommRate))) ? Number(itemCommRate) : 5;
       item.commissionRate = resolvedCommRate;
       item.sellerCommissionRate = resolvedCommRate;
+      item.commissionPercentage = resolvedCommRate;
 
       // Ensure explicit product-level GST rate set by seller is strictly preserved
       const explicitGst = item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? item.taxRate ?? prod?.gstPercent ?? prod?.gstRate ?? prod?.gst ?? prod?.gstPercentage ?? prod?.taxRate;
@@ -1188,6 +1280,9 @@ export const createOrder = async (req, res) => {
           shippingFee: groupShipping,
           discount: groupDiscount,
           discountAmount: groupDiscount,
+          commissionRate: grp.items[0]?.commissionRate ?? 5,
+          sellerCommissionRate: grp.items[0]?.commissionRate ?? 5,
+          commissionPercentage: grp.items[0]?.commissionRate ?? 5,
           totalAmount: groupTotal,
           total: groupTotal,
           date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
@@ -1236,6 +1331,22 @@ export const createOrder = async (req, res) => {
         }
       } catch (couponErr) {}
 
+      try {
+        for (const sub of createdSubOrders) {
+          broadcastRealtimeEvent({
+            type: "ORDER_CREATED",
+            orderId: sub.orderId,
+            masterOrderId: sub.masterOrderId,
+            sellerId: sub.sellerId,
+            total: sub.totalAmount,
+            customerName: sub.customer?.name,
+            status: sub.overallStatus || sub.status || "Pending"
+          });
+        }
+      } catch (rtErr) {
+        console.warn("⚠️ Realtime broadcast error (Branch A):", rtErr.message);
+      }
+
       return res.status(201).json({
         message: "Order placed successfully (divided into per-seller sub-orders)",
         masterOrderId,
@@ -1271,6 +1382,9 @@ export const createOrder = async (req, res) => {
       shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
       discount: discount || discountAmount || 0,
       discountAmount: discountAmount || discount || 0,
+      commissionRate: orderItems[0]?.commissionRate ?? 5,
+      sellerCommissionRate: orderItems[0]?.commissionRate ?? 5,
+      commissionPercentage: orderItems[0]?.commissionRate ?? 5,
       totalAmount: calculatedTotal,
       total: calculatedTotal,
       date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
@@ -1323,6 +1437,20 @@ export const createOrder = async (req, res) => {
       console.warn("⚠️ Coupon redemption increment warning:", couponErr.message);
     }
 
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_CREATED",
+        orderId: newOrder.orderId,
+        masterOrderId: newOrder.masterOrderId,
+        sellerId: newOrder.sellerId,
+        total: newOrder.totalAmount,
+        customerName: newOrder.customer?.name,
+        status: newOrder.overallStatus || newOrder.status || "Pending"
+      });
+    } catch (rtErr) {
+      console.warn("⚠️ Realtime broadcast error (Branch B):", rtErr.message);
+    }
+
     return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
     console.error("❌ [POST /api/orders] Error creating order:", error);
@@ -1333,7 +1461,7 @@ export const createOrder = async (req, res) => {
 // 5. Track Order API with Full Visual Timeline & Delivery Status
 export const trackOrder = async (req, res) => {
   try {
-    const { orderId } = req.params;
+    const orderId = req.params.orderId || req.params.id;
 
     // Search by either MongoDB _id or custom orderId (e.g. SK-MTMPX58U)
     const isMongoId = /^[0-9a-fA-F]{24}$/.test(orderId);
@@ -1358,9 +1486,44 @@ export const trackOrder = async (req, res) => {
     ];
 
     const currentStatus = (order.overallStatus || order.status || "").toLowerCase();
+    const isCancelled = currentStatus === "cancelled" || currentStatus === "canceled" || order.status === "Cancelled" || order.overallStatus === "Cancelled";
     const currentStepIndex = standardSteps.findIndex((s) => s.key === currentStatus);
 
-    const isCancelled = currentStatus === "cancelled";
+    const hasReturn = Boolean(
+      order.returnRequest &&
+      order.returnRequest.type &&
+      !['none', 'n/a', '', 'null'].includes(String(order.returnRequest.type).toLowerCase().trim()) &&
+      !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(order.returnRequest.status || '').toLowerCase().trim())
+    );
+
+    const retReqType = String(order.returnRequest?.type || '').toLowerCase();
+    const retReqStatus = String(order.returnRequest?.status || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+
+    const returnSteps = retReqType === 'exchange' ? [
+      { key: 'exchange_requested', label: 'Exchange Requested', desc: 'Customer requested replacement', stepNumber: 1 },
+      { key: 'exchange_approved', label: 'Exchange Approved', desc: 'Store approved replacement', stepNumber: 2 },
+      { key: 'pickup_scheduled', label: 'Pickup Scheduled', desc: 'Courier / Rider scheduled', stepNumber: 3 },
+      { key: 'exchange_dispatched', label: 'Replacement Dispatched', desc: 'Replacement on the way', stepNumber: 4 },
+      { key: 'exchanged', label: 'Exchange Completed', desc: 'Handover verified', stepNumber: 5 }
+    ] : [
+      { key: 'return_requested', label: 'Return Requested', desc: 'Customer initiated return', stepNumber: 1 },
+      { key: 'return_approved', label: 'Return Approved', desc: 'Store accepted return request', stepNumber: 2 },
+      { key: 'pickup_scheduled', label: 'Pickup Scheduled', desc: 'Return parcel pickup scheduled', stepNumber: 3 },
+      { key: 'product_received', label: 'Product Received', desc: 'Returned item verified & restocked', stepNumber: 4 },
+      { key: 'refund_completed', label: 'Refund Completed', desc: 'Refund payout settled to customer', stepNumber: 5 }
+    ];
+
+    let currentReturnStepIndex = -1;
+    if (hasReturn) {
+      if (retReqStatus === 'requested' || retReqStatus.endsWith('_requested')) currentReturnStepIndex = 0;
+      else if (retReqStatus === 'approved' || retReqStatus.endsWith('_approved')) currentReturnStepIndex = 1;
+      else if (retReqStatus === 'pickup_scheduled') currentReturnStepIndex = 2;
+      else if (retReqStatus === 'product_received' || retReqStatus === 'product_return_received') currentReturnStepIndex = 3;
+      else if (retReqStatus === 'exchange_dispatched') currentReturnStepIndex = 3;
+      else if (retReqStatus === 'refund_initiated' || retReqStatus === 'refund_processed' || retReqStatus === 'refund_completed' || retReqStatus === 'refunded') currentReturnStepIndex = 4;
+      else if (retReqStatus === 'exchanged') currentReturnStepIndex = 4;
+      else currentReturnStepIndex = 0;
+    }
 
     const trackingSummary = {
       orderId: order.orderId,
@@ -1368,24 +1531,39 @@ export const trackOrder = async (req, res) => {
       createdAt: order.createdAt,
       estimatedDeliveryDate: order.estimatedDeliveryDate,
       currentStatus: order.overallStatus || order.status,
+      overallStatus: order.overallStatus || order.status,
+      status: order.status || order.overallStatus,
       paymentStatus: order.paymentStatus,
       paymentMethod: order.paymentMethod,
       shippingAddress: order.shippingAddress || { street: order.address },
       totalAmount: order.totalAmount,
       isCancelled,
-      trackingStatus: isCancelled ? "terminated" : "active",
+      trackingStatus: isCancelled ? "terminated" : (hasReturn ? "return_active" : "active"),
       cancellationReason: order.cancellationReason || "",
       cancelledBy: order.cancelledBy || "",
       cancelledAt: order.cancelledAt || null,
       refundStatus: order.refundStatus || "",
-      message: isCancelled ? "Fulfillment and shipping tracking closed due to order cancellation." : "Tracking active",
+      returnRequest: order.returnRequest || null,
+      refundDetails: order.refundDetails || order.returnRequest?.refundDetails || null,
+      isReturnOrExchange: hasReturn,
+      returnType: retReqType || null,
+      returnStatus: retReqStatus || null,
+      currentReturnStepIndex,
+      returnSteps: returnSteps.map((st, idx) => ({
+        ...st,
+        isCompleted: currentReturnStepIndex >= idx,
+        isCurrent: currentReturnStepIndex === idx
+      })),
+      message: isCancelled
+        ? "Fulfillment and shipping tracking closed due to order cancellation."
+        : (hasReturn ? `Return & Exchange tracking active: ${retReqStatus}` : "Tracking active"),
       isDelivered: currentStatus === "delivered",
       currentStepIndex: isCancelled ? -1 : (currentStepIndex > -1 ? currentStepIndex : (currentStatus === "processing" ? 1 : 0)),
-      deliveryMode: order.deliveryMode || (order.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (order.courierName ? "third_party" : (order.items?.[0]?.deliveryType === "self" || order.items?.[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
-      courierName: order.courierName || order.carrier || order.items?.[0]?.thirdPartyDetails?.courierName || "",
-      carrier: order.carrier || order.courierName || "",
-      trackingNumber: order.trackingNumber || order.items?.[0]?.thirdPartyDetails?.trackingNumber || "",
-      trackingUrl: order.trackingUrl || order.items?.[0]?.thirdPartyDetails?.trackingUrl || "",
+      deliveryMode: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "self_delivery" : (order.deliveryMode === "third_party" ? "third_party" : (order.courierName ? "third_party" : (order.items?.[0]?.deliveryType === "self" || order.items?.[0]?.deliveryType === "self_delivery" ? "self_delivery" : "pending_choice"))),
+      courierName: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "" : (order.courierName || order.carrier || order.items?.[0]?.thirdPartyDetails?.courierName || ""),
+      carrier: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "" : (order.carrier || order.courierName || ""),
+      trackingNumber: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? (order.selfDeliveryDetails?.deliveryPartnerToken || order.trackingNumber || "") : (order.trackingNumber || order.items?.[0]?.thirdPartyDetails?.trackingNumber || ""),
+      trackingUrl: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? (order.selfDeliveryDetails?.trackingUrl || order.trackingUrl || "") : (order.trackingUrl || order.items?.[0]?.thirdPartyDetails?.trackingUrl || ""),
       sellerDetails: order.sellerDetails || order.items?.[0]?.sellerDetails || (order.items?.[0]?.sellerId ? {
         storeName: order.items[0].sellerId.storeName || order.items[0].sellerName || "",
         sellerName: order.items[0].sellerName || order.items[0].sellerId.storeName || "",
@@ -1394,7 +1572,20 @@ export const trackOrder = async (req, res) => {
         address: order.items[0].sellerId.address || order.items[0].sellerId.city || ""
       } : null),
       selfDeliveryDetails: order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null,
-      deliveryOtp: order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.deliveryOtp || (order.orderId ? String(order.orderId).replace(/\D/g, '').slice(-4) : "") || "4829",
+      deliveryOtp: (() => {
+        if (hasReturn || isCancelled || ['delivered', 'completed', 'refunded', 'returned'].includes(currentStatus)) {
+          return null;
+        }
+        let resolvedOtp = String(order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.deliveryOtp || '').trim();
+        if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
+          resolvedOtp = Math.floor(1000 + Math.random() * 9000).toString();
+          order.deliveryOtp = resolvedOtp;
+          if (order._id) {
+            Order.updateOne({ _id: order._id }, { $set: { deliveryOtp: resolvedOtp, "selfDeliveryDetails.deliveryOtp": resolvedOtp } }).catch(() => {});
+          }
+        }
+        return resolvedOtp;
+      })(),
       steps: standardSteps.map((step, idx) => ({
         ...step,
         isCompleted: isCancelled ? false : currentStepIndex >= idx,
@@ -1601,12 +1792,20 @@ export const updateOrder = async (req, res) => {
       } else if (newStatusKey === "refund_initiated") {
         existingOrder.refundStatus = "Refund Initiated";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_initiated";
-      } else if (newStatusKey === "refund_completed") {
+      } else if (newStatusKey === "refund_completed" || newStatusKey === "refunded") {
         existingOrder.paymentStatus = "refunded";
         existingOrder.refundStatus = "Refund Completed";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_completed";
-      } else if (newStatusKey === "return_approved") {
+      } else if (newStatusKey === "exchanged") {
+        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchanged";
+      } else if (newStatusKey === "exchange_dispatched") {
+        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchange_dispatched";
+      } else if (newStatusKey === "pickup_scheduled") {
+        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "pickup_scheduled";
+      } else if (newStatusKey === "return_approved" || newStatusKey === "approved") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "approved";
+      } else if (newStatusKey === "exchange_approved") {
+        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchange_approved";
       } else if (newStatusKey === "product_return_received" || newStatusKey === "product_received") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "product_received";
       }
@@ -1627,7 +1826,7 @@ export const updateOrder = async (req, res) => {
             const seller = await Seller.findById(item.sellerId);
             if (seller) {
               const itemTotal = item.total || (item.finalPrice || item.price) * (item.quantity || 1);
-              const commissionRate = seller.commissionPercentage !== undefined ? seller.commissionPercentage : (seller.commissionRate !== undefined ? seller.commissionRate : 5);
+              const commissionRate = Number(item.commissionRate ?? existingOrder.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 5);
               const commissionAmount = Math.round(((itemTotal * commissionRate) / 100) * 100) / 100;
               const sellerEarnings = Math.max(0, itemTotal - commissionAmount);
 
@@ -1733,11 +1932,27 @@ export const updateOrder = async (req, res) => {
     }
 
     existingOrder.markModified("items");
+    existingOrder.markModified("selfDeliveryDetails");
+    existingOrder.markModified("thirdPartyDetails");
     existingOrder.markModified("overallStatus");
     existingOrder.markModified("status");
     existingOrder.markModified("timeline");
 
     await existingOrder.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: existingOrder.orderId,
+        masterOrderId: existingOrder.masterOrderId,
+        sellerId: existingOrder.sellerId,
+        total: existingOrder.totalAmount,
+        status: existingOrder.overallStatus || existingOrder.status
+      });
+    } catch (rtErr) {
+      console.warn("⚠️ Realtime broadcast error (updateOrder):", rtErr.message);
+    }
+
     res.json({ success: true, message: "Order updated successfully", order: existingOrder, whatsappDispatch: whatsappDispatchResult });
   } catch (error) {
     res.status(400).json({ message: "Failed to update order", error: error.message });
@@ -2083,22 +2298,33 @@ export const downloadInvoice = async (req, res) => {
 export const downloadCreditNote = async (req, res) => {
   try {
     const { id } = req.params;
-    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    const cleanId = String(id).trim().replace(/^#+/, "");
+    const isMongoId = mongoose.Types.ObjectId.isValid(cleanId);
     let order = isMongoId
-      ? await Order.findById(id)
+      ? await Order.findById(cleanId)
           .populate("userId", "name email phone addresses")
           .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
       : null;
     if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+      order = await Order.findOne({ $or: [{ orderId: cleanId }, { id: cleanId }, { masterOrderId: cleanId }] })
         .populate("userId", "name email phone addresses")
         .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
+    }
+
+    if (!order) {
+      try {
+        const SchoolBulkOrder = (await import("../models/SchoolBulkOrder.js")).default;
+        order = await SchoolBulkOrder.findOne(
+          isMongoId ? { $or: [{ _id: cleanId }, { orderId: cleanId }, { id: cleanId }] } : { $or: [{ orderId: cleanId }, { id: cleanId }] }
+        );
+      } catch (e) {}
     }
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const clientPhone = String(req.headers["x-user-phone"] || req.query.phone || "").replace(/\D/g, "");
     if (req.user) {
       const isOwner =
         order.user?.toString() === req.user.id ||
@@ -2108,25 +2334,31 @@ export const downloadCreditNote = async (req, res) => {
       const isAdmin = req.user.role === "admin";
       const isSeller =
         req.user.role === "seller" &&
-        order.items.some(
+        order.items?.some(
           (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
         );
 
       if (!isOwner && !isAdmin && !isSeller) {
         return res.status(403).json({ message: "Not authorized to download this credit note" });
       }
+    } else if (clientPhone) {
+      const ordPhone = String(order.customer?.phone || order.shippingAddress?.phone || "").replace(/\D/g, "");
+      if (ordPhone.length >= 10 && clientPhone.length >= 10 && !ordPhone.endsWith(clientPhone.slice(-10))) {
+        return res.status(403).json({ message: "Phone number does not match order record" });
+      }
     }
 
     const orderObj = order.toObject ? order.toObject() : order;
     const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
 
+    const filterSellerId = req.query.sellerId || req.headers["x-seller-id"] || null;
     const { generateCreditNotePDF } = await import("../services/invoiceService.js");
     const filename = `CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const pdfDoc = generateCreditNotePDF(enrichedOrder);
+    const pdfDoc = generateCreditNotePDF(enrichedOrder, filterSellerId);
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Download credit note error:", error);
@@ -2138,22 +2370,33 @@ export const downloadCreditNote = async (req, res) => {
 export const downloadExchangeInvoice = async (req, res) => {
   try {
     const { id } = req.params;
-    const isMongoId = mongoose.Types.ObjectId.isValid(id);
+    const cleanId = String(id).trim().replace(/^#+/, "");
+    const isMongoId = mongoose.Types.ObjectId.isValid(cleanId);
     let order = isMongoId
-      ? await Order.findById(id)
+      ? await Order.findById(cleanId)
           .populate("userId", "name email phone addresses")
           .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
       : null;
     if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+      order = await Order.findOne({ $or: [{ orderId: cleanId }, { id: cleanId }, { masterOrderId: cleanId }] })
         .populate("userId", "name email phone addresses")
         .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
+    }
+
+    if (!order) {
+      try {
+        const SchoolBulkOrder = (await import("../models/SchoolBulkOrder.js")).default;
+        order = await SchoolBulkOrder.findOne(
+          isMongoId ? { $or: [{ _id: cleanId }, { orderId: cleanId }, { id: cleanId }] } : { $or: [{ orderId: cleanId }, { id: cleanId }] }
+        );
+      } catch (e) {}
     }
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const clientPhone = String(req.headers["x-user-phone"] || req.query.phone || "").replace(/\D/g, "");
     if (req.user) {
       const isOwner =
         order.user?.toString() === req.user.id ||
@@ -2163,25 +2406,31 @@ export const downloadExchangeInvoice = async (req, res) => {
       const isAdmin = req.user.role === "admin";
       const isSeller =
         req.user.role === "seller" &&
-        order.items.some(
+        order.items?.some(
           (item) => item.sellerId && (item.sellerId._id || item.sellerId).toString() === req.user.id
         );
 
       if (!isOwner && !isAdmin && !isSeller) {
         return res.status(403).json({ message: "Not authorized to download this exchange invoice" });
       }
+    } else if (clientPhone) {
+      const ordPhone = String(order.customer?.phone || order.shippingAddress?.phone || "").replace(/\D/g, "");
+      if (ordPhone.length >= 10 && clientPhone.length >= 10 && !ordPhone.endsWith(clientPhone.slice(-10))) {
+        return res.status(403).json({ message: "Phone number does not match order record" });
+      }
     }
 
     const orderObj = order.toObject ? order.toObject() : order;
     const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
 
+    const filterSellerId = req.query.sellerId || req.headers["x-seller-id"] || null;
     const { generateExchangeInvoicePDF } = await import("../services/invoiceService.js");
     const filename = `ExchangeInvoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const pdfDoc = generateExchangeInvoicePDF(enrichedOrder);
+    const pdfDoc = generateExchangeInvoicePDF(enrichedOrder, filterSellerId);
     pdfDoc.pipe(res);
   } catch (error) {
     console.error("Download exchange invoice error:", error);
@@ -2272,6 +2521,17 @@ export const cancelOrder = async (req, res) => {
 
 
     await order.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: order.orderId,
+        masterOrderId: order.masterOrderId,
+        sellerId: order.sellerId,
+        status: "Cancelled"
+      });
+    } catch (rtErr) {}
+
     return res.json({ success: true, message: "Order cancelled successfully", order });
   } catch (error) {
     return res.status(500).json({ message: "Failed to cancel order", error: error.message });
@@ -2452,7 +2712,7 @@ export const requestReturnExchange = async (req, res) => {
       refundDetails: formattedRefundDetails,
       requestedAt: new Date(),
       updatedAt: new Date(),
-      status: "requested",
+      status: type === "exchange" ? "exchange_requested" : "return_requested",
       returnEligibleUntil
     };
 
@@ -2478,6 +2738,17 @@ export const requestReturnExchange = async (req, res) => {
     });
 
     await order.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: order.orderId,
+        masterOrderId: order.masterOrderId,
+        sellerId: order.sellerId,
+        status: order.overallStatus || order.status
+      });
+    } catch (rtErr) {}
+
     return res.json({
       success: true,
       message: `${type === 'exchange' ? 'Exchange' : 'Return'} request submitted successfully`,
@@ -2493,14 +2764,17 @@ export const updateReturnExchangeStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      status, // "approved", "rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"
+      status, // "approved", "return_approved", "exchange_approved", "rejected", "return_rejected", "exchange_rejected", "pickup_scheduled", "product_received", "refund_initiated", "refund_processed", "refund_completed", "exchange_dispatched", "exchanged"
       rejectionReason,
       pickupDate,
-      refundTxnId,
+      refundTxnId: rawRefundTxnId,
+      refundTransactionId,
       exchangeAwb,
       exchangeCourier,
       notes
     } = req.body;
+
+    const refundTxnId = rawRefundTxnId || refundTransactionId;
 
     if (!status) {
       return res.status(400).json({ message: "Status is required" });
@@ -2517,9 +2791,90 @@ export const updateReturnExchangeStatus = async (req, res) => {
     }
 
     const type = order.returnRequest.type; // "return" or "exchange"
-    const formattedStatus = status.toLowerCase().trim();
+    const rawStatus = String(status).toLowerCase().trim().replace(/[\s-]+/g, "_");
 
-    order.returnRequest.status = formattedStatus;
+    let canonicalReturnStatus = rawStatus;
+    let overallStatus = order.overallStatus;
+    let title = "";
+    let description = notes || "";
+
+    if (rawStatus === "approved" || rawStatus === "return_approved" || rawStatus === "exchange_approved") {
+      canonicalReturnStatus = type === "exchange" ? "exchange_approved" : "return_approved";
+      overallStatus = canonicalReturnStatus;
+      title = type === "exchange" ? "Exchange Request Approved" : "Return Request Approved";
+      description = description || `Store Admin/Seller approved the ${type} request. Pickup will be arranged.`;
+    } else if (rawStatus === "rejected" || rawStatus === "return_rejected" || rawStatus === "exchange_rejected") {
+      canonicalReturnStatus = type === "exchange" ? "exchange_rejected" : "return_rejected";
+      overallStatus = canonicalReturnStatus;
+      title = type === "exchange" ? "Exchange Request Rejected" : "Return Request Rejected";
+      description = description || `Request rejected. Reason: ${rejectionReason || "Criteria not met"}`;
+    } else if (rawStatus === "pickup_scheduled") {
+      canonicalReturnStatus = "pickup_scheduled";
+      overallStatus = "pickup_scheduled";
+      title = type === "exchange" ? "Exchange Pickup Scheduled" : "Return Pickup Scheduled";
+      description = description || `Pickup scheduled for ${pickupDate ? new Date(pickupDate).toLocaleDateString('en-IN') : 'upcoming business days'}.`;
+    } else if (rawStatus === "product_received" || rawStatus === "product_return_received") {
+      canonicalReturnStatus = "product_received";
+      overallStatus = "product_received";
+      title = "Returned Item Received & Inspected";
+      description = description || `Item received back at warehouse and passed quality inspection. Stock restored to inventory.`;
+      
+      if (!order.stockRestored && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          try {
+            await incrementItemStock(item);
+          } catch (err) {
+            console.warn("Stock restoration warning:", err.message);
+          }
+        }
+        order.stockRestored = true;
+      }
+    } else if (rawStatus === "refund_initiated") {
+      canonicalReturnStatus = "refund_initiated";
+      overallStatus = "refund_initiated";
+      order.refundStatus = "Refund Initiated";
+      title = "Refund Initiated";
+      description = description || `Refund payout initiated to customer's account.`;
+    } else if (rawStatus === "refund_completed" || rawStatus === "refund_processed" || rawStatus === "refunded") {
+      canonicalReturnStatus = "refund_completed";
+      overallStatus = "refund_completed";
+      order.paymentStatus = "refunded";
+      order.refundStatus = "Refund Completed";
+      if (refundTxnId) {
+        order.refundDetails = { ...(order.refundDetails || {}), refundTxnId, status: "Completed" };
+      }
+      title = "Refund Processed & Completed";
+      description = description || `Refund successfully processed. Reference TXN: ${refundTxnId || "N/A"}.`;
+
+      if (!order.stockRestored && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          try {
+            await incrementItemStock(item);
+          } catch (err) {}
+        }
+        order.stockRestored = true;
+      }
+    } else if (rawStatus === "exchange_dispatched") {
+      canonicalReturnStatus = "exchange_dispatched";
+      overallStatus = "exchange_dispatched";
+      title = "Replacement Exchange Unit Dispatched";
+      description = description || `Replacement item dispatched via ${exchangeCourier || "Courier"} (AWB: ${exchangeAwb || "N/A"}).`;
+      if (exchangeAwb) {
+        order.trackingNumber = exchangeAwb;
+        order.courierName = exchangeCourier || order.courierName || "Shiprocket";
+      }
+    } else if (rawStatus === "exchanged") {
+      canonicalReturnStatus = "exchanged";
+      overallStatus = "exchanged";
+      title = "Exchange Completed";
+      description = description || `Exchange order completed and replacement delivered to customer.`;
+    } else {
+      canonicalReturnStatus = rawStatus;
+      overallStatus = rawStatus;
+      title = `Return/Exchange Status: ${normalizeOrderStatus(rawStatus, order)}`;
+    }
+
+    order.returnRequest.status = canonicalReturnStatus;
     order.returnRequest.updatedAt = new Date();
 
     if (rejectionReason) order.returnRequest.rejectionReason = rejectionReason;
@@ -2527,83 +2882,6 @@ export const updateReturnExchangeStatus = async (req, res) => {
     if (refundTxnId) order.returnRequest.refundTxnId = refundTxnId;
     if (exchangeAwb) order.returnRequest.exchangeAwb = exchangeAwb;
     if (exchangeCourier) order.returnRequest.exchangeCourier = exchangeCourier;
-
-    let overallStatus = order.overallStatus;
-    let title = "";
-    let description = notes || "";
-
-    switch (formattedStatus) {
-      case "approved":
-        overallStatus = type === "exchange" ? "exchange_approved" : "return_approved";
-        title = type === "exchange" ? "Exchange Request Approved" : "Return Request Approved";
-        description = description || `Merchant/Admin approved the ${type} request. Pickup will be arranged.`;
-        break;
-
-      case "rejected":
-        overallStatus = type === "exchange" ? "exchange_rejected" : "return_rejected";
-        title = type === "exchange" ? "Exchange Request Rejected" : "Return Request Rejected";
-        description = description || `Request rejected. Reason: ${rejectionReason || "Criteria not met"}`;
-        break;
-
-      case "pickup_scheduled":
-        overallStatus = "pickup_scheduled";
-        title = "Return Pickup Scheduled";
-        description = description || `Pickup scheduled for ${pickupDate ? new Date(pickupDate).toLocaleDateString('en-IN') : 'upcoming business days'}.`;
-        break;
-
-      case "product_received":
-        overallStatus = "product_received";
-        title = "Returned Item Received & Inspected";
-        description = description || `Item received back at merchant warehouse and passed quality inspection.`;
-        
-        if (!order.stockRestored && Array.isArray(order.items)) {
-          for (const item of order.items) {
-            try {
-              await incrementItemStock(item);
-            } catch (err) {
-              console.warn("Stock restoration warning:", err.message);
-            }
-          }
-          order.stockRestored = true;
-        }
-        break;
-
-      case "refund_initiated":
-      case "refund_processed":
-      case "refund_completed":
-        overallStatus = "refund_completed";
-        order.paymentStatus = "refunded";
-        order.refundStatus = "Refund Completed";
-        if (refundTxnId) order.refundDetails = { ...order.refundDetails, refundTxnId, status: "Completed" };
-        title = "Refund Processed & Completed";
-        description = description || `Refund successfully processed. Reference TXN: ${refundTxnId || "N/A"}.`;
-
-        if (!order.stockRestored && Array.isArray(order.items)) {
-          for (const item of order.items) {
-            try {
-              await incrementItemStock(item);
-            } catch (err) {}
-          }
-          order.stockRestored = true;
-        }
-        break;
-
-      case "exchange_dispatched":
-        overallStatus = "exchange_dispatched";
-        title = "Replacement Exchange Unit Dispatched";
-        description = description || `Replacement item dispatched via ${exchangeCourier || "Courier"} (AWB: ${exchangeAwb || "N/A"}).`;
-        break;
-
-      case "exchanged":
-        overallStatus = "exchanged";
-        title = "Exchange Completed";
-        description = description || `Exchange order completed and replacement delivered to customer.`;
-        break;
-
-      default:
-        overallStatus = formattedStatus;
-        title = `Return/Exchange Status: ${formattedStatus}`;
-    }
 
     order.overallStatus = overallStatus;
     order.status = overallStatus;
@@ -2625,9 +2903,19 @@ export const updateReturnExchangeStatus = async (req, res) => {
 
     await order.save();
 
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: order.orderId,
+        masterOrderId: order.masterOrderId,
+        sellerId: order.sellerId,
+        status: overallStatus
+      });
+    } catch (rtErr) {}
+
     return res.json({
       success: true,
-      message: `Return/Exchange status updated to ${formattedStatus}`,
+      message: `Return/Exchange status updated to ${normalizeOrderStatus(canonicalReturnStatus, order)}`,
       order
     });
   } catch (error) {

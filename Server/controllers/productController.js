@@ -255,8 +255,12 @@ export const getProducts = async (req, res) => {
     let products = [];
 
     try {
-      totalProducts = await Product.countDocuments(filter);
-      products = await Product.find(filter).sort(sortOption).skip(skip).limit(limitNum).lean();
+      const [countResult, productsResult] = await Promise.all([
+        Product.countDocuments(filter),
+        Product.find(filter).sort(sortOption).skip(skip).limit(limitNum).lean()
+      ]);
+      totalProducts = countResult;
+      products = productsResult;
     } catch (e) {
       console.warn("DB product query failed:", e.message);
     }

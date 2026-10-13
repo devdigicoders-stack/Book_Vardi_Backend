@@ -5,9 +5,10 @@ import Seller from "../models/Seller.js";
 import User from "../models/User.js";
 import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus, STAGE_RANK } from "./orderController.js";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
+import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 
 // Canonical Order Status Normalizer
-export const normalizeOrderStatus = (raw) => {
+export const normalizeOrderStatus = (raw, contextOrder = null) => {
   if (!raw) return "Pending";
   const s = String(raw).toLowerCase().trim().replace(/[\s-]+/g, "_");
   if (s === "delivered" || s === "completed") return "Delivered";
@@ -19,15 +20,30 @@ export const normalizeOrderStatus = (raw) => {
   if (s === "cancelled" || s === "canceled") return "Cancelled";
   if (s === "return_requested") return "Return Requested";
   if (s === "return_approved") return "Return Approved";
-  if (s === "product_return_received" || s === "product_received") return "Product Return Received";
+  if (s === "return_rejected") return "Return Rejected";
+  if (s === "exchange_requested") return "Exchange Requested";
+  if (s === "exchange_approved") return "Exchange Approved";
+  if (s === "exchange_rejected") return "Exchange Rejected";
+  if (s === "pickup_scheduled") return "Pickup Scheduled";
+  if (s === "product_return_received" || s === "product_received") return "Product Received";
   if (s === "refund_requested") return "Refund Requested";
   if (s === "refund_approved") return "Refund Approved";
   if (s === "refund_initiated") return "Refund Initiated";
   if (s === "refund_completed" || s === "refunded") return "Refund Completed";
-  if (s === "exchange_requested") return "Exchange Requested";
-  if (s === "exchange_approved") return "Exchange Approved";
   if (s === "exchange_dispatched") return "Exchange Dispatched";
   if (s === "exchanged") return "Exchanged";
+  if (s === "requested") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Requested" : "Return Requested";
+  }
+  if (s === "approved") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Approved" : "Return Approved";
+  }
+  if (s === "rejected") {
+    const isEx = contextOrder?.returnRequest?.type === 'exchange';
+    return isEx ? "Exchange Rejected" : "Return Rejected";
+  }
   if (s === "pending" || s === "placed") return "Pending";
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
@@ -82,7 +98,11 @@ const getExpandedSellerScope = async (req) => {
     let primaryScopeStoreName = req.seller?.storeName || req.user?.storeName || "";
 
     if (orConditions.length > 0) {
-      const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email storeName legalName");
+      const [sellerDocs, userDocs] = await Promise.all([
+        Seller.find({ $or: orConditions }).select("_id phone email storeName legalName").lean(),
+        User.find({ $or: orConditions }).select("_id phone email name").lean()
+      ]);
+
       sellerDocs.forEach((doc) => {
         if (doc._id) {
           sellerSet.add(doc._id);
@@ -106,7 +126,6 @@ const getExpandedSellerScope = async (req) => {
         if (doc.email) sellerSet.add(doc.email);
       });
 
-      const userDocs = await User.find({ $or: orConditions }).select("_id phone email name");
       userDocs.forEach((doc) => {
         if (doc._id) {
           sellerSet.add(doc._id);
@@ -159,7 +178,7 @@ const getExpandedSellerScope = async (req) => {
     }
 
     const sellerProducts = productOrConditions.length > 0
-      ? await Product.find({ $or: productOrConditions }).select("_id id name title")
+      ? await Product.find({ $or: productOrConditions }).select("_id id name title").lean()
       : [];
 
     const productIds = sellerProducts.map((p) => p._id);
@@ -284,18 +303,27 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   const resolvedSubtotal = computedItemsSubtotal;
 
   // Compute status strictly from THIS seller's items to prevent other sellers' changes from corrupting this dashboard
-  const sellerComputedStatus = relevantItems.length > 0 ? calculateOverallOrderStatus(relevantItems) : null;
-  const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status) !== "Pending")?.status;
+  const sellerComputedStatus = relevantItems.length > 0 ? calculateOverallOrderStatus(relevantItems, o) : null;
+  const sellerItemStatus = relevantItems.find(i => i.status && normalizeOrderStatus(i.status, o) !== "Pending")?.status;
   const hasActiveReturnRequest = o.returnRequest &&
     typeof o.returnRequest === "object" &&
     Boolean(o.returnRequest.type && !['none', 'n/a', '', 'null'].includes(String(o.returnRequest.type).toLowerCase().trim())) &&
     Boolean(o.returnRequest.status && !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(o.returnRequest.status).toLowerCase().trim()));
 
+  const reqType = String(o.returnRequest?.type || '').toLowerCase();
   const rawStatus = hasActiveReturnRequest
-    ? o.returnRequest.status
+    ? (
+        o.returnRequest.status === 'requested'
+          ? (reqType === 'exchange' ? 'exchange_requested' : 'return_requested')
+          : o.returnRequest.status === 'approved'
+          ? (reqType === 'exchange' ? 'exchange_approved' : 'return_approved')
+          : o.returnRequest.status === 'rejected'
+          ? (reqType === 'exchange' ? 'exchange_rejected' : 'return_rejected')
+          : o.returnRequest.status
+      )
     : (sellerComputedStatus || sellerItemStatus || o.overallStatus || o.status || "Pending");
 
-  const formattedStatus = normalizeOrderStatus(rawStatus);
+  const formattedStatus = normalizeOrderStatus(rawStatus, o);
 
   let rawOrderId = o.orderId || o.id;
   if (!rawOrderId || /^[0-9a-fA-F]{24}$/.test(rawOrderId)) {
@@ -344,14 +372,16 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     returnRequest: o.returnRequest || null,
     refundDetails: o.refundDetails || o.returnRequest?.refundDetails || null,
     timeline: o.timeline || [],
-    shippingAddress: typeof o.shippingAddress === "string"
+    shippingAddress: (o.shippingAddress && typeof o.shippingAddress === "object")
       ? o.shippingAddress
-      : (o.shippingAddress?.street ? `${o.shippingAddress.street}, ${o.shippingAddress.city || ""}` : "Customer Address"),
-    deliveryMode: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
-    deliveryType: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : ""))),
-    trackingNumber: o.trackingNumber || orderItems[0]?.thirdPartyDetails?.trackingNumber || "",
-    courierName: o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || "",
-    trackingUrl: o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || "",
+      : (typeof o.shippingAddress === "string" && o.shippingAddress
+          ? o.shippingAddress
+          : (o.address ? { street: o.address } : "Customer Address")),
+    deliveryMode: (o.deliveryMode === "self_delivery" || (!o.deliveryMode && o.selfDeliveryDetails?.deliveryPartnerToken)) ? "self_delivery" : (o.deliveryMode === "third_party" ? "third_party" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : "pending_choice"))),
+    deliveryType: (o.deliveryMode === "self_delivery" || (!o.deliveryMode && o.selfDeliveryDetails?.deliveryPartnerToken)) ? "self_delivery" : (o.deliveryMode === "third_party" ? "third_party" : (o.courierName ? "third_party" : (orderItems[0]?.deliveryType === "self" || orderItems[0]?.deliveryType === "self_delivery" ? "self_delivery" : "pending_choice"))),
+    trackingNumber: (o.deliveryMode === "self_delivery" || (!o.deliveryMode && o.selfDeliveryDetails?.deliveryPartnerToken)) ? (o.selfDeliveryDetails?.deliveryPartnerToken || o.trackingNumber || "") : (o.trackingNumber || orderItems[0]?.thirdPartyDetails?.trackingNumber || ""),
+    courierName: (o.deliveryMode === "self_delivery" || (!o.deliveryMode && o.selfDeliveryDetails?.deliveryPartnerToken)) ? "" : (o.courierName || orderItems[0]?.thirdPartyDetails?.courierName || ""),
+    trackingUrl: (o.deliveryMode === "self_delivery" || (!o.deliveryMode && o.selfDeliveryDetails?.deliveryPartnerToken)) ? (o.selfDeliveryDetails?.trackingUrl || o.trackingUrl || "") : (o.trackingUrl || orderItems[0]?.thirdPartyDetails?.trackingUrl || ""),
     sellerDetails: o.sellerDetails || orderItems[0]?.sellerDetails || null,
     sellerStoreName: o.sellerStoreName || o.storeName || orderItems[0]?.sellerStoreName || orderItems[0]?.storeName || o.sellerDetails?.storeName || scope?.storeName || "",
     storeName: o.storeName || o.sellerStoreName || orderItems[0]?.storeName || orderItems[0]?.sellerStoreName || o.sellerDetails?.storeName || scope?.storeName || "",
@@ -368,6 +398,12 @@ export const formatSellerSingleOrder = (o, scope = null) => {
       size: item.size || "",
       color: item.color || "",
       image: item.image || "",
+      gst: item.gst !== undefined ? item.gst : (item.gstRate ?? item.gstPercent ?? 5),
+      gstPercent: item.gstPercent !== undefined ? item.gstPercent : (item.gstRate ?? item.gst ?? 5),
+      gstPercentage: item.gstPercentage !== undefined ? item.gstPercentage : (item.gstRate ?? item.gst ?? 5),
+      gstRate: item.gstRate !== undefined ? item.gstRate : (item.gstPercent ?? item.gst ?? 5),
+      isGstInclusive: item.isGstInclusive !== false,
+      category: item.category || "Stationery",
       status: normalizeOrderStatus(item.status || formattedStatus),
       deliveryType: item.deliveryType || o.deliveryMode || "",
       selfDeliveryDetails: sanitizeSelfDeliveryForSeller(item.selfDeliveryDetails || o.selfDeliveryDetails),
@@ -385,7 +421,7 @@ export const formatSellerSingleOrder = (o, scope = null) => {
 export const getSellerOrders = async (req, res) => {
   try {
     const scope = await getExpandedSellerScope(req);
-    const orders = await Order.find(scope.filter).sort({ createdAt: -1 });
+    const orders = await Order.find(scope.filter).sort({ createdAt: -1 }).lean();
     const formattedOrders = orders.map((o) => formatSellerSingleOrder(o, scope));
     res.json(formattedOrders.filter(Boolean));
   } catch (error) {
@@ -398,7 +434,7 @@ export const getSellerOrders = async (req, res) => {
 export const getSellerCustomers = async (req, res) => {
   try {
     const { expandedSellerIds, allProductKeys, productNameRegexes, filter } = await getExpandedSellerScope(req);
-    const orders = await Order.find(filter).sort({ createdAt: -1 });
+    const orders = await Order.find(filter).sort({ createdAt: -1 }).lean();
 
     const customerMap = new Map();
 
@@ -551,39 +587,13 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       });
     }
 
-    // 🔒 Enforce delivery partner immutability for this item once chosen
-    const existingItemMode = item.deliveryType || order.deliveryMode || "";
-    const existingItemCourier = String(item.thirdPartyDetails?.courierName || order.courierName || "").trim();
-    const existingItemSelf = Boolean(
-      item.selfDeliveryDetails?.deliveryPartnerToken ||
-      item.selfDeliveryDetails?.deliveryPersonName ||
-      order.selfDeliveryDetails?.deliveryPartnerToken
-    );
-
-    const isItemPartnerChosen = (existingItemMode === "third_party" && (existingItemCourier || item.thirdPartyDetails?.trackingNumber || order.trackingNumber)) ||
-                                (existingItemMode === "self_delivery" && existingItemSelf) ||
-                                ["shipped", "out for delivery", "delivered", "completed"].includes(String(item.status || "").toLowerCase());
-
-    if (isItemPartnerChosen) {
-      let incomingMode = deliveryMode || deliveryType;
-      if (incomingMode === "self") incomingMode = "self_delivery";
-      if (incomingMode === "courier") incomingMode = "third_party";
-
-      if (incomingMode && incomingMode !== existingItemMode) {
-        return res.status(400).json({
-          success: false,
-          message: `Delivery partner mode is permanently locked to '${existingItemMode === "self_delivery" ? "Self-Delivery (Store Fleet)" : "3rd-Party Courier"}' for this product item and cannot be changed.`
-        });
-      }
-
-      if (existingItemMode === "third_party" && existingItemCourier && thirdPartyDetails?.courierName) {
-        if (thirdPartyDetails.courierName.trim().toLowerCase() !== existingItemCourier.toLowerCase()) {
-          return res.status(400).json({
-            success: false,
-            message: `Courier partner '${existingItemCourier}' is permanently locked for this product item and cannot be changed.`
-          });
-        }
-      }
+    // Check if item is already delivered/completed
+    const isItemFinal = ["delivered", "completed", "cancelled", "canceled"].includes(String(item.status || "").toLowerCase());
+    if (isItemFinal && !status) {
+      return res.status(400).json({
+        success: false,
+        message: `Product item is already '${item.status}' and cannot be modified.`
+      });
     }
 
     let rawMode = deliveryMode || deliveryType || item.deliveryType || "pending_choice";
@@ -623,7 +633,7 @@ export const updateSellerOrderItemStatus = async (req, res) => {
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      const otpVal = selfDeliveryDetails.deliveryOtp || order.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
 
       item.selfDeliveryDetails = {
         ...item.selfDeliveryDetails,
@@ -632,6 +642,8 @@ export const updateSellerOrderItemStatus = async (req, res) => {
         trackingUrl: trackingLink,
         deliveryOtp: otpVal
       };
+      item.deliveryOtp = otpVal;
+      order.deliveryOtp = otpVal;
       order.selfDeliveryDetails = item.selfDeliveryDetails;
       order.trackingUrl = trackingLink;
       order.trackingNumber = tokenVal;
@@ -660,6 +672,16 @@ export const updateSellerOrderItemStatus = async (req, res) => {
 
     order.markModified('items');
     await order.save();
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: order.orderId,
+        masterOrderId: order.masterOrderId,
+        sellerId: sellerInfo._id || sellerInfo.id,
+        status: order.overallStatus || order.status
+      });
+    } catch (rtErr) {}
 
     const sanitizedItem = { ...(item.toObject ? item.toObject() : item) };
     if (sanitizedItem.selfDeliveryDetails) {
@@ -702,38 +724,13 @@ export const updateSellerOrderStatus = async (req, res) => {
 
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // 🔒 Enforce delivery partner immutability once chosen
-    const existingMode = order.deliveryMode || (order.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : (order.courierName ? "third_party" : ""));
-    const existingCourier = String(order.courierName || order.shipmentDetails?.courierPartnerName || "").trim();
-    const existingSelf = Boolean(
-      order.selfDeliveryDetails?.deliveryPartnerToken ||
-      order.selfDeliveryDetails?.deliveryPersonName
-    );
-
-    const isExistingPartnerChosen = (existingMode === "third_party" && (existingCourier || order.trackingNumber)) ||
-                                    (existingMode === "self_delivery" && existingSelf) ||
-                                    ["shipped", "out for delivery", "delivered", "completed"].includes(String(order.overallStatus || order.status || "").toLowerCase());
-
-    if (isExistingPartnerChosen) {
-      let incomingMode = deliveryMode || deliveryType;
-      if (incomingMode === "self") incomingMode = "self_delivery";
-      if (incomingMode === "courier") incomingMode = "third_party";
-
-      if (incomingMode && incomingMode !== existingMode) {
-        return res.status(400).json({
-          success: false,
-          message: `Delivery mode is permanently locked to '${existingMode === "self_delivery" ? "Self-Delivery (Store Fleet)" : "3rd-Party Courier"}' for this order and cannot be changed.`
-        });
-      }
-
-      if (existingMode === "third_party" && existingCourier && courierName) {
-        if (courierName.trim().toLowerCase() !== existingCourier.toLowerCase()) {
-          return res.status(400).json({
-            success: false,
-            message: `Courier partner '${existingCourier}' is permanently locked for this order and cannot be changed.`
-          });
-        }
-      }
+    // Check if order is already completed
+    const isOrderFinal = ["delivered", "completed", "cancelled", "canceled"].includes(String(order.overallStatus || order.status || "").toLowerCase());
+    if (isOrderFinal && !status) {
+      return res.status(400).json({
+        success: false,
+        message: `Order is already '${order.overallStatus || order.status}' and cannot be modified.`
+      });
     }
 
     const formattedStatus = status
@@ -753,10 +750,12 @@ export const updateSellerOrderStatus = async (req, res) => {
     let computedTrackingUrl = trackingUrl || "";
     let effectiveAwb = "";
     if (resolvedMode === "third_party") {
-      if (courierName) order.courierName = courierName;
+      order.courierName = courierName || order.courierName || "Shiprocket";
+      order.carrier = order.courierName;
+      order.selfDeliveryDetails = undefined;
       effectiveAwb = trackingNumber || order.trackingNumber || "";
-      if (!effectiveAwb && (courierName || order.courierName)) {
-        const courierPrefix = String(courierName || order.courierName || "BLUEDART")
+      if (!effectiveAwb || effectiveAwb.startsWith("DLV-")) {
+        const courierPrefix = String(order.courierName || "SHIPROCKET")
           .toUpperCase()
           .replace(/[^A-Z0-9]/g, "")
           .slice(0, 10) || "COURIER";
@@ -776,7 +775,7 @@ export const updateSellerOrderStatus = async (req, res) => {
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      const otpVal = selfDeliveryDetails?.deliveryOtp || order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
 
       const sanitizeDriverLocation = (rawLoc) => {
         if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
@@ -802,7 +801,14 @@ export const updateSellerOrderStatus = async (req, res) => {
         driverLocation: inputDriverLoc
       };
 
+      order.deliveryOtp = otpVal;
       order.selfDeliveryDetails = mergedSelf;
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.deliveryOtp = otpVal;
+          if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = otpVal;
+        });
+      }
       order.trackingUrl = trackingLink;
       order.trackingNumber = tokenVal;
     }
@@ -834,19 +840,21 @@ export const updateSellerOrderStatus = async (req, res) => {
       sellerDetails: sellerInfo
     };
 
-    if (order.returnRequest && (!order.returnRequest.type || ['none', 'n/a', '', 'null'].includes(String(order.returnRequest.type).toLowerCase().trim()))) {
-      updatePayload['returnRequest.status'] = 'no_request';
-    }
+    // Keep returnRequest intact if active
 
     if (formattedStatus.toLowerCase().includes("delivered")) {
       updatePayload.deliveredAt = order.deliveredAt || new Date();
     }
 
     if (resolvedMode === "third_party") {
-      if (courierName) updatePayload.courierName = courierName;
+      updatePayload.courierName = order.courierName || courierName || "Shiprocket";
+      updatePayload.carrier = updatePayload.courierName;
+      updatePayload.selfDeliveryDetails = null;
       if (effectiveAwb) updatePayload.trackingNumber = effectiveAwb;
       if (computedTrackingUrl) updatePayload.trackingUrl = computedTrackingUrl;
     } else if (resolvedMode === "self_delivery" && mergedSelf) {
+      updatePayload.courierName = "";
+      updatePayload.carrier = "";
       updatePayload.selfDeliveryDetails = mergedSelf;
       updatePayload.trackingUrl = mergedSelf.trackingUrl;
       updatePayload.trackingNumber = mergedSelf.deliveryPartnerToken;
@@ -913,21 +921,31 @@ export const updateSellerOrderStatus = async (req, res) => {
           sellerPhone: sellerInfo.phone,
           ...(resolvedMode === "third_party" ? {
             thirdPartyDetails: {
-              ...itemObj.thirdPartyDetails,
-              courierName: courierName || itemObj.thirdPartyDetails?.courierName || order.courierName,
+              ...(itemObj.thirdPartyDetails || {}),
+              courierName: order.courierName || courierName || "Shiprocket",
               trackingNumber: effectiveAwb || itemObj.thirdPartyDetails?.trackingNumber || order.trackingNumber,
               trackingUrl: computedTrackingUrl || itemObj.thirdPartyDetails?.trackingUrl,
               estimatedDeliveryDate: estimatedDeliveryDate || itemObj.thirdPartyDetails?.estimatedDeliveryDate
-            }
+            },
+            selfDeliveryDetails: null
           } : {}),
-          ...(resolvedMode === "self_delivery" && mergedSelf ? { selfDeliveryDetails: mergedSelf } : {})
+          ...(resolvedMode === "self_delivery" && mergedSelf ? {
+            selfDeliveryDetails: mergedSelf,
+            thirdPartyDetails: null
+          } : {})
         };
       });
 
       updatePayload.items = updatedItems;
-      const recomputedOverall = calculateOverallOrderStatus(updatedItems);
-      updatePayload.status = recomputedOverall;
-      updatePayload.overallStatus = recomputedOverall;
+      const recomputedOverall = calculateOverallOrderStatus(updatedItems, order);
+      const hasActiveReturn = order.returnRequest &&
+        order.returnRequest.type &&
+        !['none', 'n/a', '', 'null'].includes(String(order.returnRequest.type).toLowerCase().trim()) &&
+        !['none', 'n/a', 'no_request', 'normal', 'null', ''].includes(String(order.returnRequest.status || '').toLowerCase().trim());
+      if (!hasActiveReturn) {
+        updatePayload.status = recomputedOverall;
+        updatePayload.overallStatus = recomputedOverall;
+      }
     }
 
     // Update MongoDB directly using updateOne
@@ -937,6 +955,16 @@ export const updateSellerOrderStatus = async (req, res) => {
     const updatedOrder = await Order.findById(order._id);
     const scope = await getExpandedSellerScope(req);
     const formattedResult = formatSellerSingleOrder(updatedOrder, scope) || updatedOrder;
+
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_UPDATED",
+        orderId: updatedOrder?.orderId || order.orderId,
+        masterOrderId: updatedOrder?.masterOrderId || order.masterOrderId,
+        sellerId: updatedOrder?.sellerId || order.sellerId,
+        status: updatedOrder?.overallStatus || updatedOrder?.status || formattedStatus
+      });
+    } catch (rtErr) {}
 
     res.json({
       success: true,
@@ -1056,5 +1084,61 @@ export const downloadSellerInvoice = async (req, res) => {
       return res.status(400).json({ message: error.message });
     }
     res.status(500).json({ message: "Failed to generate seller invoice", error: error.message });
+  }
+};
+
+// 6. Download Seller Credit Note PDF
+export const downloadSellerCreditNote = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const sellerId = resolveSellerId(req);
+    const order = await findOrderById(orderId);
+    if (order) {
+      await order.populate("items.productId", "name price images mrp");
+      await order.populate("items.sellerId", "storeName name phone city");
+    }
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const { generateCreditNotePDF } = await import("../services/invoiceService.js");
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const filename = `Seller_CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateCreditNotePDF(enrichedOrder, sellerId);
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error("Seller credit note download error:", error);
+    res.status(500).json({ message: "Failed to generate seller credit note", error: error.message });
+  }
+};
+
+// 7. Download Seller Exchange Invoice PDF
+export const downloadSellerExchangeInvoice = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const sellerId = resolveSellerId(req);
+    const order = await findOrderById(orderId);
+    if (order) {
+      await order.populate("items.productId", "name price images mrp");
+      await order.populate("items.sellerId", "storeName name phone city");
+    }
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const { generateExchangeInvoicePDF } = await import("../services/invoiceService.js");
+    const orderObj = order.toObject ? order.toObject() : order;
+    const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
+
+    const filename = `Seller_ExchangeInvoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateExchangeInvoicePDF(enrichedOrder, sellerId);
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error("Seller exchange invoice download error:", error);
+    res.status(500).json({ message: "Failed to generate seller exchange invoice", error: error.message });
   }
 };

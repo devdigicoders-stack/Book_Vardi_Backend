@@ -74,19 +74,25 @@ export const createShipment = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
 
-    // 🔒 Prevent overriding an existing delivery partner assignment
-    if (order.trackingNumber || (order.deliveryMode === 'third_party' && order.courierName) || order.deliveryMode === 'self_delivery' || order.shipmentDetails?.awbNumber) {
-      const existingPartner = order.deliveryMode === 'self_delivery' ? 'Self-Delivery' : (order.courierName || order.shipmentDetails?.courierPartnerName || 'Courier');
+    // Check if order is already completed or cancelled
+    const isCompleted = ["delivered", "completed", "cancelled", "canceled"].includes(String(order.overallStatus || order.status || "").toLowerCase());
+    if (isCompleted) {
       return res.status(400).json({
         success: false,
-        message: `A delivery partner (${existingPartner}) is already chosen and assigned to this order. It cannot be changed.`
+        message: `Order is already '${order.overallStatus || order.status}' and cannot be dispatched.`
       });
     }
 
     const result = await generateShipmentAwbService(order, courierCode || "SHIPROCKET", weightKg, dimensions);
 
     // Update order with AWB and shipment details
+    order.deliveryMode = "third_party";
+    order.deliveryType = "third_party";
+    order.courierName = result.shipment.courierPartnerName;
+    order.carrier = result.shipment.courierPartnerName;
     order.trackingNumber = result.shipment.awbNumber;
+    order.trackingUrl = `https://track.shiprocket.in/tracking/${result.shipment.awbNumber}`;
+    order.selfDeliveryDetails = undefined;
     order.overallStatus = "shipped";
     order.status = "shipped";
     order.set("shipmentDetails", result.shipment, { strict: false });

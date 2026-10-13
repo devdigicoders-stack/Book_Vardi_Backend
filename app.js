@@ -41,6 +41,7 @@ import reviewRoutes from "./Server/routes/reviewRoutes.js";
 import schoolRoutes from "./Server/routes/schoolRoutes.js";
 import contactRoutes from "./Server/routes/contactRoutes.js";
 import announcementRoutes from "./Server/routes/announcementRoutes.js";
+import realtimeRoutes from "./Server/routes/realtimeRoutes.js";
 
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -155,6 +156,18 @@ app.use("/api/admin/login", authLimiter);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Graceful handler for malformed JSON request bodies
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && (err.status === 400 || err.statusCode === 400) && 'body' in err) {
+    return res.status(400).json({
+      success: false,
+      message: "Malformed JSON payload in request body. Please verify request JSON syntax.",
+      error: "Bad Request"
+    });
+  }
+  next(err);
+});
+
 // Console Request Logger Middleware (Disabled by default to keep console clean on API calls)
 if (process.env.ENABLE_REQUEST_LOGGING === "true") {
   app.use((req, res, next) => {
@@ -204,6 +217,7 @@ app.use("/api/stores", storeRoutes);
 app.use("/api/schools", schoolRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/announcements", announcementRoutes);
+app.use("/api/realtime", realtimeRoutes);
 
 // 6. Health & Status Check
 app.get("/api/health", (req, res) => {
@@ -235,6 +249,13 @@ app.get("/api/health", (req, res) => {
 
 // 7. Global Error Handler
 app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && (err.status === 400 || err.statusCode === 400)) {
+    return res.status(400).json({
+      success: false,
+      message: "Malformed request payload format",
+      error: "Bad Request"
+    });
+  }
   console.error("Unhandled Error:", err);
   res.status(err.status || 500).json({
     message: err.message || "Internal Server Error",

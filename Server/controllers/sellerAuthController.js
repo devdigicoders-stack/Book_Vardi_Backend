@@ -341,7 +341,9 @@ export const loginSeller = async (req, res) => {
         phone: seller.phone,
         status: seller.status,
         role: "seller",
-        location: seller.location
+        location: seller.location,
+        commissionRate: Number(seller.commissionRate ?? seller.commissionPercentage ?? 5),
+        commissionPercentage: Number(seller.commissionPercentage ?? seller.commissionRate ?? 5)
       }
     });
   } catch (error) {
@@ -355,6 +357,10 @@ export const getSellerProfile = async (req, res) => {
   try {
     const isValidId = req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id);
     let seller = isValidId ? await Seller.findById(req.user.id).select("-password") : null;
+
+    if (!seller && req.headers["x-seller-id"] && mongoose.Types.ObjectId.isValid(req.headers["x-seller-id"])) {
+      seller = await Seller.findById(req.headers["x-seller-id"]).select("-password");
+    }
 
     if (!seller) {
       const phone = req.user?.phone || req.headers["x-seller-phone"] || req.headers["x-user-phone"] || req.query?.phone;
@@ -394,11 +400,16 @@ export const getSellerProfile = async (req, res) => {
         seller.markModified("documents");
         seller.save().catch(() => {});
       }
+      sellerObj.commissionRate = Number(sellerObj.commissionRate ?? sellerObj.commissionPercentage ?? 5);
+      sellerObj.commissionPercentage = sellerObj.commissionRate;
       return res.json(sellerObj);
     }
 
     if (req.seller) {
-      return res.json(req.seller);
+      const respSeller = req.seller.toObject ? req.seller.toObject() : { ...req.seller };
+      respSeller.commissionRate = Number(respSeller.commissionRate ?? respSeller.commissionPercentage ?? 5);
+      respSeller.commissionPercentage = respSeller.commissionRate;
+      return res.json(respSeller);
     }
 
     // Unauthenticated or unverified fallback: return status: pending (NEVER auto-approve as guest)
@@ -414,6 +425,8 @@ export const getSellerProfile = async (req, res) => {
       city: "Lucknow",
       state: "Uttar Pradesh",
       pincode: "226001",
+      commissionRate: 5,
+      commissionPercentage: 5,
       deliveryPreferences: { selfDelivery: true, maxDeliveryRadiusKm: 10, thirdPartyDelivery: true }
     });
   } catch (error) {
@@ -854,7 +867,11 @@ export const getSellerApplicationStatus = async (req, res) => {
     let seller = null;
     const isValidId = req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id);
     if (isValidId) {
-      seller = await Seller.findById(req.user.id).select("status storeName name phone rejectionReason");
+      seller = await Seller.findById(req.user.id).select("status storeName name phone commissionRate commissionPercentage rejectionReason");
+    }
+
+    if (!seller && req.headers["x-seller-id"] && mongoose.Types.ObjectId.isValid(req.headers["x-seller-id"])) {
+      seller = await Seller.findById(req.headers["x-seller-id"]).select("status storeName name phone commissionRate commissionPercentage rejectionReason");
     }
 
     let rawPhone = req.query?.phone || req.body?.phone || req.user?.phone || req.seller?.phone || req.headers["x-seller-phone"] || req.headers["x-user-phone"];
@@ -870,7 +887,7 @@ export const getSellerApplicationStatus = async (req, res) => {
           { phone: rawDigits },
           ...(digits10 ? [{ phone: { $regex: digits10 + "$" } }] : [])
         ]
-      }).select("status storeName name phone rejectionReason");
+      }).select("status storeName name phone commissionRate commissionPercentage rejectionReason");
     }
 
     if (!seller && req.seller) {
@@ -879,6 +896,7 @@ export const getSellerApplicationStatus = async (req, res) => {
 
     if (seller) {
       const currentStatus = seller.status || seller.submissionStatus || "pending";
+      const commRate = Number(seller.commissionRate ?? seller.commissionPercentage ?? 5);
       return res.json({
         success: true,
         status: currentStatus,
@@ -887,6 +905,8 @@ export const getSellerApplicationStatus = async (req, res) => {
         storeName: seller.storeName || "",
         name: seller.name || "",
         phone: seller.phone || "",
+        commissionRate: commRate,
+        commissionPercentage: commRate,
         rejectionReason: seller.rejectionReason || null
       });
     }
