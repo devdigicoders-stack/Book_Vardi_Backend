@@ -44,7 +44,7 @@ const cleanupExpiredOtps = () => {
 // Send OTP Function with DB user check
 export const sendOtp = async (req, res) => {
   try {
-    const { phone, purpose = "login" } = req.body;
+    const { phone, purpose = "auth" } = req.body;
     if (!phone) {
       return res.status(400).json({ message: "Phone number is required" });
     }
@@ -60,24 +60,6 @@ export const sendOtp = async (req, res) => {
         { phone: { $regex: cleanPhone + "$" } }
       ]
     });
-
-    if (purpose === "login") {
-      if (!userExists) {
-        return res.json({
-          success: false,
-          isRegistered: false,
-          message: "User not registered. Please register first"
-        });
-      }
-    } else if (purpose === "register") {
-      if (userExists) {
-        return res.json({
-          success: true,
-          isRegistered: true,
-          message: "User already registered. Login please"
-        });
-      }
-    }
 
     // Generate 4-digit OTP
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
@@ -135,27 +117,62 @@ export const verifyOtp = async (req, res) => {
       return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
-    // Mark user as verified
+    // Clear used OTP once verified
+    otpStore.delete(cleanPhone);
+
+    // If existing user: login directly
     if (user) {
       try {
+        user.otpCode = "";
+        user.otpExpiresAt = null;
         user.phoneVerified = true;
         await user.save();
       } catch (e) {}
+
+      const seller = await Seller.findOne({
+        $or: [
+          ...(user.phone ? [{ phone: user.phone }] : []),
+          ...(user.email ? [{ email: user.email }] : [])
+        ]
+      });
+      const isSeller = Boolean(user.isSeller || (seller && seller.status === "approved"));
+      const sellerStatus = seller ? seller.status : (user.sellerStatus || "none");
+      const token = generateToken(user);
+
+      return res.json({
+        success: true,
+        message: "Login successful",
+        verified: true,
+        isRegistered: true,
+        isNewUser: false,
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+          avatar: user.avatar,
+          isSeller,
+          sellerStatus,
+          institution: user.institution || "",
+          studentId: user.studentId || "",
+          standard: user.standard || "",
+          addresses: user.addresses || []
+        }
+      });
     }
 
-    const token = user ? generateToken(user) : null;
-
+    // If new user: OTP verified, register flow follows
     return res.json({
-      message: "OTP verified successfully",
+      success: true,
+      message: "OTP verified. New user registration required",
       verified: true,
-      token,
-      user: user ? {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role
-      } : null
+      isRegistered: false,
+      isNewUser: true,
+      phone: cleanPhone,
+      token: null,
+      user: null
     });
   } catch (error) {
     return res.status(500).json({ message: "Failed to verify OTP", error: error.message });
@@ -202,14 +219,16 @@ export const loginWithOtp = async (req, res) => {
     }
 
     if (!user) {
-      // Auto-create user for frictionless login if requested via OTP
-      user = new User({
-        name: `Student ${cleanPhone.slice(-4)}`,
-        phone: `+91${cleanPhone}`,
-        email: `student_${cleanPhone}@bookvardi.local`,
-        phoneVerified: true
+      return res.json({
+        success: true,
+        message: "OTP verified. User not found, please register",
+        verified: true,
+        isRegistered: false,
+        isNewUser: true,
+        phone: cleanPhone,
+        token: null,
+        user: null
       });
-      await user.save();
     }
 
     if (req.body.fcmToken) {
@@ -233,7 +252,11 @@ export const loginWithOtp = async (req, res) => {
     const token = generateToken(user);
 
     return res.json({
+      success: true,
       message: "Login successful",
+      verified: true,
+      isRegistered: true,
+      isNewUser: false,
       token,
       user: {
         id: user._id,
@@ -258,13 +281,15 @@ export const loginWithOtp = async (req, res) => {
 // 1. Register User
 export const registerUser = async (req, res) => {
   try {
-    const { name, email, password, phone, institution, studentId } = req.body;
+    const { name, email, password, phone, institution, studentId, standard } = req.body;
     const normalizedPhone = normalizePhone(phone);
     const normalizedEmail = email ? email.toLowerCase().trim() : "";
 
-    if (!name || !password) {
-      return res.status(400).json({ message: "Name and password are required" });
+    if (!name) {
+      return res.status(400).json({ message: "Name is required" });
     }
+
+    const defaultPassword = password || "BookVardi@123";
 
     let user = await User.findOne({
       $or: [
@@ -278,6 +303,7 @@ export const registerUser = async (req, res) => {
       if (normalizedEmail) user.email = normalizedEmail;
       if (institution) user.institution = institution;
       if (studentId) user.studentId = studentId;
+      if (standard) user.standard = standard;
       user.phoneVerified = true;
       if (req.body.fcmToken) {
         upsertFcmToken(user, {
@@ -291,10 +317,11 @@ export const registerUser = async (req, res) => {
       user = new User({
         name,
         email: normalizedEmail || `student${normalizedPhone.slice(-4)}@bookvardi.local`,
-        password,
+        password: defaultPassword,
         phone: normalizedPhone ? `+91${normalizedPhone}` : phone,
         institution: institution || "",
         studentId: studentId || "",
+        standard: standard || "",
         phoneVerified: true
       });
       if (req.body.fcmToken) {
@@ -310,7 +337,8 @@ export const registerUser = async (req, res) => {
     const token = generateToken(user);
 
     return res.status(201).json({
-      message: "Registration successful. Login please",
+      success: true,
+      message: "Registration successful",
       token,
       user: {
         id: user._id,
