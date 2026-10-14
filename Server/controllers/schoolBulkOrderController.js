@@ -369,7 +369,15 @@ export const getCustomerSchoolOrders = async (req, res) => {
       .sort({ createdAt: -1 });
 
     // Secondary defence-in-depth: strictly keep only orders created by this user
-    const privateOrders = orders.filter(ord => isUserOrderCreator(ord, customerIdentity));
+    const privateOrders = orders.filter(ord => isUserOrderCreator(ord, customerIdentity)).map(ord => {
+      // Auto-heal consistency: if delivered or remaining paid, ensure status reflects delivered
+      if ((ord.deliveryDetails?.deliveredAt || ord.remainingPaymentStatus === 'paid') && !['delivered', 'received', 'completed'].includes(ord.status)) {
+        ord.status = 'delivered';
+        ord.overallStatus = 'Delivered';
+        ord.deliveryStatus = 'Delivered';
+      }
+      return ord;
+    });
 
     res.json({ success: true, count: privateOrders.length, orders: privateOrders });
   } catch (error) {
@@ -488,6 +496,10 @@ export const distributeSchoolOrder = async (req, res) => {
 
     bulkOrder.assignmentMode = assignmentMode;
 
+    // Active progression statuses that should NEVER be overwritten by distribution
+    const activeProgression = ["buyer_accepted", "accepted", "quote_accepted", "confirmed", "advance_paid", "packed", "out for delivery", "out_for_delivery", "received", "delivered", "completed"];
+    const hasProgressed = Boolean(bulkOrder.status && activeProgression.includes(bulkOrder.status));
+
     if (assignmentMode === "direct") {
       const cleanSellerId = sellerId ? (typeof sellerId === "object" ? (sellerId._id || sellerId.id) : sellerId) : null;
       if (!cleanSellerId) {
@@ -498,7 +510,9 @@ export const distributeSchoolOrder = async (req, res) => {
       bulkOrder.isGlobalRfq = false;
       bulkOrder.isGlobal = false;
       bulkOrder.isPublic = false;
-      bulkOrder.status = "assigned";
+      if (!hasProgressed) {
+        bulkOrder.status = "assigned";
+      }
 
       // Also set seller store/name on bulkOrder directly so all panels have immediate display
       try {
@@ -517,21 +531,27 @@ export const distributeSchoolOrder = async (req, res) => {
       bulkOrder.isGlobalRfq = false;
       bulkOrder.isGlobal = false;
       bulkOrder.isPublic = false;
-      bulkOrder.status = "published";
+      if (!hasProgressed) {
+        bulkOrder.status = "published";
+      }
     } else if (assignmentMode === "broadcast") {
       bulkOrder.sellerId = null;
       bulkOrder.invitedSellerIds = [];
       bulkOrder.isGlobalRfq = true;
       bulkOrder.isGlobal = true;
       bulkOrder.isPublic = true;
-      bulkOrder.status = "published";
+      if (!hasProgressed) {
+        bulkOrder.status = "published";
+      }
     } else if (assignmentMode === "admin_direct") {
       bulkOrder.sellerId = null;
       bulkOrder.invitedSellerIds = [];
       bulkOrder.isGlobalRfq = false;
       bulkOrder.isGlobal = false;
       bulkOrder.isPublic = false;
-      bulkOrder.status = "assigned_to_admin";
+      if (!hasProgressed) {
+        bulkOrder.status = "assigned_to_admin";
+      }
       bulkOrder.fulfilledBy = "BookVardi HQ";
     }
 
@@ -2792,9 +2812,15 @@ export const verifySchoolBulkRemainingPayment = async (req, res) => {
     bulkOrder.remainingReceiptNumber = `REC-REM-${bulkOrder.referenceId}`;
     bulkOrder.remainingPaidAt = new Date();
     bulkOrder.remainingPaymentStatus = "paid";
-    // Keep status as active delivery status until customer OTP verification
-    if (bulkOrder.status === "pending_balance" || bulkOrder.status === "confirmed") {
+    
+    // If delivery was completed or deliveredAt recorded, mark delivered; otherwise keep as out_for_delivery
+    if (bulkOrder.deliveryDetails?.deliveredAt || bulkOrder.status === "received" || bulkOrder.status === "delivered") {
+      bulkOrder.status = "delivered";
+      bulkOrder.overallStatus = "Delivered";
+      bulkOrder.deliveryStatus = "Delivered";
+    } else {
       bulkOrder.status = "out_for_delivery";
+      bulkOrder.overallStatus = "Out for Delivery";
     }
 
     if (winningQuote) {
