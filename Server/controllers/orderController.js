@@ -10,6 +10,7 @@ import Cart from "../models/Cart.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
+import { calculateSellerSettlement } from "../services/settlementService.js";
 
 // Helper to locate user document by ID, email, or phone
 const findUserByIdentifier = async (req) => {
@@ -358,9 +359,10 @@ const decrementItemStock = async (item) => {
     }
 
     await prod.save();
+    return;
   }
 
-  // Also handle Kit document stock
+  // Also handle Kit document stock (only if not a regular Product)
   let kit = await findKitByIdOrCustomId(searchId);
   if (!kit && item.name) {
     const cleanItemName = item.name.replace(/\s*\([^)]*\)/g, "").trim();
@@ -765,10 +767,13 @@ export const getMyOrders = async (req, res) => {
     const formattedOrders = orders.map((ord) => {
       const canonicalStatus = normalizeOrderStatus(ord.overallStatus || ord.status || 'Processing');
       const isSelfDelivery = ord.deliveryMode === 'self_delivery' ||
-        Boolean(ord.selfDeliveryDetails?.deliveryPartnerToken) ||
-        ord.items?.some(it => it.deliveryType === 'self' || it.deliveryType === 'self_delivery' || it.selfDeliveryDetails?.deliveryPartnerToken);
+        Boolean(ord.selfDeliveryDetails?.deliveryPersonName || ord.selfDeliveryDetails?.deliveryPartnerToken) ||
+        ord.items?.some(it => (it.deliveryType === 'self' || it.deliveryType === 'self_delivery') && Boolean(it.selfDeliveryDetails?.deliveryPersonName || it.selfDeliveryDetails?.deliveryPartnerToken));
 
-      const resolvedDeliveryMode = isSelfDelivery ? 'self_delivery' : (ord.deliveryMode || (ord.courierName || ord.trackingNumber ? 'third_party' : ''));
+      const isThirdParty = ord.deliveryMode === 'third_party' ||
+        Boolean(!isSelfDelivery && ord.courierName && ord.courierName !== 'N/A' && ord.courierName !== '');
+
+      const resolvedDeliveryMode = isSelfDelivery ? 'self_delivery' : (isThirdParty ? 'third_party' : 'pending_choice');
 
       const firstItem = ord.items?.[0] || {};
       const resolvedSellerDetails = ord.sellerDetails && ord.sellerDetails.storeName ? ord.sellerDetails : (firstItem.sellerDetails || {
@@ -848,8 +853,11 @@ export const getMyOrders = async (req, res) => {
         trackingNumber: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.deliveryPartnerToken || ord.trackingNumber || '') : (ord.trackingNumber || firstItem.thirdPartyDetails?.trackingNumber || ''),
         trackingUrl: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.trackingUrl || ord.trackingUrl || '') : (ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || ''),
         sellerDetails: resolvedSellerDetails,
-        selfDeliveryDetails: ord.selfDeliveryDetails || firstItem.selfDeliveryDetails || null,
+        selfDeliveryDetails: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails || firstItem.selfDeliveryDetails || null) : null,
         deliveryOtp: (() => {
+          if (resolvedDeliveryMode !== 'self_delivery') {
+            return '';
+          }
           let resolvedOtp = String(ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || firstItem.selfDeliveryDetails?.deliveryOtp || firstItem.deliveryOtp || '').trim();
           if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
             resolvedOtp = Math.floor(1000 + Math.random() * 9000).toString();
@@ -1007,6 +1015,37 @@ export const createOrder = async (req, res) => {
       return res.status(400).json({ message: "Cannot place order with empty items" });
     }
 
+    // Cache for seller lookups so multiple items under same seller do zero duplicate queries
+    const sellerCache = new Map();
+    const getSellerRecord = async (targetId) => {
+      if (!targetId) return null;
+      const key = String(targetId).trim();
+      if (sellerCache.has(key)) return sellerCache.get(key);
+
+      let record = null;
+      try {
+        if (mongoose.Types.ObjectId.isValid(key)) {
+          record = await Seller.findById(key).lean().catch(() => null);
+        }
+        if (!record) {
+          record = await Seller.findOne({
+            $or: [{ userId: key }, { id: key }, { email: key }, { phone: key }]
+          }).lean().catch(() => null);
+        }
+        if (!record && mongoose.Types.ObjectId.isValid(key)) {
+          record = await User.findById(key).lean().catch(() => null);
+        }
+        if (!record) {
+          record = await User.findOne({
+            $or: [{ id: key }, { phone: key }, { email: key }]
+          }).lean().catch(() => null);
+        }
+      } catch (e) {}
+
+      sellerCache.set(key, record);
+      return record;
+    };
+
     // Auto-populate productId, sellerId, sellerName, storeName, and GST on order items from Product & User collections
     for (const item of orderItems) {
       // 1. Sanitize image safely (prevent array or object CastError)
@@ -1022,12 +1061,16 @@ export const createOrder = async (req, res) => {
         item.image = String(item.image || "");
       }
 
-      // 2. Sanitize price, quantity & total
-      const rawPrice = item.finalPrice !== undefined ? item.finalPrice : (item.price !== undefined ? item.price : 0);
-      item.price = Number(rawPrice) || 0;
-      item.finalPrice = item.price;
+      // 2. Sanitize price, quantity, discount & total
+      const basePrice = item.price !== undefined ? Number(item.price) : (item.finalPrice !== undefined ? Number(item.finalPrice) : 0);
+      item.price = Number(basePrice) || 0;
       item.quantity = Math.max(1, Number(item.quantity) || 1);
-      item.total = Math.round(item.price * item.quantity * 100) / 100;
+      item.offerDiscount = Number(item.offerDiscount !== undefined ? item.offerDiscount : (item.discount || 0)) || 0;
+      item.discount = item.offerDiscount;
+      const itemGross = Math.round(item.price * item.quantity * 100) / 100;
+      const unitDiscount = item.quantity > 0 ? (item.offerDiscount / item.quantity) : item.offerDiscount;
+      item.finalPrice = Math.max(0, Math.round((item.price - unitDiscount) * 100) / 100);
+      item.total = Math.max(0, Math.round((itemGross - item.offerDiscount) * 100) / 100);
       item.name = String(item.name || "BookVardi Product").trim();
 
       // 3. Sanitize size & color
@@ -1106,51 +1149,28 @@ export const createOrder = async (req, res) => {
       let sellerCity = item.sellerCity || "";
 
       const targetSellerId = item.sellerId || prod?.sellerId;
-      if (!sellerStoreName && targetSellerId) {
-        try {
-          let sellerUser = null;
-          if (mongoose.Types.ObjectId.isValid(targetSellerId)) {
-            sellerUser = await User.findById(targetSellerId);
+      let cachedSeller = null;
+      if (targetSellerId) {
+        cachedSeller = await getSellerRecord(targetSellerId);
+        if (cachedSeller) {
+          const fetchedName =
+            cachedSeller.storeName ||
+            cachedSeller.tradeName ||
+            cachedSeller.businessName ||
+            cachedSeller.legalBusinessName ||
+            cachedSeller.storeDetails?.storeName ||
+            cachedSeller.name ||
+            cachedSeller.legalName ||
+            cachedSeller.ownerFullName ||
+            "";
+          if (!sellerStoreName && !isPlaceholder(fetchedName)) {
+            sellerStoreName = fetchedName;
           }
-          if (!sellerUser && typeof targetSellerId === "string") {
-            sellerUser = await User.findOne({ $or: [{ id: targetSellerId }, { phone: targetSellerId }, { email: targetSellerId }] });
-          }
-          if (!sellerUser) {
-            const SellerModel = (await import("../models/Seller.js")).default;
-            if (mongoose.Types.ObjectId.isValid(targetSellerId)) {
-              sellerUser = await SellerModel.findById(targetSellerId).catch(() => null);
-            }
-            if (!sellerUser) {
-              sellerUser = await SellerModel.findOne({
-                $or: [
-                  { userId: targetSellerId },
-                  { id: targetSellerId },
-                  { email: targetSellerId },
-                  { phone: targetSellerId }
-                ]
-              }).catch(() => null);
-            }
-          }
-          if (sellerUser) {
-            const fetchedName =
-              sellerUser.storeName ||
-              sellerUser.tradeName ||
-              sellerUser.businessName ||
-              sellerUser.legalBusinessName ||
-              sellerUser.storeDetails?.storeName ||
-              sellerUser.name ||
-              sellerUser.legalName ||
-              sellerUser.ownerFullName ||
-              "";
-            if (!isPlaceholder(fetchedName)) {
-              sellerStoreName = fetchedName;
-            }
-            if (!sellerPhone) sellerPhone = sellerUser.phone || sellerUser.mobile || "";
-            if (!sellerEmail) sellerEmail = sellerUser.email || "";
-            if (!sellerAddress) sellerAddress = sellerUser.address || sellerUser.addressLine1 || sellerUser.registeredAddress || "";
-            if (!sellerCity) sellerCity = sellerUser.city || "";
-          }
-        } catch (e) {}
+          if (!sellerPhone) sellerPhone = cachedSeller.phone || cachedSeller.mobile || "";
+          if (!sellerEmail) sellerEmail = cachedSeller.email || "";
+          if (!sellerAddress) sellerAddress = cachedSeller.address || cachedSeller.addressLine1 || cachedSeller.registeredAddress || "";
+          if (!sellerCity) sellerCity = cachedSeller.city || "";
+        }
       }
 
       if (!sellerStoreName) {
@@ -1182,28 +1202,12 @@ export const createOrder = async (req, res) => {
           itemCommRate = prod.commissionRate ?? prod.sellerCommissionRate;
         }
       }
-      if ((itemCommRate === undefined || itemCommRate === null || isNaN(Number(itemCommRate))) && item.sellerId) {
-        try {
-          const SellerModel = (await import("../models/Seller.js")).default;
-          let sSeller = await SellerModel.findById(item.sellerId).catch(() => null);
-          if (!sSeller && typeof item.sellerId === "string") {
-            sSeller = await SellerModel.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
-          }
-          if (sSeller && (sSeller.commissionRate !== undefined || sSeller.commissionPercentage !== undefined)) {
-            itemCommRate = sSeller.commissionRate ?? sSeller.commissionPercentage;
-          }
-          if (!sSeller) {
-            let sUser = await User.findById(item.sellerId).catch(() => null);
-            if (!sUser && typeof item.sellerId === "string") {
-              sUser = await User.findOne({ $or: [{ id: item.sellerId }, { phone: item.sellerId }, { email: item.sellerId }] }).catch(() => null);
-            }
-            if (sUser && (sUser.commissionRate !== undefined || sUser.commissionPercentage !== undefined)) {
-              itemCommRate = sUser.commissionRate ?? sUser.commissionPercentage;
-            }
-          }
-        } catch (e) {}
+      if ((itemCommRate === undefined || itemCommRate === null || isNaN(Number(itemCommRate))) && cachedSeller) {
+        if (cachedSeller.commissionRate !== undefined || cachedSeller.commissionPercentage !== undefined) {
+          itemCommRate = cachedSeller.commissionRate ?? cachedSeller.commissionPercentage;
+        }
       }
-      const resolvedCommRate = (itemCommRate !== undefined && itemCommRate !== null && !isNaN(Number(itemCommRate))) ? Number(itemCommRate) : 5;
+      const resolvedCommRate = (itemCommRate !== undefined && itemCommRate !== null && !isNaN(Number(itemCommRate))) ? Number(itemCommRate) : 10;
       item.commissionRate = resolvedCommRate;
       item.sellerCommissionRate = resolvedCommRate;
       item.commissionPercentage = resolvedCommRate;
@@ -1232,21 +1236,160 @@ export const createOrder = async (req, res) => {
 
       const rawDeliveryMode = req.body.deliveryMode || req.body.deliveryType || "";
       let topDeliveryMode = "pending_choice";
-      if (req.body.selfDeliveryDetails) {
+      if (req.body.deliveryMode === "self_delivery" || (req.body.selfDeliveryDetails && req.body.selfDeliveryDetails.deliveryPersonName)) {
         topDeliveryMode = "self_delivery";
-      } else if (req.body.courierName || trackingNumber) {
+      } else if (req.body.deliveryMode === "third_party" || (req.body.courierName && req.body.courierName !== "N/A")) {
         topDeliveryMode = "third_party";
-      } else if (["third_party", "self_delivery", "standard", "express", "pending_choice"].includes(rawDeliveryMode)) {
+      } else if (["third_party", "self_delivery", "pending_choice"].includes(rawDeliveryMode)) {
         topDeliveryMode = rawDeliveryMode;
       }
 
-    const masterOtp = String(req.body.deliveryOtp || req.body.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString());
+    const isInitialSelfDelivery = topDeliveryMode === "self_delivery";
+    const masterOtp = isInitialSelfDelivery
+      ? String(req.body.deliveryOtp || req.body.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString())
+      : "";
     for (const item of orderItems) {
       item.status = "pending";
       item.deliveryOtp = masterOtp;
-      if (item.selfDeliveryDetails) {
+      if (isInitialSelfDelivery && item.selfDeliveryDetails) {
         item.selfDeliveryDetails.deliveryOtp = masterOtp;
+      } else if (!isInitialSelfDelivery) {
+        item.selfDeliveryDetails = undefined;
       }
+    }
+
+    // Fully Dynamic Item-Level Coupon & Combine Offer Discount Preservation
+    // If a coupon code was applied to a specific product or combine offer, ensure the discount
+    // stays strictly with the eligible product and is NOT split or leaked across other products/sellers.
+    const appliedCouponCode = String(
+      req.body.couponCode ||
+      req.body.appliedCoupon ||
+      req.body.coupon?.code ||
+      req.body.appliedCoupon?.code ||
+      req.body.promoCode ||
+      ""
+    ).toUpperCase().trim();
+
+    const totalDiscount = Number(discount || discountAmount || 0);
+    const existingItemsDiscount = orderItems.reduce((sum, it) => sum + (Number(it.offerDiscount || it.discount) || 0), 0);
+
+    // If total discount exists but items don't have individual offerDiscount, resolve coupon to target item(s)
+    if (existingItemsDiscount <= 0 && totalDiscount > 0 && appliedCouponCode) {
+      try {
+        let matchedCoupon = await Coupon.findOne({ code: appliedCouponCode }).lean();
+        if (!matchedCoupon) {
+          matchedCoupon = await SellerOffer.findOne({ code: appliedCouponCode }).lean();
+        }
+
+        if (matchedCoupon) {
+          const extractId = (val) => {
+            if (!val) return null;
+            if (typeof val === 'object') return String(val._id || val.id || '').toLowerCase().trim();
+            return String(val).toLowerCase().trim();
+          };
+
+          const targetSellerId = extractId(matchedCoupon.sellerId) || extractId(matchedCoupon.storeId);
+          const isSellerScoped = Boolean(matchedCoupon.createdRole === 'seller' || targetSellerId);
+          const specificProdId = extractId(matchedCoupon.specificProductId);
+          const specificKitId = extractId(matchedCoupon.specificKitId);
+          const applicableProds = (matchedCoupon.applicableProducts || []).map(extractId).filter(Boolean);
+          const applicableKits = (matchedCoupon.applicableKits || []).map(extractId).filter(Boolean);
+
+          const eligibleItems = orderItems.filter((item) => {
+            const itemSellerId = extractId(item.sellerId || item.sellerDetails?.sellerId);
+            const itemProdId = extractId(item.productId || item.id || item._id);
+
+            if (isSellerScoped && targetSellerId && itemSellerId && itemSellerId !== targetSellerId) {
+              return false;
+            }
+            if (specificProdId) {
+              return itemProdId === specificProdId;
+            }
+            if (applicableProds.length > 0) {
+              return applicableProds.includes(itemProdId);
+            }
+            if (specificKitId) {
+              return itemProdId === specificKitId;
+            }
+            if (applicableKits.length > 0) {
+              return applicableKits.includes(itemProdId);
+            }
+            return true;
+          });
+
+          if (eligibleItems.length > 0) {
+            const eligibleSubtotal = eligibleItems.reduce(
+              (sum, it) => sum + (Number(it.price || it.finalPrice || 0) * Number(it.quantity || 1)),
+              0
+            ) || 1;
+
+            let allocated = 0;
+            eligibleItems.forEach((it, idx) => {
+              const itGross = Number(it.price || it.finalPrice || 0) * Number(it.quantity || 1);
+              const isLast = idx === eligibleItems.length - 1;
+              const itDisc = isLast
+                ? Math.max(0, Math.round((totalDiscount - allocated) * 100) / 100)
+                : Math.min(itGross, Math.round((totalDiscount * (itGross / eligibleSubtotal)) * 100) / 100);
+              allocated += itDisc;
+
+              it.offerDiscount = itDisc;
+              it.discount = itDisc;
+              it.couponCode = appliedCouponCode;
+              const unitDisc = it.quantity > 0 ? (itDisc / it.quantity) : itDisc;
+              it.finalPrice = Math.max(0, Math.round((Number(it.price || 0) - unitDisc) * 100) / 100);
+              it.total = Math.max(0, Math.round((itGross - itDisc) * 100) / 100);
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("⚠️ Coupon auto-allocation warning:", e.message);
+      }
+    }
+
+    // Attach dynamic Seller Settlement breakdown (Rules 1, 2, 3 & 4)
+    const effectiveOrderTotal = Number(totalAmount || 0);
+    const customerState = req.body.shippingAddress?.state || newOrder.shippingAddress?.state || "Uttar Pradesh";
+    for (const it of orderItems) {
+      const itGross = Number(it.total) || Math.round(((Number(it.finalPrice || it.price || 0)) * (Number(it.quantity) || 1)) * 100) / 100;
+      const itGstRate = Number(it.gstPercent ?? it.gstPercentage ?? it.gstRate ?? it.gst ?? (it.category?.toLowerCase()?.includes('book') ? 0 : 5));
+      const stl = calculateSellerSettlement(itGross, {
+        commissionRate: it.commissionRate ?? 10,
+        paymentMethod: paymentMethod || "UPI",
+        deliveryMode: topDeliveryMode || it.deliveryType,
+        courierName: req.body.courierName || it.thirdPartyDetails?.courierName || "",
+        orderTotal: effectiveOrderTotal || itGross,
+        sellerState,
+        customerState,
+        gstRate: itGstRate,
+        category: it.category || "",
+        name: it.name || it.productName || "",
+        deliveryCharge: req.body.shippingFee ?? req.body.shippingAmount ?? req.body.shippingCost ?? 40,
+        deliveryChargeBorneBy: req.body.deliveryChargeBorneBy || (effectiveOrderTotal > 400 ? 'admin' : (Number(req.body.shippingFee || req.body.shippingCost || 0) > 0 ? 'customer' : 'seller'))
+      });
+      it.commissionRate = stl.commissionRate;
+      it.commissionAmount = stl.commissionAmount;
+      it.gstOnCommissionRate = stl.gstOnCommissionRate;
+      it.gstOnCommissionAmount = stl.gstOnCommissionAmount;
+      it.tdsRate = stl.tdsRate;
+      it.tdsAmount = stl.tdsAmount;
+      it.isIntraState = stl.isIntraState;
+      it.gstTcsRate = stl.gstTcsRate;
+      it.gstTcsAmount = stl.gstTcsAmount;
+      it.cgstTcsRate = stl.cgstTcsRate;
+      it.cgstTcsAmount = stl.cgstTcsAmount;
+      it.sgstTcsRate = stl.sgstTcsRate;
+      it.sgstTcsAmount = stl.sgstTcsAmount;
+      it.igstTcsRate = stl.igstTcsRate;
+      it.igstTcsAmount = stl.igstTcsAmount;
+      it.deliveryChargeAmount = stl.deliveryChargeAmount;
+      it.gstOnDeliveryRate = stl.gstOnDeliveryRate;
+      it.gstOnDeliveryAmount = stl.gstOnDeliveryAmount;
+      it.totalDeliveryDeduction = stl.totalDeliveryDeduction;
+      it.deliveryChargeBorneBy = stl.deliveryChargeBorneBy;
+      it.totalDeductions = stl.totalDeductions;
+      it.netSettlementAmount = stl.netSettlement;
+      it.settlementStatus = "pending";
+      it.settlementRule = stl.ruleCode;
     }
 
     // Group items by unique seller to support individual multi-vendor sub-orders
@@ -1294,40 +1437,29 @@ export const createOrder = async (req, res) => {
         totalShipping = overallItemsSubtotal >= 999 ? 0 : (orderItems.length * 49);
       }
     }
-    const totalDiscount = Number(discount || discountAmount || 0);
+
+    // Check if any items have item-specific coupon/offer discounts
+    const anyItemHasSpecificDiscount = orderItems.some(
+      (it) => Number(it.offerDiscount || it.discount || 0) > 0
+    );
 
     // =========================================================================
-    // BRANCH A: MULTI-SELLER CHECKOUT (Divide into individual per-seller sub-orders)
+    // UNIFIED ORDER CREATION (Supports single-seller & multi-seller checkouts)
+    // Both items remain in one unified order; Seller Panel automatically filters
+    // items per seller scope via sellerOrderController.isItemBelongingToSellerScope.
     // =========================================================================
-    if (sellerGroups.length > 1) {
-      const masterOrderId = orderIdVal;
-      const createdSubOrders = [];
-      let accumulatedDiscount = 0;
-      let accumulatedShipping = 0;
+    const primarySeller = sellerGroups[0] || {};
+    const allSellerStoreNames = [
+      ...new Set(
+        sellerGroups
+          .map((g) => g.sellerStoreName)
+          .filter(Boolean)
+      )
+    ].join(", ");
 
-      for (let idx = 0; idx < sellerGroups.length; idx++) {
-        const grp = sellerGroups[idx];
-        const isLastGroup = idx === sellerGroups.length - 1;
-        const subOrderId = `${masterOrderId}-${idx + 1}`;
-
-        const groupSubtotal = grp.items.reduce(
-          (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
-          0
-        );
-
-        const ratio = groupSubtotal / overallItemsSubtotal;
-
-        const groupDiscount = isLastGroup
-          ? Math.max(0, totalDiscount - accumulatedDiscount)
-          : Math.round(totalDiscount * ratio);
-        accumulatedDiscount += groupDiscount;
-
-        const groupShipping = isLastGroup
-          ? Math.max(0, totalShipping - accumulatedShipping)
-          : Math.round(totalShipping * (grp.items.length / (orderItems.length || 1)));
-        accumulatedShipping += groupShipping;
-
-        const groupTax = grp.items.reduce((sum, it) => {
+    const computedTax = req.body.taxAmount !== undefined
+      ? Number(req.body.taxAmount) || 0
+      : orderItems.reduce((sum, it) => {
           const isInc = it.isGstInclusive !== false;
           if (!isInc) {
             const rate = Number(it.gst || it.gstRate || it.gstPercent || 5);
@@ -1337,114 +1469,10 @@ export const createOrder = async (req, res) => {
           return sum;
         }, 0);
 
-        const groupTotal = Math.max(0, Math.round((groupSubtotal + groupShipping - groupDiscount + groupTax) * 100) / 100);
+    const finalTotalAmount = Number(calculatedTotal) > 0
+      ? Number(calculatedTotal)
+      : Math.max(0, Math.round((overallItemsSubtotal + totalShipping + computedTax - totalDiscount) * 100) / 100);
 
-        const subOrder = new Order({
-          orderId: subOrderId,
-          id: subOrderId,
-          masterOrderId: masterOrderId,
-          isSubOrder: true,
-          subOrderIndex: idx + 1,
-          subOrdersCount: sellerGroups.length,
-          userId: resolvedUserId,
-          customer: customer || {
-            name: resolvedName,
-            email: resolvedEmail,
-            phone: resolvedPhone
-          },
-          items: grp.items,
-          subtotal: groupSubtotal,
-          taxAmount: Math.round(groupTax * 100) / 100,
-          shippingCost: groupShipping,
-          shippingFee: groupShipping,
-          discount: groupDiscount,
-          discountAmount: groupDiscount,
-          commissionRate: grp.items[0]?.commissionRate ?? 5,
-          sellerCommissionRate: grp.items[0]?.commissionRate ?? 5,
-          commissionPercentage: grp.items[0]?.commissionRate ?? 5,
-          totalAmount: groupTotal,
-          total: groupTotal,
-          date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
-          shippingAddress: shippingAddress || { street: address || "" },
-          paymentMethod: paymentMethod || "UPI",
-          paymentStatus: initialPaymentStatus,
-          razorpayOrderId: req.body.razorpayOrderId || "",
-          razorpayPaymentId: req.body.razorpayPaymentId || "",
-          overallStatus: "Pending",
-          status: "Pending",
-          deliveryMode: topDeliveryMode,
-          courierName: req.body.courierName || "",
-          trackingNumber: trackingNumber || "",
-          trackingUrl: req.body.trackingUrl || "",
-          sellerId: grp.sellerId,
-          sellerStoreName: grp.sellerStoreName,
-          sellerDetails: grp.sellerDetails || req.body.sellerDetails || null,
-          selfDeliveryDetails: req.body.selfDeliveryDetails ? { ...req.body.selfDeliveryDetails, deliveryOtp: masterOtp } : { deliveryOtp: masterOtp },
-          deliveryOtp: masterOtp,
-          address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
-          product: grp.items[0]?.name || "",
-          quantity: grp.items.reduce((acc, it) => acc + (Number(it.quantity) || 1), 0),
-          amount: groupTotal
-        });
-
-        await subOrder.save();
-        createdSubOrders.push(subOrder);
-
-        // Auto-decrease stock for this group's products
-        try {
-          for (const item of grp.items) {
-            await decrementItemStock(item);
-          }
-        } catch (stockErr) {
-          console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
-        }
-      }
-
-      // Auto-increment coupon redemption once for checkout
-      try {
-        const appliedCode = req.body.couponCode || req.body.coupon?.code || req.body.appliedCoupon?.code || req.body.coupon || req.body.promoCode;
-        if (appliedCode) {
-          const cleanCode = String(appliedCode).toUpperCase().trim();
-          await Coupon.findOneAndUpdate({ code: cleanCode }, { $inc: { usageCount: 1 } }).catch(() => {});
-          await SellerOffer.findOneAndUpdate({ code: cleanCode }, { $inc: { usageCount: 1 } }).catch(() => {});
-        }
-      } catch (couponErr) {}
-
-      // Auto-clear cart in MongoDB database for user
-      await autoClearUserCart(resolvedUserId, resolvedPhone);
-
-      try {
-        for (const sub of createdSubOrders) {
-          broadcastRealtimeEvent({
-            type: "ORDER_CREATED",
-            orderId: sub.orderId,
-            masterOrderId: sub.masterOrderId,
-            sellerId: sub.sellerId,
-            total: sub.totalAmount,
-            customerName: sub.customer?.name,
-            customerPhone: sub.customer?.phone,
-            userId: sub.userId,
-            status: sub.overallStatus || sub.status || "Pending",
-            order: sub
-          });
-        }
-      } catch (rtErr) {
-        console.warn("⚠️ Realtime broadcast error (Branch A):", rtErr.message);
-      }
-
-      return res.status(201).json({
-        message: "Order placed successfully (divided into per-seller sub-orders)",
-        masterOrderId,
-        subOrdersCount: sellerGroups.length,
-        orders: createdSubOrders,
-        order: createdSubOrders[0]
-      });
-    }
-
-    // =========================================================================
-    // BRANCH B: SINGLE-SELLER ORDER (Standard direct order)
-    // =========================================================================
-    const primarySeller = sellerGroups[0] || {};
     const newOrder = new Order({
       orderId: orderIdVal,
       id: orderIdVal,
@@ -1453,7 +1481,7 @@ export const createOrder = async (req, res) => {
       subOrderIndex: 1,
       subOrdersCount: 1,
       sellerId: primarySeller.sellerId || null,
-      sellerStoreName: primarySeller.sellerStoreName || "",
+      sellerStoreName: allSellerStoreNames || primarySeller.sellerStoreName || "",
       userId: resolvedUserId,
       customer: customer || {
         name: resolvedName,
@@ -1461,17 +1489,19 @@ export const createOrder = async (req, res) => {
         phone: resolvedPhone
       },
       items: orderItems,
-      subtotal: subtotal || 0,
-      taxAmount: req.body.taxAmount !== undefined ? req.body.taxAmount : 0,
-      shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || 0),
-      shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || 0),
-      discount: discount || discountAmount || 0,
-      discountAmount: discountAmount || discount || 0,
-      commissionRate: orderItems[0]?.commissionRate ?? 5,
-      sellerCommissionRate: orderItems[0]?.commissionRate ?? 5,
-      commissionPercentage: orderItems[0]?.commissionRate ?? 5,
-      totalAmount: calculatedTotal,
-      total: calculatedTotal,
+      subtotal: subtotal || overallItemsSubtotal || 0,
+      taxAmount: Math.round(computedTax * 100) / 100,
+      shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || totalShipping || 0),
+      shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || totalShipping || 0),
+      discount: discount || discountAmount || totalDiscount || 0,
+      discountAmount: discountAmount || discount || totalDiscount || 0,
+      appliedCoupon: appliedCouponCode || "",
+      couponCode: appliedCouponCode || "",
+      commissionRate: orderItems[0]?.commissionRate ?? 10,
+      sellerCommissionRate: orderItems[0]?.commissionRate ?? 10,
+      commissionPercentage: orderItems[0]?.commissionRate ?? 10,
+      totalAmount: finalTotalAmount,
+      total: finalTotalAmount,
       date: date || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
       shippingAddress: shippingAddress || { street: address || "" },
       paymentMethod: paymentMethod || "UPI",
@@ -1481,25 +1511,23 @@ export const createOrder = async (req, res) => {
       overallStatus: "Pending",
       status: "Pending",
       deliveryMode: topDeliveryMode,
-      courierName: req.body.courierName || "",
-      trackingNumber: trackingNumber || "",
+      courierName: topDeliveryMode === "self_delivery" ? "" : (req.body.courierName || ""),
+      trackingNumber: topDeliveryMode === "self_delivery" ? (req.body.selfDeliveryDetails?.deliveryPartnerToken || "") : (trackingNumber || ""),
       trackingUrl: req.body.trackingUrl || "",
       sellerDetails: req.body.sellerDetails || primarySeller.sellerDetails || orderItems[0]?.sellerDetails || null,
-      selfDeliveryDetails: req.body.selfDeliveryDetails ? { ...req.body.selfDeliveryDetails, deliveryOtp: masterOtp } : { deliveryOtp: masterOtp },
+      selfDeliveryDetails: isInitialSelfDelivery && req.body.selfDeliveryDetails ? { ...req.body.selfDeliveryDetails, deliveryOtp: masterOtp } : undefined,
       deliveryOtp: masterOtp,
       address: typeof shippingAddress === "string" ? shippingAddress : (address || shippingAddress?.street || ""),
-      product: product || (orderItems[0]?.name || ""),
-      quantity: quantity || (orderItems[0]?.quantity || 1),
-      amount: calculatedTotal
+      product: product || (orderItems.map(it => it.name).filter(Boolean).join(", ") || orderItems[0]?.name || ""),
+      quantity: quantity || (orderItems.reduce((acc, it) => acc + (Number(it.quantity) || 1), 0)),
+      amount: finalTotalAmount
     });
 
     await newOrder.save();
 
-    // Auto-decrease product and kit stock in MongoDB as order is placed
+    // Auto-decrease product and kit stock in MongoDB in parallel as order is placed
     try {
-      for (const item of orderItems) {
-        await decrementItemStock(item);
-      }
+      await Promise.all(orderItems.map((item) => decrementItemStock(item).catch(() => {})));
     } catch (stockErr) {
       console.warn("⚠️ Stock auto-decrement warning:", stockErr.message);
     }
@@ -1522,27 +1550,27 @@ export const createOrder = async (req, res) => {
       console.warn("⚠️ Coupon redemption increment warning:", couponErr.message);
     }
 
-      // Auto-clear cart in MongoDB database for user
-      await autoClearUserCart(resolvedUserId, resolvedPhone);
+    // Auto-clear cart in MongoDB database for user
+    await autoClearUserCart(resolvedUserId, resolvedPhone);
 
-      try {
-        broadcastRealtimeEvent({
-          type: "ORDER_CREATED",
-          orderId: newOrder.orderId,
-          masterOrderId: newOrder.masterOrderId,
-          sellerId: newOrder.sellerId,
-          total: newOrder.totalAmount,
-          customerName: newOrder.customer?.name,
-          customerPhone: newOrder.customer?.phone,
-          userId: newOrder.userId,
-          status: newOrder.overallStatus || newOrder.status || "Pending",
-          order: newOrder
-        });
-      } catch (rtErr) {
-        console.warn("⚠️ Realtime broadcast error (Branch B):", rtErr.message);
-      }
+    try {
+      broadcastRealtimeEvent({
+        type: "ORDER_CREATED",
+        orderId: newOrder.orderId,
+        masterOrderId: newOrder.masterOrderId,
+        sellerId: newOrder.sellerId,
+        total: newOrder.totalAmount,
+        customerName: newOrder.customer?.name,
+        customerPhone: newOrder.customer?.phone,
+        userId: newOrder.userId,
+        status: newOrder.overallStatus || newOrder.status || "Pending",
+        order: newOrder
+      });
+    } catch (rtErr) {
+      console.warn("⚠️ Realtime broadcast error:", rtErr.message);
+    }
 
-      return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
+    return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
   } catch (error) {
     console.error("❌ [POST /api/orders] Error creating order:", error);
     return res.status(400).json({ message: "Failed to create order", error: error.message });
@@ -1650,11 +1678,15 @@ export const trackOrder = async (req, res) => {
         : (hasReturn ? `Return & Exchange tracking active: ${retReqStatus}` : "Tracking active"),
       isDelivered: currentStatus === "delivered",
       currentStepIndex: isCancelled ? -1 : (currentStepIndex > -1 ? currentStepIndex : (currentStatus === "processing" ? 1 : 0)),
-      deliveryMode: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "self_delivery" : (order.deliveryMode === "third_party" ? "third_party" : (order.courierName ? "third_party" : (order.items?.[0]?.deliveryType === "self" || order.items?.[0]?.deliveryType === "self_delivery" ? "self_delivery" : "pending_choice"))),
-      courierName: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "" : (order.courierName || order.carrier || order.items?.[0]?.thirdPartyDetails?.courierName || ""),
-      carrier: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? "" : (order.carrier || order.courierName || ""),
-      trackingNumber: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? (order.selfDeliveryDetails?.deliveryPartnerToken || order.trackingNumber || "") : (order.trackingNumber || order.items?.[0]?.thirdPartyDetails?.trackingNumber || ""),
-      trackingUrl: (order.deliveryMode === "self_delivery" || (!order.deliveryMode && order.selfDeliveryDetails?.deliveryPartnerToken)) ? (order.selfDeliveryDetails?.trackingUrl || order.trackingUrl || "") : (order.trackingUrl || order.items?.[0]?.thirdPartyDetails?.trackingUrl || ""),
+      deliveryMode: (() => {
+        const isSelf = order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName || order.selfDeliveryDetails?.deliveryPartnerToken);
+        const isThird = order.deliveryMode === "third_party" || Boolean(!isSelf && order.courierName && order.courierName !== "N/A" && order.courierName !== "");
+        return isSelf ? "self_delivery" : (isThird ? "third_party" : "pending_choice");
+      })(),
+      courierName: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? "" : (order.courierName || order.carrier || order.items?.[0]?.thirdPartyDetails?.courierName || ""),
+      carrier: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? "" : (order.carrier || order.courierName || ""),
+      trackingNumber: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails?.deliveryPartnerToken || order.trackingNumber || "") : (order.trackingNumber || order.items?.[0]?.thirdPartyDetails?.trackingNumber || ""),
+      trackingUrl: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails?.trackingUrl || order.trackingUrl || "") : (order.trackingUrl || order.items?.[0]?.thirdPartyDetails?.trackingUrl || ""),
       sellerDetails: order.sellerDetails || order.items?.[0]?.sellerDetails || (order.items?.[0]?.sellerId ? {
         storeName: order.items[0].sellerId.storeName || order.items[0].sellerName || "",
         sellerName: order.items[0].sellerName || order.items[0].sellerId.storeName || "",
@@ -1662,10 +1694,14 @@ export const trackOrder = async (req, res) => {
         email: order.items[0].sellerId.email || "",
         address: order.items[0].sellerId.address || order.items[0].sellerId.city || ""
       } : null),
-      selfDeliveryDetails: order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null,
+      selfDeliveryDetails: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null) : null,
       deliveryOtp: (() => {
         if (hasReturn || isCancelled || ['delivered', 'completed', 'refunded', 'returned'].includes(currentStatus)) {
           return null;
+        }
+        const isSelf = order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName || order.selfDeliveryDetails?.deliveryPartnerToken);
+        if (!isSelf) {
+          return '';
         }
         let resolvedOtp = String(order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.deliveryOtp || '').trim();
         if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
@@ -1931,12 +1967,56 @@ export const updateOrder = async (req, res) => {
             const seller = await Seller.findById(item.sellerId);
             if (seller) {
               const itemTotal = item.total || (item.finalPrice || item.price) * (item.quantity || 1);
-              const commissionRate = Number(item.commissionRate ?? existingOrder.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 5);
-              const commissionAmount = Math.round(((itemTotal * commissionRate) / 100) * 100) / 100;
-              const sellerEarnings = Math.max(0, itemTotal - commissionAmount);
+              const commRate = Number(item.commissionRate ?? existingOrder.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 10);
+              const ordTotal = Number(existingOrder.totalAmount || existingOrder.total || itemTotal);
+              const itemGstRate = Number(item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? (item.category?.toLowerCase()?.includes('book') ? 0 : 5));
+              const stl = calculateSellerSettlement(itemTotal, {
+                commissionRate: commRate,
+                paymentMethod: existingOrder.paymentMethod,
+                deliveryMode: existingOrder.deliveryMode || item.deliveryType,
+                courierName: existingOrder.courierName || item.thirdPartyDetails?.courierName,
+                orderTotal: ordTotal,
+                sellerState: seller.state || seller.storeDetails?.state || "Uttar Pradesh",
+                customerState: existingOrder.shippingAddress?.state || "Uttar Pradesh",
+                gstRate: itemGstRate,
+                category: item.category || "",
+                name: item.name || item.productName || "",
+                deliveryCharge: existingOrder.shippingAmount || existingOrder.deliveryCharge || 40,
+                deliveryChargeBorneBy: existingOrder.deliveryChargeBorneBy || (ordTotal > 400 ? 'admin' : (Number(existingOrder.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+              });
 
-              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerEarnings) * 100) / 100;
-              seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + sellerEarnings) * 100) / 100;
+              item.commissionRate = stl.commissionRate;
+              item.commissionAmount = stl.commissionAmount;
+              item.gstOnCommissionRate = stl.gstOnCommissionRate;
+              item.gstOnCommissionAmount = stl.gstOnCommissionAmount;
+              item.tdsRate = stl.tdsRate;
+              item.tdsAmount = stl.tdsAmount;
+              item.isIntraState = stl.isIntraState;
+              item.gstTcsRate = stl.gstTcsRate;
+              item.gstTcsAmount = stl.gstTcsAmount;
+              item.cgstTcsRate = stl.cgstTcsRate;
+              item.cgstTcsAmount = stl.cgstTcsAmount;
+              item.sgstTcsRate = stl.sgstTcsRate;
+              item.sgstTcsAmount = stl.sgstTcsAmount;
+              item.igstTcsRate = stl.igstTcsRate;
+              item.igstTcsAmount = stl.igstTcsAmount;
+              item.deliveryChargeAmount = stl.deliveryChargeAmount;
+              item.gstOnDeliveryRate = stl.gstOnDeliveryRate;
+              item.gstOnDeliveryAmount = stl.gstOnDeliveryAmount;
+              item.totalDeliveryDeduction = stl.totalDeliveryDeduction;
+              item.deliveryChargeBorneBy = stl.deliveryChargeBorneBy;
+              item.totalDeductions = stl.totalDeductions;
+              item.netSettlementAmount = stl.netSettlement;
+              item.settlementStatus = "credited";
+              item.settlementRule = stl.ruleCode;
+
+              const sellerNetSettlement = stl.netSettlement;
+              const realEarnings = stl.isSellerCollectedCash
+                ? Math.round((itemTotal - stl.totalDeductions) * 100) / 100
+                : sellerNetSettlement;
+
+              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + realEarnings) * 100) / 100;
               await seller.save();
             }
           }
@@ -2369,13 +2449,15 @@ export const downloadInvoice = async (req, res) => {
 
     // STRICT PRODUCT & ORDER CONFIRMATION CHECK: Do not generate invoice when product status or order status is pending
     const isPending = !orderStatusVal || orderStatusVal === "pending" || orderStatusVal === "unconfirmed" || orderStatusVal === "placed";
+    const isPaid = String(enrichedOrder.paymentStatus || "").toLowerCase() === "paid" || Number(enrichedOrder.advancePaidAmount || 0) > 0;
+    const isConfirmedAndOnward = [
+      "assigned", "accepted", "confirmed", "processing", "production", "packed", "shipped",
+      "dispatched", "in_transit", "out_for_delivery", "delivered", "completed", "fulfilled",
+      "return_requested", "returned", "exchange_requested", "exchanged", "refunded", "cancelled"
+    ].includes(orderStatusVal);
 
-    const hasPendingProduct = isPending || (Array.isArray(itemsToCheck) && itemsToCheck.length > 0 && itemsToCheck.some(it => {
-      const st = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
-      return !st || st === "pending" || st === "unconfirmed" || st === "placed";
-    }));
-
-    if (isPending || hasPendingProduct) {
+    const isStrictlyPending = !isConfirmedAndOnward && !isPaid && isPending;
+    if (isStrictlyPending) {
       return res.status(400).json({
         message: `Tax Invoice cannot be generated while product or order status is pending. Current status: '${enrichedOrder.overallStatus || enrichedOrder.status || "Pending"}'. Invoice will be available once the order and products are confirmed.`
       });

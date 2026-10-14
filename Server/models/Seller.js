@@ -194,13 +194,13 @@ const sellerSchema = new mongoose.Schema(
     // Financials, Wallet & Commission
     commissionPercentage: {
       type: Number,
-      default: 5, // Default platform fee: 5%
+      default: 10, // Default platform fee: 10%
       min: 0,
       max: 100
     },
     commissionRate: {
       type: Number,
-      default: 5, // Default platform fee: 5%
+      default: 10, // Default platform fee: 10%
       min: 0,
       max: 100
     },

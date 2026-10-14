@@ -624,6 +624,15 @@ export const createAdminProduct = async (req, res) => {
         payload.sizeVariants = [];
       }
     }
+    if (Array.isArray(payload.sizeVariants)) {
+      payload.sizeVariants = payload.sizeVariants.filter(v => 
+        v && 
+        !v.isBase && 
+        String(v.size || '').trim().toLowerCase() !== 'base product' && 
+        String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+        !String(v.id || '').startsWith('base_option_')
+      );
+    }
     if (Array.isArray(payload.sizeVariants) && payload.sizeVariants.length > 0) {
       if (!payload.sizes || payload.sizes.length === 0) {
         payload.sizes = payload.sizeVariants.map(v => v.size).filter(Boolean);
@@ -725,6 +734,15 @@ export const updateAdminProduct = async (req, res) => {
       } catch (e) {
         updates.sizeVariants = [];
       }
+    }
+    if (Array.isArray(updates.sizeVariants)) {
+      updates.sizeVariants = updates.sizeVariants.filter(v => 
+        v && 
+        !v.isBase && 
+        String(v.size || '').trim().toLowerCase() !== 'base product' && 
+        String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+        !String(v.id || '').startsWith('base_option_')
+      );
     }
     if (Array.isArray(updates.sizeVariants) && updates.sizeVariants.length > 0) {
       if (!updates.sizes || updates.sizes.length === 0) {

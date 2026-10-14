@@ -61,6 +61,8 @@ const orderItemSchema = new mongoose.Schema({
   },
   discountPercentage: { type: Number, default: 0 },
   offerDiscount: { type: Number, default: 0 },
+  couponCode: { type: String, default: "" },
+  appliedCoupon: { type: String, default: "" },
   finalPrice: { type: Number, default: function () { return this.price; } },
   quantity: { type: Number, required: true, min: 0.01, default: 1 },
   total: { type: Number, default: function () { return Math.round(((this.price || 0) * (this.quantity || 1)) * 100) / 100; } },
@@ -108,7 +110,24 @@ const orderItemSchema = new mongoose.Schema({
   status: {
     type: String,
     default: "pending"
-  }
+  },
+  commissionRate: { type: Number, default: 10 },
+  commissionAmount: { type: Number, default: 0 },
+  gstOnCommissionRate: { type: Number, default: 18 },
+  gstOnCommissionAmount: { type: Number, default: 0 },
+  tdsRate: { type: Number, default: 0.1 },
+  tdsAmount: { type: Number, default: 0 },
+  gstTcsRate: { type: Number, default: 0.5 },
+  gstTcsAmount: { type: Number, default: 0 },
+  deliveryChargeAmount: { type: Number, default: 0 },
+  gstOnDeliveryRate: { type: Number, default: 18 },
+  gstOnDeliveryAmount: { type: Number, default: 0 },
+  totalDeliveryDeduction: { type: Number, default: 0 },
+  deliveryChargeBorneBy: { type: String, default: "admin" },
+  totalDeductions: { type: Number, default: 0 },
+  netSettlementAmount: { type: Number, default: 0 },
+  settlementStatus: { type: String, enum: ["pending", "credited", "settled", "refunded"], default: "pending" },
+  settlementRule: { type: String, default: "ONLINE_SELF_DELIVERY" }
 });
 
 const timelineEventSchema = new mongoose.Schema({
@@ -176,9 +195,11 @@ const orderSchema = new mongoose.Schema(
     shippingFee: { type: Number, default: 0 },
     discount: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
-    commissionRate: { type: Number, default: 5 },
-    commissionPercentage: { type: Number, default: 5 },
-    sellerCommissionRate: { type: Number, default: 5 },
+    couponCode: { type: String, default: "" },
+    appliedCoupon: { type: String, default: "" },
+    commissionRate: { type: Number, default: 10 },
+    commissionPercentage: { type: Number, default: 10 },
+    sellerCommissionRate: { type: Number, default: 10 },
     totalAmount: {
       type: Number,
       required: true,
@@ -367,42 +388,76 @@ const orderSchema = new mongoose.Schema(
 
 // Pre-save hook to initialize first timeline entry and unify delivery OTP
 orderSchema.pre("save", function (next) {
-  // Synchronize deliveryOtp across order and item fields
-  let canonicalOtp = "";
+  const isSelfDeliveryMode = this.deliveryMode === "self_delivery" ||
+    Boolean(this.selfDeliveryDetails?.deliveryPersonName || this.selfDeliveryDetails?.deliveryPartnerToken);
 
-  // If selfDeliveryDetails.deliveryOtp was explicitly modified (e.g. resend OTP), prioritize it
-  if (this.isModified && this.isModified("selfDeliveryDetails.deliveryOtp") && this.selfDeliveryDetails?.deliveryOtp) {
-    canonicalOtp = String(this.selfDeliveryDetails.deliveryOtp).trim();
-  } else if (this.isModified && this.isModified("deliveryOtp") && this.deliveryOtp) {
-    canonicalOtp = String(this.deliveryOtp).trim();
+  if (isSelfDeliveryMode) {
+    this.deliveryMode = "self_delivery";
+    let canonicalOtp = "";
+
+    // If selfDeliveryDetails.deliveryOtp was explicitly modified (e.g. resend OTP), prioritize it
+    if (this.isModified && this.isModified("selfDeliveryDetails.deliveryOtp") && this.selfDeliveryDetails?.deliveryOtp) {
+      canonicalOtp = String(this.selfDeliveryDetails.deliveryOtp).trim();
+    } else if (this.isModified && this.isModified("deliveryOtp") && this.deliveryOtp) {
+      canonicalOtp = String(this.deliveryOtp).trim();
+    } else {
+      canonicalOtp = String(
+        this.deliveryOtp ||
+        this.selfDeliveryDetails?.deliveryOtp ||
+        (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
+        (this.items?.[0]?.deliveryOtp) ||
+        ""
+      ).trim();
+    }
+
+    // Generate secure 4-digit OTP for confirmed self-delivery
+    if (!canonicalOtp || !/^\d{4}$/.test(canonicalOtp)) {
+      canonicalOtp = Math.floor(1000 + Math.random() * 9000).toString();
+    }
+
+    this.deliveryOtp = canonicalOtp;
+    if (!this.selfDeliveryDetails) {
+      this.selfDeliveryDetails = {};
+    }
+    this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+
+    if (Array.isArray(this.items)) {
+      this.items.forEach(it => {
+        it.deliveryOtp = canonicalOtp;
+        if (it.selfDeliveryDetails) {
+          it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+        }
+      });
+    }
+  } else if (this.deliveryMode === "third_party") {
+    // 3rd-party courier uses carrier AWB, no store doorstep OTP
+    this.deliveryOtp = "";
+    if (this.selfDeliveryDetails) {
+      this.selfDeliveryDetails.deliveryOtp = "";
+    }
+    if (Array.isArray(this.items)) {
+      this.items.forEach(it => {
+        it.deliveryOtp = "";
+        if (it.selfDeliveryDetails) {
+          it.selfDeliveryDetails.deliveryOtp = "";
+        }
+      });
+    }
   } else {
-    canonicalOtp = String(
-      this.deliveryOtp ||
-      this.selfDeliveryDetails?.deliveryOtp ||
-      (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
-      (this.items?.[0]?.deliveryOtp) ||
-      ""
-    ).trim();
-  }
-
-  // Ensure every order has a secure, permanent 4-digit OTP
-  if (!canonicalOtp || !/^\d{4}$/.test(canonicalOtp)) {
-    canonicalOtp = Math.floor(1000 + Math.random() * 9000).toString();
-  }
-
-  this.deliveryOtp = canonicalOtp;
-  if (!this.selfDeliveryDetails) {
-    this.selfDeliveryDetails = {};
-  }
-  this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
-
-  if (Array.isArray(this.items)) {
-    this.items.forEach(it => {
-      it.deliveryOtp = canonicalOtp;
-      if (it.selfDeliveryDetails) {
-        it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
-      }
-    });
+    // pending_choice or unconfirmed: do NOT generate OTP and do NOT assume self-delivery
+    this.deliveryMode = this.deliveryMode || "pending_choice";
+    this.deliveryOtp = "";
+    if (this.selfDeliveryDetails) {
+      this.selfDeliveryDetails.deliveryOtp = "";
+    }
+    if (Array.isArray(this.items)) {
+      this.items.forEach(it => {
+        it.deliveryOtp = "";
+        if (it.selfDeliveryDetails) {
+          it.selfDeliveryDetails.deliveryOtp = "";
+        }
+      });
+    }
   }
 
   if (this.isNew && (!this.timeline || this.timeline.length === 0)) {

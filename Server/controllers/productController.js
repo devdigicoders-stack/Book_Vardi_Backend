@@ -555,6 +555,15 @@ export const createProduct = async (req, res) => {
     if (payload.isExchangeable !== undefined) payload.isExchangeable = parseBool(payload.isExchangeable, true);
     if (payload.isRefundable !== undefined) payload.isRefundable = parseBool(payload.isRefundable, true);
 
+    if (Array.isArray(payload.sizeVariants)) {
+      payload.sizeVariants = payload.sizeVariants.filter(v => 
+        v && 
+        !v.isBase && 
+        String(v.size || '').trim().toLowerCase() !== 'base product' && 
+        String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+        !String(v.id || '').startsWith('base_option_')
+      );
+    }
     if (Array.isArray(payload.sizeVariants) && payload.sizeVariants.length > 0) {
       payload.sizeVariants = payload.sizeVariants.map((v, vIdx) => {
         if (!v) return null;
@@ -682,6 +691,15 @@ export const updateProduct = async (req, res) => {
         : ["COD", "Online"];
     }
 
+    if (Array.isArray(updates.sizeVariants)) {
+      updates.sizeVariants = updates.sizeVariants.filter(v => 
+        v && 
+        !v.isBase && 
+        String(v.size || '').trim().toLowerCase() !== 'base product' && 
+        String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+        !String(v.id || '').startsWith('base_option_')
+      );
+    }
     if (Array.isArray(updates.sizeVariants) && updates.sizeVariants.length > 0) {
       if (!updates.sizes || updates.sizes.length === 0) {
         updates.sizes = updates.sizeVariants.map(v => v.size).filter(Boolean);

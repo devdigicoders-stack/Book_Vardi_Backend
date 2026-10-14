@@ -147,9 +147,10 @@ export const applyCoupon = async (req, res) => {
 
     if (Array.isArray(cartItems) && cartItems.length > 0) {
       const eligibleItems = cartItems.filter((item) => {
-        const itemSellerId = extractId(item.sellerId) || extractId(item.seller) || extractId(item.storeId) || extractId(item.userId);
-        const itemProductId = extractId(item.id) || extractId(item._id) || extractId(item.productId);
+        const itemSellerId = extractId(item.sellerId) || extractId(item.sellerDetails?.sellerId) || extractId(item.seller) || extractId(item.storeId) || extractId(item.userId);
+        const itemProductId = extractId(item.productId) || extractId(item.id) || extractId(item._id);
         const itemKitId = extractId(item.kitId) || extractId(item.bundleId) || extractId(item.id) || extractId(item._id);
+        const isKit = Boolean(item.isKit || item.kitId || item.bundleId || item.itemType === 'kit' || item.type === 'kit' || (item.category && String(item.category).toLowerCase().includes('kit')));
         const isCustomized = Boolean(item.isCustomized || (item.name && item.name.includes('(Custom Bundle)')));
 
         if (isSellerScoped) {

@@ -340,6 +340,16 @@ export const createProduct = async (req, res) => {
       }
     }
 
+    if (Array.isArray(parsedSizeVariants)) {
+      parsedSizeVariants = parsedSizeVariants.filter(v => 
+        v && 
+        !v.isBase && 
+        String(v.size || '').trim().toLowerCase() !== 'base product' && 
+        String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+        !String(v.id || '').startsWith('base_option_')
+      );
+    }
+
     // Parse sizeChart
     let parsedSizeChart = {};
     if (sizeChart) {
@@ -582,6 +592,16 @@ export const updateProduct = async (req, res) => {
         }
       } else if (Array.isArray(rawVariantsInput)) {
         parsedVariants = rawVariantsInput;
+      }
+
+      if (Array.isArray(parsedVariants)) {
+        parsedVariants = parsedVariants.filter(v => 
+          v && 
+          !v.isBase && 
+          String(v.size || '').trim().toLowerCase() !== 'base product' && 
+          String(v.measureValue || '').trim().toLowerCase() !== 'base product' && 
+          !String(v.id || '').startsWith('base_option_')
+        );
       }
 
       const formattedVariants = Array.isArray(parsedVariants)

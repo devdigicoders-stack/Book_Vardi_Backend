@@ -4,6 +4,7 @@ import User from "../models/User.js";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import { generateSellerFinancialStatementPDF } from "../services/invoiceService.js";
+import { calculateSellerSettlement } from "../services/settlementService.js";
 
 // Helper: Safely find seller by MongoDB ObjectId or fallback to email / phone / storeName
 const findSellerByIdOrQuery = async (id, selectFields = "") => {
@@ -382,13 +383,19 @@ export const downloadSellerFinancialStatement = async (req, res) => {
     const enrichedOrders = [];
     let grossSales = 0;
     let platformCut = 0;
+    let totalGstOnCommission = 0;
+    let totalTds = 0;
+    let totalGstTcs = 0;
+    let totalDeliveryDeduction = 0;
+    let totalDeductions = 0;
+    let finalSettlementTotal = 0;
     let totalGst = 0;
     let codVolume = 0;
     let codCount = 0;
     let upiVolume = 0;
     let upiCount = 0;
 
-    const commissionRate = Number(seller.commissionRate ?? seller.commissionPercentage ?? 5);
+    const commissionRate = Number(seller.commissionRate ?? seller.commissionPercentage ?? 10);
 
     rawOrders.forEach(o => {
       const itemsList = Array.isArray(o.items) ? o.items : [];
@@ -411,6 +418,7 @@ export const downloadSellerFinancialStatement = async (req, res) => {
       }, 0);
 
       const effectiveTotal = orderSubtotal > 0 ? orderSubtotal : Number(o.totalAmount || o.total || 0);
+      const ordTotalVal = Number(o.totalAmount || o.total || effectiveTotal);
       const isCancelled = String(o.overallStatus || o.status || '').toLowerCase().includes('cancel');
 
       const isCod = String(o.paymentMethod || '').toUpperCase().includes('COD');
@@ -422,11 +430,29 @@ export const downloadSellerFinancialStatement = async (req, res) => {
         return sum + (itPrice - (itPrice / (1 + rate / 100)));
       }, 0);
 
-      const orderCut = Math.round(effectiveTotal * (commissionRate / 100) * 100) / 100;
+      const sellerState = seller.state || seller.storeDetails?.state || "Uttar Pradesh";
+      const customerState = o.shippingAddress?.state || "Uttar Pradesh";
+      const stl = calculateSellerSettlement(effectiveTotal, {
+        commissionRate,
+        paymentMethod: o.paymentMethod || "UPI",
+        deliveryMode: o.deliveryMode || "self_delivery",
+        courierName: o.courierName,
+        orderTotal: ordTotalVal,
+        sellerState,
+        customerState,
+        deliveryCharge: o.shippingAmount || o.deliveryCharge || 40,
+        deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+      });
 
       if (!isCancelled) {
         grossSales += effectiveTotal;
-        platformCut += orderCut;
+        platformCut += stl.commissionAmount;
+        totalGstOnCommission += stl.gstOnCommissionAmount;
+        totalTds += stl.tdsAmount;
+        totalGstTcs += stl.gstTcsAmount;
+        totalDeliveryDeduction += stl.totalDeliveryDeduction;
+        totalDeductions += stl.totalDeductions;
+        finalSettlementTotal += stl.netSettlement;
         totalGst += itemGst;
 
         if (isCod) {
@@ -446,17 +472,25 @@ export const downloadSellerFinancialStatement = async (req, res) => {
         commissionRate,
         isCod,
         date: o.date ? o.date : (o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) : 'Recent'),
-        customerName: o.customerName || o.customer?.name || o.shippingAddress?.name || 'Verified Consumer'
+        customerName: o.customerName || o.customer?.name || o.shippingAddress?.name || 'Verified Consumer',
+        settlement: stl
       });
     });
 
-    const netEarnings = Math.max(0, Math.round((grossSales - platformCut) * 100) / 100);
+    const netEarnings = Math.max(0, Math.round(finalSettlementTotal * 100) / 100);
 
     const metrics = {
-      grossSales,
+      grossSales: Math.round(grossSales * 100) / 100,
       commissionRate,
-      platformCut,
+      platformCut: Math.round(platformCut * 100) / 100,
+      portalCommission: Math.round(platformCut * 100) / 100,
+      gstOnCommission: Math.round(totalGstOnCommission * 100) / 100,
+      tds: Math.round(totalTds * 100) / 100,
+      gstTcs: Math.round(totalGstTcs * 100) / 100,
+      deliveryDeduction: Math.round(totalDeliveryDeduction * 100) / 100,
+      totalDeductions: Math.round(totalDeductions * 100) / 100,
       netEarnings,
+      finalSettlement: netEarnings,
       totalGst: Math.round(totalGst * 100) / 100,
       codVolume,
       codCount,

@@ -429,15 +429,17 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   }
 
   // STRICT VALIDATION: Do not generate invoice when product or order status is pending
-  const orderStatus = String(order.overallStatus || order.status || "").toLowerCase().trim();
+  const orderStatus = String(order.overallStatus || order.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
   const isOrderPending = !orderStatus || orderStatus === "pending" || orderStatus === "placed" || orderStatus === "unconfirmed";
+  const isPaid = String(order.paymentStatus || "").toLowerCase() === "paid" || Number(order.advancePaidAmount || 0) > 0;
+  const isConfirmedAndOnward = [
+    "assigned", "accepted", "confirmed", "processing", "production", "packed", "shipped",
+    "dispatched", "in_transit", "out_for_delivery", "delivered", "completed", "fulfilled",
+    "return_requested", "returned", "exchange_requested", "exchanged", "refunded", "cancelled"
+  ].includes(orderStatus);
 
-  const hasPendingProduct = isOrderPending || itemsToRender.some((it) => {
-    const itStatus = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
-    return !itStatus || itStatus === "pending" || itStatus === "placed" || itStatus === "unconfirmed";
-  });
-
-  if (hasPendingProduct) {
+  const isStrictlyPending = !isConfirmedAndOnward && !isPaid && isOrderPending;
+  if (isStrictlyPending) {
     throw new Error(
       `Tax invoice cannot be generated while product or order status is pending. Current status: '${order.overallStatus || order.status || "Pending"}'. Items must be confirmed before generating invoice.`
     );
@@ -700,6 +702,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     const variantDetails = [
       item.size ? `Size: ${item.size}` : "",
       item.age ? `Age: ${item.age}` : "",
+      Number(item.offerDiscount || item.discount || 0) > 0 ? `Coupon: -Rs. ${Number(item.offerDiscount || item.discount).toFixed(2)}` : "",
       `GST: ${gstRate}% (Rs. ${itemTax.toFixed(2)})`
     ]
       .filter(Boolean)
@@ -1917,9 +1920,14 @@ export const generateSellerFinancialStatementPDF = (seller, orders = [], metrics
   const statementDate = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 
   const totalGMV = Number(metrics.grossSales || 0);
-  const commissionRate = Number(metrics.commissionRate || seller.commissionRate || seller.commissionPercentage || 5);
-  const platformCut = Number(metrics.platformCut || 0);
-  const netEarnings = Number(metrics.netEarnings || (totalGMV - platformCut));
+  const commissionRate = Number(metrics.commissionRate || seller.commissionRate || seller.commissionPercentage || 10);
+  const platformCut = Number(metrics.platformCut || metrics.portalCommission || (totalGMV * (commissionRate / 100)));
+  const gstOnCommission = Number(metrics.gstOnCommission !== undefined ? metrics.gstOnCommission : Math.round(platformCut * 0.18 * 100) / 100);
+  const tdsAmount = Number(metrics.tds !== undefined ? metrics.tds : Math.round(totalGMV * 0.001 * 100) / 100);
+  const gstTcsAmount = Number(metrics.gstTcs !== undefined ? metrics.gstTcs : Math.round(totalGMV * 0.005 * 100) / 100);
+  const deliveryDeduction = Number(metrics.deliveryDeduction || 0);
+  const totalDeductions = Number(metrics.totalDeductions !== undefined ? metrics.totalDeductions : Math.round((platformCut + gstOnCommission + tdsAmount + gstTcsAmount + deliveryDeduction) * 100) / 100);
+  const netEarnings = Number(metrics.finalSettlement ?? metrics.netEarnings ?? Math.max(0, Math.round((totalGMV - totalDeductions) * 100) / 100));
   const totalGst = Number(metrics.totalGst || 0);
   const codVolume = Number(metrics.codVolume || 0);
   const codCount = Number(metrics.codCount || 0);
@@ -1952,7 +1960,7 @@ export const generateSellerFinancialStatementPDF = (seller, orders = [], metrics
     .text(`Statement Ref: ${statementId}`, 320, 60, { align: "right" })
     .text(`Statement Date: ${statementDate}`, 320, 72, { align: "right" })
     .text(`Reporting Period: Complete Historical Settlement`, 320, 84, { align: "right" })
-    .text(`Commission Model: Standard Platform Cut (${commissionRate}%)`, 320, 96, { align: "right" });
+    .text(`BookVardi Settlement: Rules 1 & 2 (${commissionRate}% Cut)`, 320, 96, { align: "right" });
 
   // Divider
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 112).lineTo(555, 112).stroke();
@@ -2009,21 +2017,21 @@ export const generateSellerFinancialStatementPDF = (seller, orders = [], metrics
 
   // Box 1: Gross Sales
   doc.rect(40, boxTop, boxW, boxH).fillAndStroke("#f0fdf4", "#bbf7d0");
-  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(greenColor).text("GROSS MERCHANDISE (GMV)", 46, boxTop + 6);
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(greenColor).text("GROSS SALES REVENUE", 46, boxTop + 6);
   doc.fontSize(12).font("Helvetica-Bold").fillColor(primaryColor).text(`Rs. ${totalGMV.toLocaleString("en-IN")}`, 46, boxTop + 18);
-  doc.fontSize(7).font("Helvetica").fillColor(mutedColor).text(`${orders.length} Total Orders`, 46, boxTop + 34);
+  doc.fontSize(7).font("Helvetica").fillColor(mutedColor).text(`${orders.length} Total Orders Recorded`, 46, boxTop + 34);
 
-  // Box 2: Platform Cut
+  // Box 2: Total Deductions (Commission + GST + TDS + TCS)
   doc.rect(170, boxTop, boxW, boxH).fillAndStroke("#fffbeb", "#fde68a");
-  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(amberColor).text(`PLATFORM COMMISSION (${commissionRate}%)`, 176, boxTop + 6);
-  doc.fontSize(12).font("Helvetica-Bold").fillColor(amberColor).text(`Rs. ${platformCut.toLocaleString("en-IN")}`, 176, boxTop + 18);
-  doc.fontSize(7).font("Helvetica").fillColor(mutedColor).text("Standard marketplace fee", 176, boxTop + 34);
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(amberColor).text(`TOTAL DEDUCTIONS (${commissionRate}%)`, 176, boxTop + 6);
+  doc.fontSize(12).font("Helvetica-Bold").fillColor(amberColor).text(`Rs. ${totalDeductions.toLocaleString("en-IN")}`, 176, boxTop + 18);
+  doc.fontSize(6).font("Helvetica").fillColor(mutedColor).text(`Comm ₹${platformCut} + GST ₹${gstOnCommission} + Tax${deliveryDeduction > 0 ? ` + Deliv ₹${deliveryDeduction}` : ''}`, 176, boxTop + 34);
 
-  // Box 3: Net Seller Earnings
+  // Box 3: Final Seller Settlement
   doc.rect(300, boxTop, boxW, boxH).fillAndStroke("#f0fdfa", "#99f6e4");
-  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(tealColor).text("NET SELLER REVENUE", 306, boxTop + 6);
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(tealColor).text("FINAL SELLER SETTLEMENT", 306, boxTop + 6);
   doc.fontSize(12).font("Helvetica-Bold").fillColor(tealColor).text(`Rs. ${netEarnings.toLocaleString("en-IN")}`, 306, boxTop + 18);
-  doc.fontSize(7).font("Helvetica").fillColor(mutedColor).text("Net after platform fee", 306, boxTop + 34);
+  doc.fontSize(6.5).font("Helvetica").fillColor(mutedColor).text(`Net after TDS ₹${tdsAmount} & TCS ₹${gstTcsAmount}`, 306, boxTop + 34);
 
   // Box 4: Current Payable Balance
   doc.rect(430, boxTop, boxW, boxH).fillAndStroke("#f8fafc", borderColor);
@@ -2096,7 +2104,11 @@ export const generateSellerFinancialStatementPDF = (seller, orders = [], metrics
       const ordRate = Number(o.commissionRate || commissionRate);
       const ordCut = Math.round(orderGross * (ordRate / 100) * 100) / 100;
       const ordGst = Math.round((orderGross - (orderGross / 1.05)) * 100) / 100;
-      const ordNet = Math.max(0, Math.round((orderGross - ordCut) * 100) / 100);
+      const ordNet = o.settlement?.netSettlement !== undefined 
+        ? Number(o.settlement.netSettlement) 
+        : (o.netSettlementAmount !== undefined 
+            ? Number(o.netSettlementAmount) 
+            : Math.max(0, Math.round((orderGross - ordCut) * 100) / 100));
 
       // Row background zebra striping
       if (idx % 2 === 1) {
@@ -2124,8 +2136,8 @@ export const generateSellerFinancialStatementPDF = (seller, orders = [], metrics
         .fillColor(mutedColor)
         .text(`Rs. ${ordGst.toFixed(2)}`, 440, y, { width: 50, align: "right" })
         .font("Helvetica-Bold")
-        .fillColor(greenColor)
-        .text(`Rs. ${ordNet.toFixed(2)}`, 495, y, { width: 55, align: "right" });
+        .fillColor(ordNet < 0 ? "#b91c1c" : greenColor)
+        .text(ordNet < 0 ? `-Rs. ${Math.abs(ordNet).toFixed(2)}` : `Rs. ${ordNet.toFixed(2)}`, 495, y, { width: 55, align: "right" });
 
       y += 16;
     });

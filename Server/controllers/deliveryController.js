@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
+import { calculateSellerSettlement } from "../services/settlementService.js";
 
 // Helper to locate order or bulk requisition by token or ID
 const findOrderByTokenOrId = async (tokenOrId) => {
@@ -600,12 +601,56 @@ export const verifyDeliveryOtp = async (req, res) => {
             const seller = await Seller.findById(item.sellerId);
             if (seller) {
               const itemTotal = item.total || (item.finalPrice || item.price || 0) * (item.quantity || 1);
-              const commissionRate = Number(item.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 5);
-              const commissionAmount = Math.round(((itemTotal * commissionRate) / 100) * 100) / 100;
-              const sellerEarnings = Math.max(0, itemTotal - commissionAmount);
+              const commRate = Number(item.commissionRate ?? order.commissionRate ?? seller.commissionRate ?? seller.commissionPercentage ?? 10);
+              const ordTotal = Number(order.totalAmount || order.total || itemTotal);
+              const itemGstRate = Number(item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? (item.category?.toLowerCase()?.includes('book') ? 0 : 5));
+              const stl = calculateSellerSettlement(itemTotal, {
+                commissionRate: commRate,
+                paymentMethod: order.paymentMethod,
+                deliveryMode: order.deliveryMode || "self_delivery",
+                courierName: order.courierName || item.thirdPartyDetails?.courierName,
+                orderTotal: ordTotal,
+                sellerState: seller.state || seller.storeDetails?.state || "Uttar Pradesh",
+                customerState: order.shippingAddress?.state || "Uttar Pradesh",
+                gstRate: itemGstRate,
+                category: item.category || "",
+                name: item.name || item.productName || "",
+                deliveryCharge: order.shippingAmount || order.deliveryCharge || 40,
+                deliveryChargeBorneBy: order.deliveryChargeBorneBy || (ordTotal > 400 ? 'admin' : (Number(order.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+              });
 
-              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerEarnings) * 100) / 100;
-              seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + sellerEarnings) * 100) / 100;
+              item.commissionRate = stl.commissionRate;
+              item.commissionAmount = stl.commissionAmount;
+              item.gstOnCommissionRate = stl.gstOnCommissionRate;
+              item.gstOnCommissionAmount = stl.gstOnCommissionAmount;
+              item.tdsRate = stl.tdsRate;
+              item.tdsAmount = stl.tdsAmount;
+              item.isIntraState = stl.isIntraState;
+              item.gstTcsRate = stl.gstTcsRate;
+              item.gstTcsAmount = stl.gstTcsAmount;
+              item.cgstTcsRate = stl.cgstTcsRate;
+              item.cgstTcsAmount = stl.cgstTcsAmount;
+              item.sgstTcsRate = stl.sgstTcsRate;
+              item.sgstTcsAmount = stl.sgstTcsAmount;
+              item.igstTcsRate = stl.igstTcsRate;
+              item.igstTcsAmount = stl.igstTcsAmount;
+              item.deliveryChargeAmount = stl.deliveryChargeAmount;
+              item.gstOnDeliveryRate = stl.gstOnDeliveryRate;
+              item.gstOnDeliveryAmount = stl.gstOnDeliveryAmount;
+              item.totalDeliveryDeduction = stl.totalDeliveryDeduction;
+              item.deliveryChargeBorneBy = stl.deliveryChargeBorneBy;
+              item.totalDeductions = stl.totalDeductions;
+              item.netSettlementAmount = stl.netSettlement;
+              item.settlementStatus = "credited";
+              item.settlementRule = stl.ruleCode;
+
+              const sellerNetSettlement = stl.netSettlement;
+              const realEarnings = stl.isSellerCollectedCash
+                ? Math.round((itemTotal - stl.totalDeductions) * 100) / 100
+                : sellerNetSettlement;
+
+              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + realEarnings) * 100) / 100;
               await seller.save();
             }
           }

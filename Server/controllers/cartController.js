@@ -101,6 +101,10 @@ const getNormalizedCartItems = (cart) => {
         image: it.image || (Array.isArray(it.images) && it.images[0]) || "",
         price: Number(it.price) || 0,
         originalPrice: Number(it.originalPrice || it.mrp) || 0,
+        offerDiscount: Number(it.offerDiscount || it.discount || 0),
+        discount: Number(it.offerDiscount || it.discount || 0),
+        finalPrice: Number(it.finalPrice || it.price || 0),
+        couponCode: it.couponCode || "",
         selectedSize: it.selectedSize || undefined,
         selectedColor: it.selectedColor || undefined,
         selectedVariant: it.selectedVariant || undefined,
@@ -120,17 +124,23 @@ const saveCartSafely = async (cart) => {
     await cart.save();
     return cart;
   } catch (err) {
-    if (err.name === 'VersionError' && cart && cart._id) {
-      // Re-fetch latest document from MongoDB to get updated __v and save
-      const latestCart = await Cart.findById(cart._id);
-      if (latestCart) {
-        latestCart.items = cart.items;
-        latestCart.markModified('items');
-        await latestCart.save();
-        return latestCart;
+    if (cart && cart._id) {
+      try {
+        // Re-fetch latest document from MongoDB to get updated __v and save
+        const latestCart = await Cart.findById(cart._id);
+        if (latestCart) {
+          latestCart.items = cart.items;
+          latestCart.markModified('items');
+          await latestCart.save();
+          return latestCart;
+        }
+        // If latestCart is null, document was deleted concurrently (e.g. auto-cleared on checkout)
+        return cart;
+      } catch (innerErr) {
+        return cart;
       }
     }
-    throw err;
+    return cart;
   }
 };
 

@@ -6,6 +6,7 @@ import User from "../models/User.js";
 import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus, STAGE_RANK } from "./orderController.js";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
+import { calculateSellerSettlement } from "../services/settlementService.js";
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw, contextOrder = null) => {
@@ -287,7 +288,12 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   const isMultiSeller = itemsList.length > orderItems.length;
 
   const computedItemsSubtotal = orderItems.reduce(
-    (sum, item) => sum + (Number(item.total) || (Number(item.price || item.finalPrice || 0) * Number(item.quantity || 1))),
+    (sum, item) => sum + ((Number(item.price) || Number(item.finalPrice) || 0) * Number(item.quantity || 1)),
+    0
+  );
+
+  const sellerItemsDiscount = orderItems.reduce(
+    (sum, item) => sum + (Number(item.offerDiscount || item.discount) || 0),
     0
   );
 
@@ -297,9 +303,15 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   const discountAmount = Number(o.discountAmount ?? o.discount ?? 0);
   const codFee = Number(o.codFee ?? o.codCharges ?? 0);
 
+  // If this seller's items have specific coupon discounts, use that.
+  // In a multi-seller order, a coupon on another seller's item must never deduct from this seller.
+  const resolvedDiscount = sellerItemsDiscount > 0
+    ? sellerItemsDiscount
+    : (isMultiSeller ? 0 : discountAmount);
+
   const resolvedOrderTotal = isMultiSeller
-    ? computedItemsSubtotal
-    : (storedOrderTotal > 0 ? storedOrderTotal : Math.max(0, computedItemsSubtotal + shippingFee + codFee - discountAmount));
+    ? Math.max(0, computedItemsSubtotal - resolvedDiscount)
+    : (storedOrderTotal > 0 ? storedOrderTotal : Math.max(0, computedItemsSubtotal + shippingFee + codFee - resolvedDiscount));
 
   const resolvedSubtotal = computedItemsSubtotal;
 
@@ -332,6 +344,21 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
   }
 
+  const ordTotalVal = Number(resolvedOrderTotal || o.totalAmount || o.total || 0);
+  const sellerStateVal = scope?.state || scope?.storeDetails?.state || o.sellerDetails?.state || "Uttar Pradesh";
+  const customerStateVal = shippingAddressObj.state || o.shippingAddress?.state || "Uttar Pradesh";
+  const orderSettlement = calculateSellerSettlement(resolvedOrderTotal, {
+    commissionRate: Number(o.commissionRate ?? 10),
+    paymentMethod: o.paymentMethod || "UPI",
+    deliveryMode: o.deliveryMode || (o.selfDeliveryDetails?.deliveryPartnerToken ? "self_delivery" : "third_party"),
+    courierName: o.courierName,
+    orderTotal: ordTotalVal,
+    sellerState: sellerStateVal,
+    customerState: customerStateVal,
+    deliveryCharge: o.shippingAmount || o.deliveryCharge || 40,
+    deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+  });
+
   return {
     id: rawOrderId,
     _id: o._id,
@@ -357,8 +384,10 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     sellerSubtotal: computedItemsSubtotal,
     shippingFee: isMultiSeller ? 0 : shippingFee,
     shippingCost: isMultiSeller ? 0 : shippingFee,
-    discountAmount: isMultiSeller ? 0 : discountAmount,
-    discount: isMultiSeller ? 0 : discountAmount,
+    discountAmount: resolvedDiscount,
+    discount: resolvedDiscount,
+    couponCode: (resolvedDiscount > 0 ? (o.couponCode || o.appliedCoupon || "") : ""),
+    appliedCoupon: (resolvedDiscount > 0 ? (o.couponCode || o.appliedCoupon || "") : ""),
     codFee: isMultiSeller ? 0 : codFee,
     itemsCount: orderItems.length,
     status: formattedStatus,
@@ -388,33 +417,94 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     storeName: o.storeName || o.sellerStoreName || orderItems[0]?.storeName || orderItems[0]?.sellerStoreName || o.sellerDetails?.storeName || scope?.storeName || "",
     sellerName: o.sellerName || orderItems[0]?.sellerName || o.sellerDetails?.sellerName || scope?.storeName || "",
     selfDeliveryDetails: sanitizeSelfDeliveryForSeller(o.selfDeliveryDetails || orderItems[0]?.selfDeliveryDetails),
-    items: orderItems.map((item) => ({
-      id: item._id || item.id,
-      _id: item._id || item.id,
-      productId: item.productId || item.id || item._id,
-      name: item.name || "Product Item",
-      price: Number(item.price || item.finalPrice || 0),
-      quantity: Number(item.quantity || 1),
-      total: Number(item.total || (item.price * item.quantity) || 0),
-      size: item.size || "",
-      color: item.color || "",
-      image: item.image || "",
-      gst: item.gst !== undefined ? item.gst : (item.gstRate ?? item.gstPercent ?? 5),
-      gstPercent: item.gstPercent !== undefined ? item.gstPercent : (item.gstRate ?? item.gst ?? 5),
-      gstPercentage: item.gstPercentage !== undefined ? item.gstPercentage : (item.gstRate ?? item.gst ?? 5),
-      gstRate: item.gstRate !== undefined ? item.gstRate : (item.gstPercent ?? item.gst ?? 5),
-      isGstInclusive: item.isGstInclusive !== false,
-      category: item.category || "Stationery",
-      status: normalizeOrderStatus(item.status || formattedStatus),
-      deliveryType: item.deliveryType || o.deliveryMode || "",
-      selfDeliveryDetails: sanitizeSelfDeliveryForSeller(item.selfDeliveryDetails || o.selfDeliveryDetails),
-      thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
-      sellerId: item.sellerId || o.sellerId || null,
-      sellerStoreName: item.sellerStoreName || item.storeName || item.sellerDetails?.storeName || o.sellerStoreName || o.storeName || scope?.storeName || "",
-      storeName: item.storeName || item.sellerStoreName || item.sellerDetails?.storeName || o.storeName || o.sellerStoreName || scope?.storeName || "",
-      sellerName: item.sellerName || item.sellerDetails?.sellerName || o.sellerName || scope?.storeName || "",
-      sellerDetails: item.sellerDetails || o.sellerDetails || null
-    }))
+    commissionRate: orderSettlement.commissionRate,
+    commissionAmount: orderSettlement.commissionAmount,
+    gstOnCommissionRate: orderSettlement.gstOnCommissionRate,
+    gstOnCommissionAmount: orderSettlement.gstOnCommissionAmount,
+    tdsRate: orderSettlement.tdsRate,
+    tdsAmount: orderSettlement.tdsAmount,
+    gstTcsRate: orderSettlement.gstTcsRate,
+    gstTcsAmount: orderSettlement.gstTcsAmount,
+    deliveryChargeAmount: orderSettlement.deliveryChargeAmount,
+    gstOnDeliveryAmount: orderSettlement.gstOnDeliveryAmount,
+    totalDeliveryDeduction: orderSettlement.totalDeliveryDeduction,
+    deliveryChargeBorneBy: orderSettlement.deliveryChargeBorneBy,
+    settlementRule: orderSettlement.ruleCode,
+    totalDeductions: orderSettlement.totalDeductions,
+    netSettlementAmount: orderSettlement.netSettlement,
+    settlement: orderSettlement,
+    items: orderItems.map((item) => {
+      const itemGross = Number(item.total || Math.max(0, (Number(item.price || 0) * Number(item.quantity || 1)) - Number(item.offerDiscount || item.discount || 0)));
+      const itGstRate = Number(item.gstRate ?? item.gstPercent ?? item.gstPercentage ?? item.gst ?? (item.category?.toLowerCase()?.includes('book') ? 0 : 5));
+      const itemStl = calculateSellerSettlement(itemGross, {
+        commissionRate: Number(item.commissionRate ?? o.commissionRate ?? 10),
+        paymentMethod: o.paymentMethod || "UPI",
+        deliveryMode: item.deliveryType || o.deliveryMode || "self_delivery",
+        courierName: o.courierName || item.thirdPartyDetails?.courierName,
+        orderTotal: ordTotalVal || itemGross,
+        sellerState: sellerStateVal,
+        customerState: customerStateVal,
+        gstRate: itGstRate,
+        category: item.category || "",
+        name: item.name || "",
+        deliveryCharge: o.shippingAmount || o.deliveryCharge || 40,
+        deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+      });
+      return {
+        id: item._id || item.id,
+        _id: item._id || item.id,
+        productId: item.productId || item.id || item._id,
+        name: item.name || "Product Item",
+        price: Number(item.price || item.finalPrice || 0),
+        offerDiscount: Number(item.offerDiscount || item.discount || 0),
+        discount: Number(item.offerDiscount || item.discount || 0),
+        finalPrice: Number(item.finalPrice || (Number(item.price || 0) - Number(item.offerDiscount || item.discount || 0))),
+        couponCode: item.couponCode || (Number(item.offerDiscount || item.discount || 0) > 0 ? (o.couponCode || o.appliedCoupon || "") : ""),
+        quantity: Number(item.quantity || 1),
+        total: itemGross,
+        size: item.size || "",
+        color: item.color || "",
+        image: item.image || "",
+        gst: item.gst !== undefined ? item.gst : (item.gstRate ?? item.gstPercent ?? 5),
+        gstPercent: item.gstPercent !== undefined ? item.gstPercent : (item.gstRate ?? item.gst ?? 5),
+        gstPercentage: item.gstPercentage !== undefined ? item.gstPercentage : (item.gstRate ?? item.gst ?? 5),
+        gstRate: item.gstRate !== undefined ? item.gstRate : (item.gstPercent ?? item.gst ?? 5),
+        isGstInclusive: item.isGstInclusive !== false,
+        category: item.category || "Stationery",
+        status: normalizeOrderStatus(item.status || formattedStatus),
+        deliveryType: item.deliveryType || o.deliveryMode || "",
+        selfDeliveryDetails: sanitizeSelfDeliveryForSeller(item.selfDeliveryDetails || o.selfDeliveryDetails),
+        thirdPartyDetails: item.thirdPartyDetails || { courierName: o.courierName, trackingNumber: o.trackingNumber, trackingUrl: o.trackingUrl },
+        sellerId: item.sellerId || o.sellerId || null,
+        sellerStoreName: item.sellerStoreName || item.storeName || item.sellerDetails?.storeName || o.sellerStoreName || o.storeName || scope?.storeName || "",
+        storeName: item.storeName || item.sellerStoreName || item.sellerDetails?.storeName || o.storeName || o.sellerStoreName || scope?.storeName || "",
+        sellerName: item.sellerName || item.sellerDetails?.sellerName || o.sellerName || scope?.storeName || "",
+        sellerDetails: item.sellerDetails || o.sellerDetails || null,
+        commissionRate: itemStl.commissionRate,
+        commissionAmount: itemStl.commissionAmount,
+        gstOnCommissionRate: itemStl.gstOnCommissionRate,
+        gstOnCommissionAmount: itemStl.gstOnCommissionAmount,
+        tdsRate: itemStl.tdsRate,
+        tdsAmount: itemStl.tdsAmount,
+        isIntraState: itemStl.isIntraState,
+        gstTcsRate: itemStl.gstTcsRate,
+        gstTcsAmount: itemStl.gstTcsAmount,
+        cgstTcsRate: itemStl.cgstTcsRate,
+        cgstTcsAmount: itemStl.cgstTcsAmount,
+        sgstTcsRate: itemStl.sgstTcsRate,
+        sgstTcsAmount: itemStl.sgstTcsAmount,
+        igstTcsRate: itemStl.igstTcsRate,
+        igstTcsAmount: itemStl.igstTcsAmount,
+        deliveryChargeAmount: itemStl.deliveryChargeAmount,
+        gstOnDeliveryAmount: itemStl.gstOnDeliveryAmount,
+        totalDeliveryDeduction: itemStl.totalDeliveryDeduction,
+        deliveryChargeBorneBy: itemStl.deliveryChargeBorneBy,
+        settlementRule: itemStl.ruleCode,
+        totalDeductions: itemStl.totalDeductions,
+        netSettlementAmount: itemStl.netSettlement,
+        settlement: itemStl
+      };
+    })
   };
 };
 
@@ -625,7 +715,7 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     item.sellerPhone = sellerInfo.phone;
     order.sellerDetails = sellerInfo;
 
-    if (selfDeliveryDetails) {
+    if (resolvedMode === "self_delivery" && selfDeliveryDetails) {
       const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
       const tokenVal = String(
         selfDeliveryDetails.deliveryPartnerToken ||
@@ -648,18 +738,27 @@ export const updateSellerOrderItemStatus = async (req, res) => {
       order.selfDeliveryDetails = item.selfDeliveryDetails;
       order.trackingUrl = trackingLink;
       order.trackingNumber = tokenVal;
-    }
-
-    if (thirdPartyDetails) {
-      const carrierUrl = thirdPartyDetails.trackingUrl || resolveCarrierTrackingUrl(thirdPartyDetails.courierName, thirdPartyDetails.trackingNumber);
-      item.thirdPartyDetails = {
-        ...item.thirdPartyDetails,
-        ...thirdPartyDetails,
-        trackingUrl: carrierUrl
-      };
-      if (thirdPartyDetails.courierName) order.courierName = thirdPartyDetails.courierName;
-      if (thirdPartyDetails.trackingNumber) order.trackingNumber = thirdPartyDetails.trackingNumber;
-      if (carrierUrl) order.trackingUrl = carrierUrl;
+      order.courierName = "";
+      order.carrier = "";
+    } else if (resolvedMode === "third_party") {
+      item.deliveryType = "third_party";
+      item.deliveryOtp = "";
+      item.selfDeliveryDetails = undefined;
+      if (thirdPartyDetails) {
+        const carrierUrl = thirdPartyDetails.trackingUrl || resolveCarrierTrackingUrl(thirdPartyDetails.courierName, thirdPartyDetails.trackingNumber);
+        item.thirdPartyDetails = {
+          ...item.thirdPartyDetails,
+          ...thirdPartyDetails,
+          trackingUrl: carrierUrl
+        };
+        if (thirdPartyDetails.courierName) order.courierName = thirdPartyDetails.courierName;
+        if (thirdPartyDetails.trackingNumber) order.trackingNumber = thirdPartyDetails.trackingNumber;
+        if (carrierUrl) order.trackingUrl = carrierUrl;
+      }
+    } else {
+      item.deliveryType = "pending_choice";
+      item.deliveryOtp = "";
+      item.selfDeliveryDetails = undefined;
     }
 
     order.timeline = order.timeline || [];
@@ -750,10 +849,20 @@ export const updateSellerOrderStatus = async (req, res) => {
 
     let computedTrackingUrl = trackingUrl || "";
     let effectiveAwb = "";
+    let mergedSelf = null;
+
     if (resolvedMode === "third_party") {
       order.courierName = courierName || order.courierName || "Shiprocket";
       order.carrier = order.courierName;
       order.selfDeliveryDetails = undefined;
+      order.deliveryOtp = "";
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.deliveryOtp = "";
+          it.selfDeliveryDetails = undefined;
+          it.deliveryType = "third_party";
+        });
+      }
       effectiveAwb = trackingNumber || order.trackingNumber || "";
       if (!effectiveAwb || effectiveAwb.startsWith("DLV-")) {
         const courierPrefix = String(order.courierName || "SHIPROCKET")
@@ -765,10 +874,7 @@ export const updateSellerOrderStatus = async (req, res) => {
       order.trackingNumber = effectiveAwb;
       computedTrackingUrl = trackingUrl || resolveCarrierTrackingUrl(order.courierName, effectiveAwb);
       if (computedTrackingUrl) order.trackingUrl = computedTrackingUrl;
-    }
-
-    let mergedSelf = null;
-    if (resolvedMode === "self_delivery" || selfDeliveryDetails) {
+    } else if (resolvedMode === "self_delivery") {
       const clientAppUrl = (process.env.CLIENT_URL || process.env.FRONTEND_BASE_URL || "http://localhost:5173").replace(/\/+$/, '');
       const tokenVal = String(
         selfDeliveryDetails?.deliveryPartnerToken ||
@@ -808,10 +914,24 @@ export const updateSellerOrderStatus = async (req, res) => {
         order.items.forEach(it => {
           it.deliveryOtp = otpVal;
           if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = otpVal;
+          it.deliveryType = "self_delivery";
         });
       }
       order.trackingUrl = trackingLink;
       order.trackingNumber = tokenVal;
+      order.courierName = "";
+      order.carrier = "";
+    } else {
+      // pending_choice
+      order.deliveryOtp = "";
+      order.selfDeliveryDetails = undefined;
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.deliveryOtp = "";
+          it.selfDeliveryDetails = undefined;
+          it.deliveryType = "pending_choice";
+        });
+      }
     }
 
     // Fully Automated WhatsApp Dispatch to Delivery Boy
@@ -1045,23 +1165,17 @@ export const downloadSellerInvoice = async (req, res) => {
     }
 
     // STRICT CONFIRMATION CHECK: Do not generate invoice when product status is pending
-    const status = String(order.overallStatus || order.status || "").toLowerCase().trim();
+    const status = String(order.overallStatus || order.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
     const isPending = !status || status === "pending" || status === "unconfirmed" || status === "placed";
+    const isPaid = String(order.paymentStatus || "").toLowerCase() === "paid" || Number(order.advancePaidAmount || 0) > 0;
+    const isConfirmedAndOnward = [
+      "assigned", "accepted", "confirmed", "processing", "production", "packed", "shipped",
+      "dispatched", "in_transit", "out_for_delivery", "delivered", "completed", "fulfilled",
+      "return_requested", "returned", "exchange_requested", "exchanged", "refunded", "cancelled"
+    ].includes(status);
 
-    const fStr = String(sellerId || "").toLowerCase().trim();
-    const sellerItems = (order.items || []).filter(it => {
-      if (!sellerId) return true;
-      const sId = String(it.sellerId?._id || it.sellerId || it.sellerDetails?.sellerId || "").toLowerCase().trim();
-      const sStore = String(it.storeName || it.sellerName || it.sellerDetails?.storeName || "").toLowerCase().trim();
-      return sId === fStr || sStore === fStr || (fStr.length >= 8 && sId.endsWith(fStr.slice(-10)));
-    });
-    const itemsToCheck = sellerItems.length > 0 ? sellerItems : (order.items || []);
-    const hasPendingProduct = isPending || itemsToCheck.some(it => {
-      const itSt = String(it.status || "").toLowerCase().trim().replace(/[\s-]+/g, "_");
-      return !itSt || itSt === "pending" || itSt === "unconfirmed" || itSt === "placed";
-    });
-
-    if (isPending || hasPendingProduct) {
+    const isStrictlyPending = !isConfirmedAndOnward && !isPaid && isPending;
+    if (isStrictlyPending) {
       return res.status(400).json({
         message: `Tax Invoice & Certificate can only be generated strictly after the order and products are confirmed. Current status: '${order.overallStatus || order.status || "Pending"}'.`
       });
