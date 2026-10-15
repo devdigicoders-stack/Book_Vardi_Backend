@@ -1352,6 +1352,7 @@ export const createOrder = async (req, res) => {
     for (const it of orderItems) {
       const itGross = Number(it.total) || Math.round(((Number(it.finalPrice || it.price || 0)) * (Number(it.quantity) || 1)) * 100) / 100;
       const itGstRate = Number(it.gstPercent ?? it.gstPercentage ?? it.gstRate ?? it.gst ?? (it.category?.toLowerCase()?.includes('book') ? 0 : 5));
+      const sellerState = it.sellerDetails?.state || it.sellerId?.state || it.sellerState || "Uttar Pradesh";
       const stl = calculateSellerSettlement(itGross, {
         commissionRate: it.commissionRate ?? 10,
         paymentMethod: paymentMethod || "UPI",
