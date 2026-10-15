@@ -102,6 +102,7 @@ const orderItemSchema = new mongoose.Schema({
       updatedAt: { type: Date, default: null }
     },
     otpLastSentAt: { type: Date, default: null },
+    otpExpiresAt: { type: Date, default: null },
     whatsappStatus: { type: String, default: "" },
     whatsappSentAt: { type: Date, default: null },
     whatsappMessageId: { type: String, default: "" },
@@ -262,12 +263,25 @@ const orderSchema = new mongoose.Schema(
         updatedAt: { type: Date, default: null }
       },
       otpLastSentAt: { type: Date, default: null },
+      otpExpiresAt: { type: Date, default: null },
       whatsappStatus: { type: String, default: "" },
       whatsappSentAt: { type: Date, default: null },
       whatsappMessageId: { type: String, default: "" },
       whatsappSentTo: { type: String, default: "" }
     },
     deliveryOtp: {
+      type: String,
+      default: ""
+    },
+    orderConfirmationSmsSent: {
+      type: Boolean,
+      default: false
+    },
+    orderConfirmationSmsSentAt: {
+      type: Date,
+      default: null
+    },
+    orderConfirmationSmsRequestId: {
       type: String,
       default: ""
     },
@@ -388,8 +402,19 @@ const orderSchema = new mongoose.Schema(
 
 // Pre-save hook to initialize first timeline entry and unify delivery OTP
 orderSchema.pre("save", function (next) {
+  const existingOtpCandidate = String(
+    this.deliveryOtp ||
+    this.selfDeliveryDetails?.deliveryOtp ||
+    (this.items?.[0]?.selfDeliveryDetails?.deliveryOtp) ||
+    (this.items?.[0]?.deliveryOtp) ||
+    ""
+  ).trim();
+
+  const hasValidOtp = /^\d{4}$/.test(existingOtpCandidate);
+
   const isSelfDeliveryMode = this.deliveryMode === "self_delivery" ||
-    Boolean(this.selfDeliveryDetails?.deliveryPersonName || this.selfDeliveryDetails?.deliveryPartnerToken);
+    Boolean(this.selfDeliveryDetails?.deliveryPersonName || this.selfDeliveryDetails?.deliveryPartnerToken) ||
+    hasValidOtp;
 
   if (isSelfDeliveryMode) {
     this.deliveryMode = "self_delivery";
@@ -400,6 +425,8 @@ orderSchema.pre("save", function (next) {
       canonicalOtp = String(this.selfDeliveryDetails.deliveryOtp).trim();
     } else if (this.isModified && this.isModified("deliveryOtp") && this.deliveryOtp) {
       canonicalOtp = String(this.deliveryOtp).trim();
+    } else if (hasValidOtp) {
+      canonicalOtp = existingOtpCandidate;
     } else {
       canonicalOtp = String(
         this.deliveryOtp ||
@@ -444,19 +471,21 @@ orderSchema.pre("save", function (next) {
       });
     }
   } else {
-    // pending_choice or unconfirmed: do NOT generate OTP and do NOT assume self-delivery
+    // pending_choice or unconfirmed: keep existing OTP if already set, do not blank it!
     this.deliveryMode = this.deliveryMode || "pending_choice";
-    this.deliveryOtp = "";
-    if (this.selfDeliveryDetails) {
-      this.selfDeliveryDetails.deliveryOtp = "";
-    }
-    if (Array.isArray(this.items)) {
-      this.items.forEach(it => {
-        it.deliveryOtp = "";
-        if (it.selfDeliveryDetails) {
-          it.selfDeliveryDetails.deliveryOtp = "";
-        }
-      });
+    if (!this.deliveryOtp && !this.selfDeliveryDetails?.deliveryOtp) {
+      this.deliveryOtp = "";
+      if (this.selfDeliveryDetails) {
+        this.selfDeliveryDetails.deliveryOtp = "";
+      }
+      if (Array.isArray(this.items)) {
+        this.items.forEach(it => {
+          if (!it.deliveryOtp) it.deliveryOtp = "";
+          if (it.selfDeliveryDetails && !it.selfDeliveryDetails.deliveryOtp) {
+            it.selfDeliveryDetails.deliveryOtp = "";
+          }
+        });
+      }
     }
   }
 

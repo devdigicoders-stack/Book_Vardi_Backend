@@ -245,7 +245,9 @@ const sellerSchema = new mongoose.Schema(
       type: String,
       default: ""
     },
-    fcmTokens: [deviceTokenSchema]
+    fcmTokens: [deviceTokenSchema],
+    otpCode: { type: String, default: "" },
+    otpExpiresAt: { type: Date, default: null }
   },
   {
     timestamps: true

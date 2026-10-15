@@ -4,6 +4,7 @@ import Seller from "../models/Seller.js";
 import DeliveryBoy from "../models/DeliveryBoy.js";
 import jwt from "jsonwebtoken";
 import { saveBase64ToFile } from "./sellerAuthController.js";
+import { sendFast2SmsOtp } from "../services/smsService.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 
@@ -79,10 +80,26 @@ export const sendOtp = async (req, res) => {
       }
     }
 
+    // Dispatch real DLT SMS via Fast2SMS API
+    let smsDispatched = false;
+    let smsResponse = null;
+    try {
+      smsResponse = await sendFast2SmsOtp(cleanPhone, otp);
+      smsDispatched = Boolean(smsResponse?.success);
+      if (smsDispatched) {
+        console.log(`📲 [AUTH] Fast2SMS OTP successfully dispatched to +91 ${cleanPhone}`);
+      } else {
+        console.warn(`⚠️ [AUTH] Fast2SMS dispatch warning for +91 ${cleanPhone}:`, smsResponse?.error || smsResponse?.message);
+      }
+    } catch (smsErr) {
+      console.warn("⚠️ [AUTH] Fast2SMS dispatch error:", smsErr.message);
+    }
+
     return res.json({
       success: true,
-      message: `OTP sent successfully to ${phone}`,
-      otp, // Always returned for demo/test UI verification badge
+      message: smsDispatched ? `OTP sent successfully to +91 ${cleanPhone}` : `OTP sent to +91 ${cleanPhone}`,
+      smsSent: smsDispatched,
+      requestId: smsResponse?.requestId || null,
       isRegistered: Boolean(userExists)
     });
   } catch (error) {
@@ -109,12 +126,11 @@ export const verifyOtp = async (req, res) => {
     });
 
     const inputOtp = String(otp).trim();
-    const isTestOtp = inputOtp === "1234" || inputOtp === "3123" || inputOtp === "9999" || inputOtp === "0000";
     const isValidStoredOtp = stored && stored.otp === inputOtp && Date.now() <= stored.expires;
     const isValidDbOtp = user && user.otpCode && user.otpCode === inputOtp && user.otpExpiresAt && new Date(user.otpExpiresAt) >= new Date();
 
-    if (!isValidStoredOtp && !isValidDbOtp && !isTestOtp) {
-      return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (!isValidStoredOtp && !isValidDbOtp) {
+      return res.status(400).json({ message: "Invalid or expired OTP. Please enter the correct OTP received on your mobile." });
     }
 
     // Clear used OTP once verified
@@ -198,13 +214,11 @@ export const loginWithOtp = async (req, res) => {
     });
 
     const inputOtp = String(otp).trim();
-    const isTestOtp = inputOtp === "1234" || inputOtp === "3123" || inputOtp === "9999" || inputOtp === "0000";
     const isValidStoredOtp = stored && stored.otp === inputOtp && Date.now() <= stored.expires;
     const isValidDbOtp = user && user.otpCode && user.otpCode === inputOtp && user.otpExpiresAt && new Date(user.otpExpiresAt) >= new Date();
-    const isRecentlyVerified = Boolean(user && user.phoneVerified);
 
-    if (!isValidStoredOtp && !isValidDbOtp && !isTestOtp && !isRecentlyVerified) {
-      return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (!isValidStoredOtp && !isValidDbOtp) {
+      return res.status(400).json({ message: "Invalid or expired OTP. Please enter the correct OTP received on your mobile." });
     }
 
     // Clear used OTP now that login is complete

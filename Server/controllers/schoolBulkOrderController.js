@@ -5,6 +5,11 @@ import Razorpay from "razorpay";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import Seller from "../models/Seller.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
+import { 
+  sendFast2SmsPaymentSuccess, 
+  sendFast2SmsOrderConfirmation, 
+  sendOrderStatusSms 
+} from "../services/smsService.js";
 
 // Initialize Razorpay instance for School Bulk Orders
 const getRazorpayInstance = () => {
@@ -2201,6 +2206,14 @@ export const updateSellerSchoolOrder = async (req, res) => {
 
     await bulkOrder.save();
 
+    // Fast2SMS DLT Status Update SMS (Shipped, Out for Delivery, Delivered)
+    try {
+      sendOrderStatusSms(bulkOrder, bulkOrder.status, {
+        phone: bulkOrder.contactPhone || bulkOrder.userPhone || bulkOrder.phone,
+        trackingUrl: bulkOrder.deliveryDetails?.trackingUrl
+      }).catch(err => console.warn("⚠️ [FAST2SMS] School bulk order status SMS error:", err.message));
+    } catch (smsErr) {}
+
     const candidateIds = [req.user?.id, req.seller?._id, req.user?._id, req.seller?.id, req.headers?.["x-seller-id"]].filter(Boolean).map(String);
     const candidatePhones = [req.user?.phone, req.seller?.phone].filter(Boolean);
 
@@ -2641,6 +2654,15 @@ export const verifySchoolBulkPrepayment = async (req, res) => {
         status: bulkOrder.status
       });
     } catch (rtErr) {}
+
+    // Fast2SMS DLT: Payment Success (225928) & Order Confirmation (225934)
+    try {
+      const buyerPhone = String(bulkOrder.contactPhone || bulkOrder.userPhone || bulkOrder.phone || "").replace(/\D/g, "").slice(-10);
+      if (buyerPhone.length === 10) {
+        sendFast2SmsPaymentSuccess(buyerPhone, paidAmt, bulkOrder.referenceId).catch(() => {});
+        sendFast2SmsOrderConfirmation(buyerPhone, bulkOrder.referenceId).catch(() => {});
+      }
+    } catch (smsErr) {}
 
     return res.json({
       success: true,

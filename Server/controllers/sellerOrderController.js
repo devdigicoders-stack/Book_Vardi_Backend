@@ -7,6 +7,7 @@ import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrder
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 import { calculateSellerSettlement } from "../services/settlementService.js";
+import { sendOrderStatusSms } from "../services/smsService.js";
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw, contextOrder = null) => {
@@ -1009,6 +1010,7 @@ export const updateSellerOrderStatus = async (req, res) => {
       updatePayload.courierName = "";
       updatePayload.carrier = "";
       updatePayload.selfDeliveryDetails = mergedSelf;
+      updatePayload.deliveryOtp = mergedSelf.deliveryOtp;
       updatePayload.trackingUrl = mergedSelf.trackingUrl;
       updatePayload.trackingNumber = mergedSelf.deliveryPartnerToken;
     }
@@ -1118,6 +1120,15 @@ export const updateSellerOrderStatus = async (req, res) => {
         status: updatedOrder?.overallStatus || updatedOrder?.status || formattedStatus
       });
     } catch (rtErr) {}
+
+    // Fast2SMS DLT Status Update SMS (Shipped, Out for Delivery, Delivered, Cancelled)
+    try {
+      const targetStatus = updatedOrder?.overallStatus || updatedOrder?.status || formattedStatus;
+      sendOrderStatusSms(updatedOrder, targetStatus, {
+        trackingUrl: updatedOrder?.trackingUrl || updatedOrder?.selfDeliveryDetails?.trackingUrl,
+        refundAmount: updatedOrder?.refundDetails?.amount || updatedOrder?.totalAmount
+      }).catch(err => console.warn("⚠️ [FAST2SMS] Seller status update SMS error:", err.message));
+    } catch (smsErr) {}
 
     res.json({
       success: true,

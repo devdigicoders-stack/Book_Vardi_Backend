@@ -4,7 +4,8 @@ import {
   createAnnouncement,
   updateAnnouncement,
   toggleAnnouncementStatus,
-  deleteAnnouncement
+  deleteAnnouncement,
+  broadcastPromotionalSms
 } from "../controllers/announcementController.js";
 import { authenticateAdmin } from "../middlewares/auth.js";
 
@@ -15,6 +16,7 @@ router.get("/", getAnnouncements);
 
 // Admin only: Add, Update, Toggle & Delete announcement items
 router.post("/", authenticateAdmin, createAnnouncement);
+router.post("/broadcast-sms", authenticateAdmin, broadcastPromotionalSms);
 router.put("/:id", authenticateAdmin, updateAnnouncement);
 router.patch("/:id/status", authenticateAdmin, toggleAnnouncementStatus);
 router.delete("/:id", authenticateAdmin, deleteAnnouncement);

@@ -11,6 +11,17 @@ import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 import { calculateSellerSettlement } from "../services/settlementService.js";
+import { 
+  sendFast2SmsOrderConfirmation, 
+  sendFast2SmsOtp,
+  sendFast2SmsOrderShippedWithTracking,
+  sendFast2SmsOrderShipped,
+  sendFast2SmsOutForDelivery,
+  sendFast2SmsOrderDelivered,
+  sendFast2SmsOrderCancelled,
+  sendFast2SmsRefundInitiated,
+  sendOrderStatusSms
+} from "../services/smsService.js";
 
 // Helper to locate user document by ID, email, or phone
 const findUserByIdentifier = async (req) => {
@@ -692,6 +703,22 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
           item.status = normalizeOrderStatus(item.status || ord.overallStatus);
         });
       }
+
+      // Security: Strip raw deliveryOtp so OTP numbers are never exposed in any API response
+      ord.deliveryOtp = "";
+      if (ord.selfDeliveryDetails) {
+        delete ord.selfDeliveryDetails.deliveryOtp;
+        delete ord.selfDeliveryDetails.otp;
+      }
+      if (ord.items && Array.isArray(ord.items)) {
+        ord.items.forEach(item => {
+          item.deliveryOtp = "";
+          if (item.selfDeliveryDetails) {
+            delete item.selfDeliveryDetails.deliveryOtp;
+            delete item.selfDeliveryDetails.otp;
+          }
+        });
+      }
     });
 
   } catch (err) {
@@ -786,6 +813,13 @@ export const getMyOrders = async (req, res) => {
         city: firstItem.sellerCity || ord.sellerCity || ""
       });
 
+      const sanitizeSelfDelivery = (sd) => {
+        if (!sd) return null;
+        const copy = typeof sd.toObject === 'function' ? sd.toObject() : { ...sd };
+        delete copy.deliveryOtp;
+        return copy;
+      };
+
       const formattedItems = (ord.items || []).map((it) => {
         const itemSelfDelivery = it.selfDeliveryDetails || ord.selfDeliveryDetails || null;
         const itemThirdParty = it.thirdPartyDetails || {
@@ -826,7 +860,7 @@ export const getMyOrders = async (req, res) => {
           storeName: it.storeName || itemSellerDetails.storeName,
           sellerPhone: it.sellerPhone || itemSellerDetails.phone,
           sellerDetails: itemSellerDetails,
-          selfDeliveryDetails: itemSelfDelivery,
+          selfDeliveryDetails: sanitizeSelfDelivery(itemSelfDelivery),
           thirdPartyDetails: itemThirdParty,
           status: normalizeOrderStatus(it.status || canonicalStatus),
           isReturnable: (it.returnPolicy === 'non_returnable' || it.isReturnable === false) ? false : (it.isReturnable ?? true),
@@ -853,21 +887,8 @@ export const getMyOrders = async (req, res) => {
         trackingNumber: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.deliveryPartnerToken || ord.trackingNumber || '') : (ord.trackingNumber || firstItem.thirdPartyDetails?.trackingNumber || ''),
         trackingUrl: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.trackingUrl || ord.trackingUrl || '') : (ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || ''),
         sellerDetails: resolvedSellerDetails,
-        selfDeliveryDetails: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails || firstItem.selfDeliveryDetails || null) : null,
-        deliveryOtp: (() => {
-          if (resolvedDeliveryMode !== 'self_delivery') {
-            return '';
-          }
-          let resolvedOtp = String(ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || firstItem.selfDeliveryDetails?.deliveryOtp || firstItem.deliveryOtp || '').trim();
-          if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
-            resolvedOtp = Math.floor(1000 + Math.random() * 9000).toString();
-            ord.deliveryOtp = resolvedOtp;
-            if (ord._id) {
-              Order.updateOne({ _id: ord._id }, { $set: { deliveryOtp: resolvedOtp, "selfDeliveryDetails.deliveryOtp": resolvedOtp } }).catch(() => {});
-            }
-          }
-          return resolvedOtp;
-        })(),
+        selfDeliveryDetails: resolvedDeliveryMode === 'self_delivery' ? sanitizeSelfDelivery(ord.selfDeliveryDetails || firstItem.selfDeliveryDetails) : null,
+        deliveryOtp: "", // Security: Delivery OTP is strictly dispatched to customer's mobile via Fast2SMS SMS
         itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
         items: formattedItems,
         subtotal: ord.subtotal || ord.totalAmount || ord.total || 0,
@@ -1554,6 +1575,39 @@ export const createOrder = async (req, res) => {
     // Auto-clear cart in MongoDB database for user
     await autoClearUserCart(resolvedUserId, resolvedPhone);
 
+    // Send automated Fast2SMS DLT Order Confirmation SMS to Customer
+    try {
+      const targetPhone = newOrder.customer?.phone || resolvedPhone;
+      const displayOrderId = newOrder.orderId || newOrder.id || orderIdVal;
+      if (targetPhone && displayOrderId && !newOrder.orderConfirmationSmsSent) {
+        sendFast2SmsOrderConfirmation(targetPhone, displayOrderId)
+          .then(async (smsRes) => {
+            if (smsRes?.success) {
+              console.log(`📲 [FAST2SMS] Order confirmation SMS sent to +91 ${targetPhone} for Order ${displayOrderId}`);
+              try {
+                await Order.updateOne(
+                  { _id: newOrder._id },
+                  {
+                    $set: {
+                      orderConfirmationSmsSent: true,
+                      orderConfirmationSmsSentAt: new Date(),
+                      orderConfirmationSmsRequestId: smsRes.requestId
+                    }
+                  }
+                );
+              } catch (e) {}
+            } else {
+              console.warn(`⚠️ [FAST2SMS] Order confirmation SMS dispatch warning for +91 ${targetPhone}:`, smsRes?.error || smsRes?.message);
+            }
+          })
+          .catch((smsErr) => {
+            console.warn("⚠️ [FAST2SMS] Order confirmation SMS dispatch error:", smsErr.message);
+          });
+      }
+    } catch (smsErr) {
+      console.warn("⚠️ [FAST2SMS] Failed to initiate order confirmation SMS:", smsErr.message);
+    }
+
     try {
       broadcastRealtimeEvent({
         type: "ORDER_CREATED",
@@ -1571,7 +1625,19 @@ export const createOrder = async (req, res) => {
       console.warn("⚠️ Realtime broadcast error:", rtErr.message);
     }
 
-    return res.status(201).json({ message: "Order placed successfully in DB", order: newOrder });
+    const sanitizedOrder = typeof newOrder.toObject === 'function' ? newOrder.toObject() : { ...newOrder };
+    delete sanitizedOrder.deliveryOtp;
+    if (sanitizedOrder.selfDeliveryDetails) {
+      delete sanitizedOrder.selfDeliveryDetails.deliveryOtp;
+    }
+    if (Array.isArray(sanitizedOrder.items)) {
+      sanitizedOrder.items.forEach(it => {
+        delete it.deliveryOtp;
+        if (it.selfDeliveryDetails) delete it.selfDeliveryDetails.deliveryOtp;
+      });
+    }
+
+    return res.status(201).json({ message: "Order placed successfully in DB", order: sanitizedOrder });
   } catch (error) {
     console.error("❌ [POST /api/orders] Error creating order:", error);
     return res.status(400).json({ message: "Failed to create order", error: error.message });
@@ -1695,25 +1761,14 @@ export const trackOrder = async (req, res) => {
         email: order.items[0].sellerId.email || "",
         address: order.items[0].sellerId.address || order.items[0].sellerId.city || ""
       } : null),
-      selfDeliveryDetails: (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null) : null,
-      deliveryOtp: (() => {
-        if (hasReturn || isCancelled || ['delivered', 'completed', 'refunded', 'returned'].includes(currentStatus)) {
-          return null;
-        }
-        const isSelf = order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName || order.selfDeliveryDetails?.deliveryPartnerToken);
-        if (!isSelf) {
-          return '';
-        }
-        let resolvedOtp = String(order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.selfDeliveryDetails?.deliveryOtp || order.items?.[0]?.deliveryOtp || '').trim();
-        if (!resolvedOtp || !/^\d{4}$/.test(resolvedOtp)) {
-          resolvedOtp = Math.floor(1000 + Math.random() * 9000).toString();
-          order.deliveryOtp = resolvedOtp;
-          if (order._id) {
-            Order.updateOne({ _id: order._id }, { $set: { deliveryOtp: resolvedOtp, "selfDeliveryDetails.deliveryOtp": resolvedOtp } }).catch(() => {});
-          }
-        }
-        return resolvedOtp;
+      selfDeliveryDetails: (() => {
+        const rawSd = (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null) : null;
+        if (!rawSd) return null;
+        const copy = typeof rawSd.toObject === 'function' ? rawSd.toObject() : { ...rawSd };
+        delete copy.deliveryOtp;
+        return copy;
       })(),
+      deliveryOtp: "", // Security: Delivery OTP is strictly dispatched to customer's mobile via Fast2SMS SMS
       steps: standardSteps.map((step, idx) => ({
         ...step,
         isCompleted: isCancelled ? false : currentStepIndex >= idx,
@@ -1732,6 +1787,13 @@ export const trackOrder = async (req, res) => {
           city: item.sellerCity || itemSellerDoc?.city || ""
         };
 
+        const sanitizeItemSd = (sd) => {
+          if (!sd) return null;
+          const copy = typeof sd.toObject === 'function' ? sd.toObject() : { ...sd };
+          delete copy.deliveryOtp;
+          return copy;
+        };
+
         return {
           id: item._id,
           name: item.name,
@@ -1742,9 +1804,9 @@ export const trackOrder = async (req, res) => {
           color: item.color,
           image: item.image,
           deliveryType: item.deliveryType || order.deliveryMode || "pending_choice",
-          deliveryOtp: item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp,
-          selfDelivery: item.selfDeliveryDetails || order.selfDeliveryDetails,
-          selfDeliveryDetails: item.selfDeliveryDetails || order.selfDeliveryDetails,
+          deliveryOtp: "",
+          selfDelivery: sanitizeItemSd(item.selfDeliveryDetails || order.selfDeliveryDetails),
+          selfDeliveryDetails: sanitizeItemSd(item.selfDeliveryDetails || order.selfDeliveryDetails),
           thirdParty: item.thirdPartyDetails || {
             courierName: order.courierName,
             trackingNumber: order.trackingNumber,
@@ -1944,6 +2006,21 @@ export const updateOrder = async (req, res) => {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchange_dispatched";
       } else if (newStatusKey === "pickup_scheduled") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "pickup_scheduled";
+        const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        existingOrder.deliveryOtp = freshOtp;
+        if (!existingOrder.selfDeliveryDetails) existingOrder.selfDeliveryDetails = {};
+        existingOrder.selfDeliveryDetails.deliveryOtp = freshOtp;
+        if (Array.isArray(existingOrder.items)) {
+          existingOrder.items.forEach(it => {
+            it.deliveryOtp = freshOtp;
+            if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = freshOtp;
+          });
+        }
+        const custPhone = existingOrder.customer?.phone || existingOrder.shippingAddress?.phone || existingOrder.phone;
+        const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+        if (cleanPhone && cleanPhone.length === 10) {
+          sendFast2SmsOtp(cleanPhone, freshOtp).catch(() => {});
+        }
       } else if (newStatusKey === "return_approved" || newStatusKey === "approved") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "approved";
       } else if (newStatusKey === "exchange_approved") {
@@ -2122,9 +2199,17 @@ export const updateOrder = async (req, res) => {
     existingOrder.markModified("thirdPartyDetails");
     existingOrder.markModified("overallStatus");
     existingOrder.markModified("status");
-    existingOrder.markModified("timeline");
-
     await existingOrder.save();
+
+    // Fast2SMS DLT Status Update SMS (Shipped, Out for Delivery, Delivered, Cancelled)
+    try {
+      if (newStatusKey && newStatusKey !== previousStatusKey) {
+        sendOrderStatusSms(existingOrder, newStatusKey, {
+          trackingUrl: existingOrder.trackingUrl || existingOrder.selfDeliveryDetails?.trackingUrl,
+          refundAmount: existingOrder.refundDetails?.amount || existingOrder.totalAmount
+        }).catch(err => console.warn("⚠️ [FAST2SMS] Order status SMS error:", err.message));
+      }
+    } catch (smsErr) {}
 
     try {
       broadcastRealtimeEvent({
@@ -2710,6 +2795,22 @@ export const cancelOrder = async (req, res) => {
 
     await order.save();
 
+    // Fast2SMS DLT: Order Cancelled (225929) & Refund Initiated (225926)
+    try {
+      const custPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone;
+      const cleanCustPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+      if (cleanCustPhone.length === 10) {
+        // Template 225929: Cancelled SMS
+        sendFast2SmsOrderCancelled(cleanCustPhone, order.orderId).catch(() => {});
+
+        // Template 225926: Refund Initiated SMS if prepaid
+        if (isPaid) {
+          const refundAmt = Number(order.totalAmount || 0);
+          sendFast2SmsRefundInitiated(cleanCustPhone, refundAmt, order.orderId).catch(() => {});
+        }
+      }
+    } catch (smsErr) {}
+
     try {
       broadcastRealtimeEvent({
         type: "ORDER_UPDATED",
@@ -3076,6 +3177,29 @@ export const updateReturnExchangeStatus = async (req, res) => {
       overallStatus = "pickup_scheduled";
       title = type === "exchange" ? "Exchange Pickup Scheduled" : "Return Pickup Scheduled";
       description = description || `Pickup scheduled for ${pickupDate ? new Date(pickupDate).toLocaleDateString('en-IN') : 'upcoming business days'}.`;
+
+      const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
+      order.deliveryOtp = freshOtp;
+      if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
+      order.selfDeliveryDetails.deliveryOtp = freshOtp;
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.deliveryOtp = freshOtp;
+          if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = freshOtp;
+        });
+      }
+
+      const custPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone;
+      const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+      if (cleanPhone && cleanPhone.length === 10) {
+        sendFast2SmsOtp(cleanPhone, freshOtp)
+          .then((smsRes) => {
+            if (smsRes?.success) {
+              console.log(`📲 [FAST2SMS] ${type === 'exchange' ? 'Exchange' : 'Return'} Pickup OTP sent to +91 ${cleanPhone}`);
+            }
+          })
+          .catch((smsErr) => console.warn("Pickup OTP SMS dispatch error:", smsErr.message));
+      }
     } else if (rawStatus === "product_received" || rawStatus === "product_return_received") {
       canonicalReturnStatus = "product_received";
       overallStatus = "product_received";
@@ -3165,6 +3289,18 @@ export const updateReturnExchangeStatus = async (req, res) => {
     });
 
     await order.save();
+
+    // Fast2SMS DLT: Refund Initiated (225926) for return/exchange refund
+    try {
+      const custPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone;
+      const cleanCustPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+      if (cleanCustPhone.length === 10) {
+        if (rawStatus === "refund_initiated" || rawStatus === "refund_completed" || rawStatus === "refunded") {
+          const refAmt = Number(order.refundDetails?.amount || order.returnRequest?.refundAmount || order.totalAmount || 0);
+          sendFast2SmsRefundInitiated(cleanCustPhone, refAmt, order.orderId).catch(() => {});
+        }
+      }
+    } catch (smsErr) {}
 
     try {
       broadcastRealtimeEvent({

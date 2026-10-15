@@ -4,6 +4,11 @@ import mongoose from "mongoose";
 import Payment from "../models/Payment.js";
 import Order from "../models/Order.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
+import { 
+  sendFast2SmsOrderConfirmation, 
+  sendFast2SmsPaymentSuccess, 
+  sendFast2SmsPaymentFailed 
+} from "../services/smsService.js";
 
 // Initialize Razorpay instance
 const getRazorpayInstance = () => {
@@ -176,6 +181,11 @@ export const verifyPayment = async (req, res) => {
       .digest("hex");
 
     if (generatedSignature !== razorpay_signature) {
+      const customerPhone = payment.customer?.phone;
+      const displayId = orderId || payment.orderId || razorpay_order_id;
+      if (customerPhone && displayId) {
+        sendFast2SmsPaymentFailed(customerPhone, payment.amount, displayId).catch(() => {});
+      }
       return res.status(400).json({
         success: false,
         message: "Invalid Razorpay payment signature. Verification failed."
@@ -250,15 +260,63 @@ export const verifyPayment = async (req, res) => {
             status: "processing",
             paymentStatus: "paid"
           });
+
+          const targetPhone = updatedOrder.customer?.phone || updatedOrder.customerPhone || updatedOrder.phone || payment.customer?.phone;
+          const displayOrderId = updatedOrder.orderId || updatedOrder.id;
+          const paidAmt = updatedOrder.totalAmount || payment.amount || 0;
+
+          if (targetPhone && displayOrderId) {
+            // Template 225928: Payment of rs {#VAR#} for your book vardi order {#VAR#} was successful . -BOOK VARDI
+            sendFast2SmsPaymentSuccess(targetPhone, paidAmt, displayOrderId).catch(err => {
+              console.warn("⚠️ [FAST2SMS] Payment success SMS error:", err.message);
+            });
+
+            // Template 225934: Your BOOK VARDI order {#VAR#} has been confirmed successfully -BOOK VARDI
+            if (!updatedOrder.orderConfirmationSmsSent) {
+              sendFast2SmsOrderConfirmation(targetPhone, displayOrderId)
+                .then(async (smsRes) => {
+                  if (smsRes?.success) {
+                    console.log(`📲 [FAST2SMS] Order confirmation SMS sent to +91 ${targetPhone} for Order ${displayOrderId}`);
+                    await Order.updateOne(
+                      { _id: updatedOrder._id },
+                      {
+                        $set: {
+                          orderConfirmationSmsSent: true,
+                          orderConfirmationSmsSentAt: new Date(),
+                          orderConfirmationSmsRequestId: smsRes.requestId
+                        }
+                      }
+                    ).catch(() => {});
+                  }
+                })
+                .catch((smsErr) => {
+                  console.warn("⚠️ [FAST2SMS] Order confirmation SMS dispatch error:", smsErr.message);
+                });
+            }
+          }
         }
       } catch (rtErr) {}
+    }
+
+    const sanitizedOrder = updatedOrder?.toObject ? updatedOrder.toObject() : (updatedOrder ? { ...updatedOrder } : null);
+    if (sanitizedOrder) {
+      delete sanitizedOrder.deliveryOtp;
+      if (sanitizedOrder.selfDeliveryDetails) {
+        delete sanitizedOrder.selfDeliveryDetails.deliveryOtp;
+      }
+      if (Array.isArray(sanitizedOrder.items)) {
+        sanitizedOrder.items.forEach(it => {
+          delete it.deliveryOtp;
+          if (it.selfDeliveryDetails) delete it.selfDeliveryDetails.deliveryOtp;
+        });
+      }
     }
 
     res.json({
       success: true,
       message: "Payment verified successfully. Order confirmed!",
       payment,
-      order: updatedOrder
+      order: sanitizedOrder
     });
   } catch (error) {
     console.error("Verify payment error:", error);

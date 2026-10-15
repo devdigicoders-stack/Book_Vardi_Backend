@@ -1,4 +1,10 @@
 import Announcement from "../models/Announcement.js";
+import User from "../models/User.js";
+import Seller from "../models/Seller.js";
+import {
+  sendFast2SmsBackToSchoolPromo,
+  sendFast2SmsSpecialDiscountPromo
+} from "../services/smsService.js";
 
 // Seed default announcement items if DB is empty
 const defaultAnnouncements = [
@@ -173,3 +179,82 @@ export const deleteAnnouncement = async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to delete announcement", error: error.message });
   }
 };
+
+// Broadcast Approved Fast2SMS DLT Promotional SMS (Templates 225925 / 225924)
+export const broadcastPromotionalSms = async (req, res) => {
+  try {
+    const { templateType, storeUrl, audience = "all", customPhones } = req.body;
+    // templateType: "back_to_school" (DLT: 225925) or "special_discount" (DLT: 225924)
+
+    let phoneNumbers = [];
+
+    if (customPhones) {
+      if (Array.isArray(customPhones)) {
+        phoneNumbers = customPhones;
+      } else if (typeof customPhones === "string" && customPhones.trim()) {
+        phoneNumbers = customPhones.split(",").map(p => p.trim()).filter(Boolean);
+      }
+    } else {
+      const phonesSet = new Set();
+      if (audience === "all" || audience === "users") {
+        const users = await User.find({ phone: { $exists: true, $ne: "" } }).select("phone");
+        users.forEach(u => {
+          if (u.phone) {
+            const clean = String(u.phone).replace(/\D/g, "").slice(-10);
+            if (clean.length === 10) phonesSet.add(clean);
+          }
+        });
+      }
+      if (audience === "all" || audience === "sellers") {
+        const sellers = await Seller.find({ phone: { $exists: true, $ne: "" } }).select("phone");
+        sellers.forEach(s => {
+          if (s.phone) {
+            const clean = String(s.phone).replace(/\D/g, "").slice(-10);
+            if (clean.length === 10) phonesSet.add(clean);
+          }
+        });
+      }
+      phoneNumbers = Array.from(phonesSet);
+    }
+
+    if (phoneNumbers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid 10-digit mobile numbers found for promotional SMS broadcast."
+      });
+    }
+
+    const results = [];
+    for (const phone of phoneNumbers) {
+      try {
+        let resp;
+        if (templateType === "back_to_school") {
+          resp = await sendFast2SmsBackToSchoolPromo(phone, storeUrl || "https://bookvardi.in");
+        } else {
+          resp = await sendFast2SmsSpecialDiscountPromo(phone);
+        }
+        results.push({ phone, status: resp.success ? "sent" : "failed", message: resp.message });
+      } catch (err) {
+        results.push({ phone, status: "error", error: err.message });
+      }
+    }
+
+    const successCount = results.filter(r => r.status === "sent").length;
+
+    res.json({
+      success: true,
+      message: `Promotional broadcast completed. ${successCount} sent out of ${phoneNumbers.length}.`,
+      templateType: templateType || "special_discount",
+      totalRecipients: phoneNumbers.length,
+      successCount,
+      results
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to dispatch promotional SMS broadcast",
+      error: error.message
+    });
+  }
+};
+

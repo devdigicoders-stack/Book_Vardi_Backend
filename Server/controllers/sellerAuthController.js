@@ -5,10 +5,11 @@ import jwt from "jsonwebtoken";
 import { upsertFcmToken } from "../utils/fcmHelper.js";
 
 import path from "path";
-import fs from "fs";
 import crypto from "crypto";
+import { sendFast2SmsOtp } from "../services/smsService.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
+const sellerOtpStore = new Map();
 
 // Helper: Convert Base64 data URL to physical file on disk (deduplicated by content hash)
 export const saveBase64ToFile = (dataUrl, folder = "documents", fieldName = "doc") => {
@@ -777,6 +778,7 @@ export const sendSellerPhoneOtp = async (req, res) => {
     }
 
     const digits10 = cleanPhone.slice(-10);
+    const isRegistration = Boolean(req.body.isRegistration);
     const seller = await Seller.findOne({
       $or: [
         { phone: cleanPhone },
@@ -785,9 +787,9 @@ export const sendSellerPhoneOtp = async (req, res) => {
         { phone: digits10 },
         { phone: { $regex: digits10 } }
       ]
-    }).select("status storeName name phone rejectionReason");
+    }).select("status storeName name phone rejectionReason otpCode otpExpiresAt");
 
-    if (!seller) {
+    if (!seller && !isRegistration) {
       return res.status(404).json({
         success: false,
         exists: false,
@@ -795,13 +797,43 @@ export const sendSellerPhoneOtp = async (req, res) => {
       });
     }
 
-    // Return testing OTP 123456 for registered phone numbers
+    // Generate real 4-digit OTP
+    const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
+    sellerOtpStore.set(digits10, {
+      otp: freshOtp,
+      expires: Date.now() + 15 * 60 * 1000 // 15 mins
+    });
+
+    if (seller) {
+      try {
+        seller.otpCode = freshOtp;
+        seller.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        await seller.save();
+      } catch (err) {
+        console.warn("Failed to persist OTP to seller doc:", err.message);
+      }
+    }
+
+    let smsDispatched = false;
+    try {
+      const smsRes = await sendFast2SmsOtp(digits10, freshOtp);
+      smsDispatched = Boolean(smsRes?.success);
+      if (smsDispatched) {
+        console.log(`📲 [SELLER AUTH] Fast2SMS OTP dispatched to +91 ${digits10}`);
+      } else {
+        console.warn(`⚠️ [SELLER AUTH] Fast2SMS dispatch warning for +91 ${digits10}:`, smsRes?.error || smsRes?.message);
+      }
+    } catch (smsErr) {
+      console.warn("⚠️ [SELLER AUTH] Fast2SMS dispatch error:", smsErr.message);
+    }
+
+    const maskedPhone = digits10.slice(-4).padStart(10, 'X');
     res.json({
       success: true,
-      exists: true,
-      status: seller.status,
-      message: `OTP code 123456 dispatched to +91 ${digits10}`,
-      otp: "123456"
+      exists: Boolean(seller),
+      status: seller ? seller.status : "registration",
+      message: `OTP sent successfully to registered mobile +91 ${maskedPhone}`,
+      smsSent: smsDispatched
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Failed to send OTP", error: error.message });
@@ -811,18 +843,23 @@ export const sendSellerPhoneOtp = async (req, res) => {
 // Verify Phone OTP & Authenticate Seller
 export const verifySellerPhoneOtp = async (req, res) => {
   try {
-    const { phone, otp } = req.body;
+    const { phone, otp, isRegistration } = req.body;
     const cleanPhone = (phone || "").replace(/\D/g, "");
 
     if (!cleanPhone || cleanPhone.length < 8) {
       return res.status(400).json({ message: "Please enter a valid mobile number." });
     }
 
-    if (!otp || otp.trim() !== "123456") {
-      return res.status(400).json({ message: "Invalid OTP code. Please use testing code 123456." });
+    if (!otp) {
+      return res.status(400).json({ message: "OTP code is required." });
     }
 
+    const inputOtp = String(otp).trim();
     const digits10 = cleanPhone.slice(-10);
+
+    const storedOtpObj = sellerOtpStore.get(digits10);
+    const isValidStoredOtp = storedOtpObj && storedOtpObj.otp === inputOtp && Date.now() <= storedOtpObj.expires;
+
     let seller = await Seller.findOne({
       $or: [
         { phone: cleanPhone },
@@ -833,10 +870,30 @@ export const verifySellerPhoneOtp = async (req, res) => {
       ]
     }).select("-password -documents");
 
-    if (!seller) {
-      return res.status(404).json({
+    const isValidDbOtp = seller && seller.otpCode && seller.otpCode === inputOtp && seller.otpExpiresAt && new Date(seller.otpExpiresAt) >= new Date();
+
+    if (!isValidStoredOtp && !isValidDbOtp) {
+      return res.status(400).json({
         success: false,
-        message: `No seller account found with mobile number +91 ${digits10}. Please register as a new seller first.`
+        message: "Invalid or expired OTP. Please enter the correct OTP received on your mobile."
+      });
+    }
+
+    // Clear used OTP
+    sellerOtpStore.delete(digits10);
+    if (seller) {
+      try {
+        seller.otpCode = "";
+        seller.otpExpiresAt = null;
+        await seller.save();
+      } catch (err) {}
+    }
+
+    if (isRegistration || !seller) {
+      return res.json({
+        success: true,
+        verified: true,
+        message: "Mobile number verified successfully via OTP!"
       });
     }
 

@@ -3,6 +3,7 @@ import Order from "../models/Order.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 import { calculateSellerSettlement } from "../services/settlementService.js";
+import { sendFast2SmsOtp, sendFast2SmsOrderDelivered } from "../services/smsService.js";
 
 // Helper to locate order or bulk requisition by token or ID
 const findOrderByTokenOrId = async (tokenOrId) => {
@@ -138,6 +139,8 @@ export const getDeliveryPartnerOrder = async (req, res) => {
         deliveryPartnerToken: bulkOrder.deliveryDetails?.deliveryPartnerToken || token,
         trackingUrl: bulkOrder.deliveryDetails?.trackingUrl || "",
         driverLocation: bulkOrder.deliveryDetails?.driverLocation || null,
+        otpLastSentAt: bulkOrder.deliveryDetails?.otpLastSentAt || null,
+        otpExpiresAt: bulkOrder.deliveryDetails?.otpExpiresAt || (bulkOrder.deliveryDetails?.otpLastSentAt ? new Date(new Date(bulkOrder.deliveryDetails.otpLastSentAt).getTime() + 10 * 60 * 1000) : null),
         notes: bulkOrder.deliveryDetails?.notes || ""
       };
 
@@ -187,15 +190,6 @@ export const getDeliveryPartnerOrder = async (req, res) => {
 
     const order = lookup.order;
 
-    // Ensure order has a valid dynamic 4-digit deliveryOtp in DB
-    if (!order.deliveryOtp || !/^\d{4}$/.test(String(order.deliveryOtp))) {
-      const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString();
-      order.deliveryOtp = generatedOtp;
-      if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
-      order.selfDeliveryDetails.deliveryOtp = generatedOtp;
-      await order.save();
-    }
-
     // Prepare sanitized self delivery details (omit deliveryOtp for security)
     const selfDetails = order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || {};
     const sanitizedSelfDetails = {
@@ -205,7 +199,8 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       deliveryPartnerToken: selfDetails.deliveryPartnerToken || token,
       trackingUrl: selfDetails.trackingUrl || "",
       driverLocation: selfDetails.driverLocation || null,
-      otpLastSentAt: selfDetails.otpLastSentAt || null
+      otpLastSentAt: selfDetails.otpLastSentAt || null,
+      otpExpiresAt: selfDetails.otpExpiresAt || (selfDetails.otpLastSentAt ? new Date(new Date(selfDetails.otpLastSentAt).getTime() + 10 * 60 * 1000) : null)
     };
 
     const isExchangeOrder = Boolean(
@@ -318,6 +313,8 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
 
+    const now = new Date();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes OTP validity
     const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
     if (lookup.isBulk) {
@@ -333,16 +330,43 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
 
       if (!bulkOrder.deliveryDetails) bulkOrder.deliveryDetails = {};
       bulkOrder.deliveryDetails.deliveryOtp = freshOtp;
+      bulkOrder.deliveryDetails.otpLastSentAt = now;
+      bulkOrder.deliveryDetails.otpExpiresAt = expiresAt;
       bulkOrder.deliveryOtp = freshOtp;
       await bulkOrder.save();
 
-      const customerPhone = bulkOrder.contactPhone || bulkOrder.userPhone || "School Campus Admin";
-      console.log(`📲 [SMS/OTP RESENT] Bulk Delivery OTP ${freshOtp} dispatched to Customer (${customerPhone}) for Requisition #${bulkOrder.referenceId}`);
+      await SchoolBulkOrder.updateOne(
+        { _id: bulkOrder._id },
+        {
+          $set: {
+            deliveryOtp: freshOtp,
+            "deliveryDetails.deliveryOtp": freshOtp,
+            "deliveryDetails.otpLastSentAt": now,
+            "deliveryDetails.otpExpiresAt": expiresAt
+          }
+        }
+      );
+
+      const rawCustomerPhone = bulkOrder.contactPhone || bulkOrder.userPhone || "";
+      const cleanPhone = String(rawCustomerPhone).replace(/\D/g, "").slice(-10);
+
+      if (cleanPhone && cleanPhone.length === 10) {
+        try {
+          await sendFast2SmsOtp(cleanPhone, freshOtp);
+          console.log(`📲 [FAST2SMS] Bulk Delivery OTP sent successfully to +91 ${cleanPhone} for Requisition #${bulkOrder.referenceId}`);
+        } catch (smsErr) {
+          console.warn("⚠️ [FAST2SMS] Failed to send bulk delivery OTP:", smsErr.message);
+        }
+      }
+
+      const maskedPhone = cleanPhone ? cleanPhone.slice(-4).padStart(10, 'X') : "registered mobile";
 
       return res.json({
         success: true,
-        message: `Delivery OTP has been resent securely to Customer (${customerPhone}).`,
-        otpLastSentAt: new Date()
+        message: `Delivery OTP has been sent via SMS to customer's registered mobile (+91 ${maskedPhone}).`,
+        otpLastSentAt: now,
+        otpExpiresAt: expiresAt,
+        cooldownSeconds: 60
       });
     }
 
@@ -383,31 +407,78 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
       });
     }
 
+    const partnerToken = order.selfDeliveryDetails?.deliveryPartnerToken || `DLV-${order.orderId || token}`;
+
+    order.deliveryMode = "self_delivery";
     order.deliveryOtp = freshOtp;
     if (!order.selfDeliveryDetails) {
       order.selfDeliveryDetails = {};
     }
     order.selfDeliveryDetails.deliveryOtp = freshOtp;
-    order.selfDeliveryDetails.otpLastSentAt = new Date();
+    order.selfDeliveryDetails.otpLastSentAt = now;
+    order.selfDeliveryDetails.otpExpiresAt = expiresAt;
+    order.selfDeliveryDetails.deliveryPartnerToken = partnerToken;
 
     if (Array.isArray(order.items)) {
       order.items.forEach((item) => {
         item.deliveryOtp = freshOtp;
         if (!item.selfDeliveryDetails) item.selfDeliveryDetails = {};
         item.selfDeliveryDetails.deliveryOtp = freshOtp;
+        item.selfDeliveryDetails.otpLastSentAt = now;
+        item.selfDeliveryDetails.otpExpiresAt = expiresAt;
       });
     }
 
     await order.save();
 
-    const customerPhone = order.customer?.phone || order.shippingAddress?.phone || "Customer";
+    // Direct MongoDB persistence to guarantee OTP is saved in database without being modified
+    await Order.updateOne(
+      { _id: order._id },
+      {
+        $set: {
+          deliveryMode: "self_delivery",
+          deliveryOtp: freshOtp,
+          "selfDeliveryDetails.deliveryOtp": freshOtp,
+          "selfDeliveryDetails.otpLastSentAt": now,
+          "selfDeliveryDetails.otpExpiresAt": expiresAt,
+          "selfDeliveryDetails.deliveryPartnerToken": partnerToken,
+          ...(Array.isArray(order.items) ? {
+            items: order.items.map(it => ({
+              ...(it.toObject ? it.toObject() : it),
+              deliveryOtp: freshOtp,
+              selfDeliveryDetails: {
+                ...(it.selfDeliveryDetails || {}),
+                deliveryOtp: freshOtp,
+                otpLastSentAt: now,
+                otpExpiresAt: expiresAt
+              }
+            }))
+          } : {})
+        }
+      }
+    );
+
+    const rawCustomerPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone || "";
+    const cleanPhone = String(rawCustomerPhone).replace(/\D/g, "").slice(-10);
     const taskTypeName = isReturnOrder ? "Return Pickup OTP" : (isExchangeOrder ? "Exchange Delivery OTP" : "Delivery OTP");
-    console.log(`📲 [SMS/OTP RESENT] ${taskTypeName} ${freshOtp} dispatched to Customer (${customerPhone}) for Order #${order.orderId}`);
+
+    if (cleanPhone && cleanPhone.length === 10) {
+      try {
+        await sendFast2SmsOtp(cleanPhone, freshOtp);
+        console.log(`📲 [FAST2SMS] ${taskTypeName} sent successfully to +91 ${cleanPhone} for Order #${order.orderId}`);
+      } catch (smsErr) {
+        console.warn(`⚠️ [FAST2SMS] Failed to send ${taskTypeName}:`, smsErr.message);
+      }
+    }
+
+    const maskedPhone = cleanPhone ? cleanPhone.slice(-4).padStart(10, 'X') : "registered mobile";
 
     return res.json({
       success: true,
-      message: `${taskTypeName} (${freshOtp}) has been sent securely to Customer (${customerPhone}).`,
-      otpLastSentAt: order.selfDeliveryDetails.otpLastSentAt
+      message: `${taskTypeName} has been sent via SMS to customer's registered mobile (+91 ${maskedPhone}).`,
+      otpLastSentAt: now,
+      otpExpiresAt: expiresAt,
+      cooldownSeconds: 60
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Failed to resend OTP", error: error.message });
@@ -444,14 +515,36 @@ export const verifyDeliveryOtp = async (req, res) => {
         });
       }
 
+      // Check OTP expiry (10 min expiry)
+      const bulkExpiresAt = bulkOrder.deliveryDetails?.otpExpiresAt;
+      const bulkLastSentAt = bulkOrder.deliveryDetails?.otpLastSentAt;
+      const nowMs = Date.now();
+      if (bulkExpiresAt) {
+        if (nowMs > new Date(bulkExpiresAt).getTime()) {
+          return res.status(400).json({
+            success: false,
+            message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
+          });
+        }
+      } else if (bulkLastSentAt && (nowMs - new Date(bulkLastSentAt).getTime()) > 15 * 60 * 1000) {
+        return res.status(400).json({
+          success: false,
+          message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
+        });
+      }
+
       const expectedOtp = String(bulkOrder.deliveryDetails?.deliveryOtp || bulkOrder.deliveryOtp || "").trim();
 
       if (!expectedOtp || providedOtp !== expectedOtp) {
         return res.status(400).json({
           success: false,
-          message: "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer."
+          message: "Invalid Delivery OTP. Please enter the correct 4-digit PIN sent to customer's mobile."
         });
       }
+
+      // Invalidate OTP once verified
+      bulkOrder.deliveryOtp = "";
+      if (bulkOrder.deliveryDetails) bulkOrder.deliveryDetails.deliveryOtp = "";
 
       bulkOrder.status = "delivered";
       bulkOrder.overallStatus = "Delivered";
@@ -473,6 +566,15 @@ export const verifyDeliveryOtp = async (req, res) => {
           status: "Delivered"
         });
       } catch (rtErr) {}
+
+      // Template 225930: Delivered SMS
+      try {
+        const rawBulkPhone = bulkOrder.deliveryDetails?.deliveryBoyPhone || bulkOrder.contactPhone || bulkOrder.phone;
+        const cleanBulkPhone = String(rawBulkPhone || "").replace(/\D/g, "").slice(-10);
+        if (cleanBulkPhone.length === 10) {
+          sendFast2SmsOrderDelivered(cleanBulkPhone, bulkOrder.referenceId || bulkOrder._id).catch(() => {});
+        }
+      } catch (e) {}
 
       return res.json({
         success: true,
@@ -514,6 +616,24 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
+    // Check OTP expiry (10 min expiry)
+    const otpExpiresAt = order.selfDeliveryDetails?.otpExpiresAt;
+    const otpLastSentAt = order.selfDeliveryDetails?.otpLastSentAt;
+    const nowMs = Date.now();
+    if (otpExpiresAt) {
+      if (nowMs > new Date(otpExpiresAt).getTime()) {
+        return res.status(400).json({
+          success: false,
+          message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
+        });
+      }
+    } else if (otpLastSentAt && (nowMs - new Date(otpLastSentAt).getTime()) > 15 * 60 * 1000) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
+      });
+    }
+
     const expectedOtp = String(
       order.deliveryOtp ||
       order.selfDeliveryDetails?.deliveryOtp ||
@@ -526,10 +646,20 @@ export const verifyDeliveryOtp = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: isReturnOrder
-          ? "Invalid Return Pickup OTP. Please ask customer for the correct 4-digit Return PIN."
+          ? "Invalid Return Pickup OTP. Please ask customer for the correct 4-digit Return PIN sent to their mobile."
           : (isExchangeOrder
-            ? "Invalid Exchange OTP. Please ask customer for the correct 4-digit Exchange PIN."
-            : "Invalid Delivery OTP. Please enter the correct 4-digit PIN provided by the customer.")
+            ? "Invalid Exchange OTP. Please ask customer for the correct 4-digit Exchange PIN sent to their mobile."
+            : "Invalid Delivery OTP. Please enter the correct 4-digit PIN sent to customer's mobile.")
+      });
+    }
+
+    // Invalidate/clear OTP once verified to prevent reuse
+    order.deliveryOtp = "";
+    if (order.selfDeliveryDetails) order.selfDeliveryDetails.deliveryOtp = "";
+    if (Array.isArray(order.items)) {
+      order.items.forEach((it) => {
+        it.deliveryOtp = "";
+        if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = "";
       });
     }
 
@@ -692,6 +822,17 @@ export const verifyDeliveryOtp = async (req, res) => {
         status: finalStatus
       });
     } catch (rtErr) {}
+
+    // Template 225930: Retail Order Delivered SMS
+    if (finalStatus === "Delivered") {
+      try {
+        const rawCustomerPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone || "";
+        const cleanPhone = String(rawCustomerPhone).replace(/\D/g, "").slice(-10);
+        if (cleanPhone.length === 10) {
+          sendFast2SmsOrderDelivered(cleanPhone, order.orderId || order._id).catch(() => {});
+        }
+      } catch (e) {}
+    }
 
     return res.json({
       success: true,
