@@ -243,13 +243,17 @@ export const isItemBelongingToSellerScope = (item, scope) => {
   const itemSellerStr = item.seller ? String(item.seller._id || item.seller) : "";
   const itemStoreNameStr = item.storeName ? String(item.storeName) : "";
 
+  const cleanItemSellerId = itemSellerIdStr.toLowerCase();
+  const cleanItemSeller = itemSellerStr.toLowerCase();
+  const cleanItemStoreName = itemStoreNameStr.toLowerCase();
+
   const matchSeller = strExpandedSellerIds.some((sId) => {
     if (!sId) return false;
     const cleanSId = String(sId).toLowerCase();
     return (
-      (itemSellerIdStr && (itemSellerIdStr === sId || (sId.length >= 8 && itemSellerIdStr.endsWith(sId.slice(-10))))) ||
-      (itemSellerStr && (itemSellerStr === sId || (sId.length >= 8 && itemSellerStr.endsWith(sId.slice(-10))))) ||
-      (itemStoreNameStr && itemStoreNameStr.toLowerCase() === cleanSId)
+      (cleanItemSellerId && (cleanItemSellerId === cleanSId || (cleanSId.length >= 8 && cleanItemSellerId.endsWith(cleanSId.slice(-10))))) ||
+      (cleanItemSeller && (cleanItemSeller === cleanSId || (cleanSId.length >= 8 && cleanItemSeller.endsWith(cleanSId.slice(-10))))) ||
+      (cleanItemStoreName && cleanItemStoreName === cleanSId)
     );
   });
 
@@ -275,10 +279,25 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   const itemsList = Array.isArray(o.items) ? o.items : [];
   const strExpandedSellerIds = scope?.strExpandedSellerIds;
 
-  const relevantItems = itemsList.filter((item) => {
+  const isOrderBelongingToSeller = Boolean(strExpandedSellerIds && strExpandedSellerIds.some((sId) => {
+    if (!sId) return false;
+    const cleanSId = String(sId).toLowerCase();
+    const ordSellerId = o.sellerId ? String(o.sellerId._id || o.sellerId).toLowerCase() : "";
+    const ordStore = (o.storeName || o.sellerStoreName || "").toLowerCase();
+    return (
+      (ordSellerId && (ordSellerId === cleanSId || (cleanSId.length >= 8 && ordSellerId.endsWith(cleanSId.slice(-10))))) ||
+      (ordStore && (ordStore === cleanSId || cleanSId === ordStore))
+    );
+  }));
+
+  let relevantItems = itemsList.filter((item) => {
     if (!strExpandedSellerIds || !strExpandedSellerIds.length) return true;
     return isItemBelongingToSellerScope(item, scope);
   });
+
+  if (relevantItems.length === 0 && isOrderBelongingToSeller) {
+    relevantItems = itemsList;
+  }
 
   if (relevantItems.length === 0 && strExpandedSellerIds && strExpandedSellerIds.length > 0) {
     return null;
@@ -344,9 +363,22 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     Order.updateOne({ _id: o._id }, { $set: { orderId: rawOrderId, id: rawOrderId } }).exec().catch(() => {});
   }
 
+  let shippingAddressObj = {};
+  if (o.shippingAddress && typeof o.shippingAddress === "object") {
+    shippingAddressObj = o.shippingAddress;
+  } else if (typeof o.shippingAddress === "string" && o.shippingAddress.trim()) {
+    try {
+      shippingAddressObj = JSON.parse(o.shippingAddress);
+    } catch (e) {
+      shippingAddressObj = { street: o.shippingAddress };
+    }
+  } else if (o.address) {
+    shippingAddressObj = typeof o.address === "object" ? o.address : { street: o.address };
+  }
+
   const ordTotalVal = Number(resolvedOrderTotal || o.totalAmount || o.total || 0);
-  const sellerStateVal = scope?.state || scope?.storeDetails?.state || o.sellerDetails?.state || "Uttar Pradesh";
-  const customerStateVal = shippingAddressObj.state || o.shippingAddress?.state || "Uttar Pradesh";
+  const sellerStateVal = scope?.state || scope?.storeDetails?.state || o.sellerDetails?.state || orderItems[0]?.sellerDetails?.state || "Uttar Pradesh";
+  const customerStateVal = shippingAddressObj?.state || o.shippingAddress?.state || customerObj?.state || "Uttar Pradesh";
   const orderSettlement = calculateSellerSettlement(resolvedOrderTotal, {
     commissionRate: Number(o.commissionRate ?? 10),
     paymentMethod: o.paymentMethod || "UPI",
