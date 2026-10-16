@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
-import { calculateSellerSettlement } from "../services/settlementService.js";
+import { calculateSellerSettlement, calculateSettlementMaturity } from "../services/settlementService.js";
 import { sendFast2SmsOtp, sendFast2SmsOrderDelivered } from "../services/smsService.js";
 
 // Helper to locate order or bulk requisition by token or ID
@@ -199,8 +199,8 @@ export const getDeliveryPartnerOrder = async (req, res) => {
       deliveryPartnerToken: selfDetails.deliveryPartnerToken || token,
       trackingUrl: selfDetails.trackingUrl || "",
       driverLocation: selfDetails.driverLocation || null,
-      otpLastSentAt: selfDetails.otpLastSentAt || null,
-      otpExpiresAt: selfDetails.otpExpiresAt || (selfDetails.otpLastSentAt ? new Date(new Date(selfDetails.otpLastSentAt).getTime() + 10 * 60 * 1000) : null)
+      otpLastSentAt: selfDetails.otpLastSentAt || order.updatedAt || order.createdAt || new Date(),
+      otpExpiresAt: selfDetails.otpExpiresAt || new Date(new Date(selfDetails.otpLastSentAt || order.updatedAt || order.createdAt || Date.now()).getTime() + 24 * 60 * 60 * 1000)
     };
 
     const isExchangeOrder = Boolean(
@@ -314,7 +314,7 @@ export const resendCustomerDeliveryOtp = async (req, res) => {
     }
 
     const now = new Date();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes OTP validity
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours live OTP validity
     const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
     if (lookup.isBulk) {
@@ -526,7 +526,7 @@ export const verifyDeliveryOtp = async (req, res) => {
             message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
           });
         }
-      } else if (bulkLastSentAt && (nowMs - new Date(bulkLastSentAt).getTime()) > 15 * 60 * 1000) {
+      } else if (bulkLastSentAt && (nowMs - new Date(bulkLastSentAt).getTime()) > 24 * 60 * 60 * 1000) {
         return res.status(400).json({
           success: false,
           message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
@@ -563,7 +563,12 @@ export const verifyDeliveryOtp = async (req, res) => {
         broadcastRealtimeEvent({
           type: "SCHOOL_ORDER_UPDATED",
           orderId: bulkOrder.referenceId || bulkOrder._id,
-          status: "Delivered"
+          id: String(bulkOrder._id),
+          referenceId: bulkOrder.referenceId,
+          status: "delivered",
+          deliveryStatus: "delivered",
+          remainingPaymentStatus: "paid",
+          deliveredAt: bulkOrder.deliveryDetails?.deliveredAt
         });
       } catch (rtErr) {}
 
@@ -616,7 +621,7 @@ export const verifyDeliveryOtp = async (req, res) => {
       });
     }
 
-    // Check OTP expiry (10 min expiry)
+    // Check OTP expiry (24 hours active validity window)
     const otpExpiresAt = order.selfDeliveryDetails?.otpExpiresAt;
     const otpLastSentAt = order.selfDeliveryDetails?.otpLastSentAt;
     const nowMs = Date.now();
@@ -627,7 +632,7 @@ export const verifyDeliveryOtp = async (req, res) => {
           message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
         });
       }
-    } else if (otpLastSentAt && (nowMs - new Date(otpLastSentAt).getTime()) > 15 * 60 * 1000) {
+    } else if (otpLastSentAt && (nowMs - new Date(otpLastSentAt).getTime()) > 24 * 60 * 60 * 1000) {
       return res.status(400).json({
         success: false,
         message: "Delivery OTP has expired. Please click 'Resend OTP' to get a fresh PIN."
@@ -771,17 +776,33 @@ export const verifyDeliveryOtp = async (req, res) => {
               item.deliveryChargeBorneBy = stl.deliveryChargeBorneBy;
               item.totalDeductions = stl.totalDeductions;
               item.netSettlementAmount = stl.netSettlement;
-              item.settlementStatus = "credited";
               item.settlementRule = stl.ruleCode;
+
+              const maturity = calculateSettlementMaturity({ order, item, deliveredAt: now, now });
+              item.settlementDueDate = maturity.settlementDueDate;
+              item.returnWindowDays = maturity.returnWindowDays;
 
               const sellerNetSettlement = stl.netSettlement;
               const realEarnings = stl.isSellerCollectedCash
                 ? Math.round((itemTotal - stl.totalDeductions) * 100) / 100
                 : sellerNetSettlement;
 
-              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              if (maturity.isMatured) {
+                item.settlementStatus = "credited";
+                item.isSettlementMatured = true;
+                item.settlementMaturedAt = now;
+                seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              } else {
+                item.settlementStatus = "pending_return_window";
+                item.isSettlementMatured = false;
+                seller.pendingSettlementBalance = Math.round(((seller.pendingSettlementBalance || 0) + sellerNetSettlement) * 100) / 100;
+              }
+
               seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + realEarnings) * 100) / 100;
               await seller.save();
+
+              order.settlementDueDate = maturity.settlementDueDate;
+              order.settlementStatus = maturity.isMatured ? "credited" : "pending_return_window";
             }
           }
         }

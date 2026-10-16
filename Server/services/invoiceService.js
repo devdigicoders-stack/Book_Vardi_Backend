@@ -515,7 +515,14 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   }
   doc.text(resolvedSeller.gstNumber ? `GSTIN: ${resolvedSeller.gstNumber}` : "GSTIN: 09AAACB1234F1Z9 (Regular Taxpayer)", 40, sY, { width: 260 });
 
-  // Right Column: Customer Shipping Address
+  const consumerStreet = filterSellerId
+    ? String(resolvedConsumer.street || '')
+        .replace(/,?\s*\((?:Phone|Mobile|Ph|Mob|Tel|Contact)?\s*:?\s*[\+0-9\s-]{8,}\)/gi, '')
+        .replace(/,?\s*(?:Phone|Mobile|Ph|Mob|Tel|Contact)\s*:?\s*[\+0-9\s-]{8,}/gi, '')
+        .replace(/,?\s*\+?91[\s-]?[6-9]\d{9}\b/gi, '')
+        .replace(/,\s*,+/g, ',').replace(/\s*,\s*$/, '').trim()
+    : resolvedConsumer.street;
+
   doc
     .fontSize(10)
     .font("Helvetica-Bold")
@@ -528,11 +535,11 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .font("Helvetica")
     .fontSize(8.5)
     .fillColor(mutedColor)
-    .text(resolvedConsumer.street, 320, 145, { width: 235 })
+    .text(consumerStreet, 320, 145, { width: 235 })
     .text(resolvedConsumer.cityStatePin, 320, 157, { width: 235 });
 
   const consumerContactStr = [
-    resolvedConsumer.phone ? `Phone: ${resolvedConsumer.phone}` : null,
+    (!filterSellerId && resolvedConsumer.phone) ? `Phone: ${resolvedConsumer.phone}` : null,
     resolvedConsumer.email ? `Email: ${resolvedConsumer.email}` : null
   ].filter(Boolean).join(" | ");
   if (consumerContactStr) {
@@ -635,7 +642,33 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   };
 
   let y = tableTop + 24;
-  let subtotal = 0;
+
+  const rawSubtotal = Number(order.subtotal || 0);
+  const rawShipping = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
+  const rawDiscount = Number(order.discount ?? order.discountAmount ?? 0);
+  const rawPointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
+
+  const isFilteredMultiSeller = Boolean(filterSellerId && itemsToRender.length < (order.items || []).length);
+  const allItemsSum = (order.items || []).reduce(
+    (sum, it) => sum + (Number(it.originalPrice ?? it.price ?? it.finalPrice ?? 0) * Number(it.quantity || 1)),
+    0
+  ) || 1;
+  const ratio = isFilteredMultiSeller ? (itemsToRender.reduce((s, it) => s + (Number(it.originalPrice ?? it.price ?? it.finalPrice ?? 0) * Number(it.quantity || 1)), 0) / allItemsSum) : 1;
+
+  const shippingCost = isFilteredMultiSeller ? Math.round(rawShipping * ratio) : rawShipping;
+  const discountAmount = isFilteredMultiSeller ? Math.round(rawDiscount * ratio) : rawDiscount;
+  const pointsDiscount = isFilteredMultiSeller ? Math.round(rawPointsDiscount * ratio) : rawPointsDiscount;
+  const totalDiscounts = discountAmount + pointsDiscount;
+
+  const itemsRenderSum = itemsToRender.reduce(
+    (sum, it) => sum + (Number(it.originalPrice ?? it.price ?? it.finalPrice ?? 0) * Number(it.quantity || 1)),
+    0
+  );
+  const isItemPriceAlreadyDiscounted = rawSubtotal > 0 && totalDiscounts > 0 && Math.abs((itemsRenderSum + totalDiscounts) - rawSubtotal) < 1;
+
+  let subtotal = isFilteredMultiSeller ? itemsRenderSum : (rawSubtotal > 0 ? rawSubtotal : itemsRenderSum);
+  const discountRatio = subtotal > 0 ? Math.min(1, totalDiscounts / subtotal) : 0;
+
   let totalTaxableValue = 0;
   let totalTaxAmount = 0;
 
@@ -682,20 +715,29 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
 
   itemsToRender.forEach((item, index) => {
     const rawQty = Number(item.quantity || 1);
-    const itemUnitPrice = Number(item.finalPrice || item.price || 0);
-    const itemTotal = itemUnitPrice * rawQty;
-    subtotal += itemTotal;
+    let itemUnitPrice = Number(item.originalPrice ?? item.price ?? item.finalPrice ?? 0);
+    if (isItemPriceAlreadyDiscounted && totalDiscounts > 0 && subtotal > 0) {
+      const proportion = (itemUnitPrice * rawQty) / itemsRenderSum;
+      const allocDiscount = totalDiscounts * proportion;
+      itemUnitPrice = rawQty > 0 ? Math.round(((itemUnitPrice * rawQty + allocDiscount) / rawQty) * 100) / 100 : itemUnitPrice;
+    }
+    const itemTotal = Math.round((itemUnitPrice * rawQty) * 100) / 100;
     const gstRate = getProductGstRate(item);
+
+    const itemDiscount = item.offerDiscount !== undefined && item.offerDiscount !== null && !isNaN(Number(item.offerDiscount)) && Number(item.offerDiscount) > 0
+      ? Number(item.offerDiscount)
+      : (discountRatio > 0 ? Math.round(itemTotal * discountRatio * 100) / 100 : 0);
+    const netItemPayable = Math.max(0, Math.round((itemTotal - itemDiscount) * 100) / 100);
+
     let itemTax = 0;
+    let itemTaxable = netItemPayable;
 
     if (gstRate > 0) {
-      const itemTaxable = itemTotal / (1 + gstRate / 100);
-      itemTax = itemTotal - itemTaxable;
-      totalTaxableValue += itemTaxable;
-      totalTaxAmount += itemTax;
-    } else {
-      totalTaxableValue += itemTotal;
+      itemTaxable = Math.round((netItemPayable / (1 + gstRate / 100)) * 100) / 100;
+      itemTax = Math.round((netItemPayable - itemTaxable) * 100) / 100;
     }
+    totalTaxableValue += itemTaxable;
+    totalTaxAmount += itemTax;
 
     const itemSeller = getItemSellerName(item);
     const itemDescText = `${item.name || "Product Item"}\nSold by: ${itemSeller}`;
@@ -738,26 +780,11 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   // 6. TOTALS CALCULATION & GST BREAKDOWN
   y += 8;
 
-  const isFilteredMultiSeller = Boolean(filterSellerId && itemsToRender.length < (order.items || []).length);
-  const allItemsSum = (order.items || []).reduce(
-    (sum, it) => sum + (Number(it.finalPrice || it.price || 0) * Number(it.quantity || 1)),
-    0
-  ) || 1;
-  const ratio = isFilteredMultiSeller ? (subtotal / allItemsSum) : 1;
-
-  const rawShipping = Number(order.shippingFee ?? order.shippingCost ?? order.shippingCharges ?? 0);
-  const rawDiscount = Number(order.discount ?? order.discountAmount ?? 0);
-  const rawPointsDiscount = Number(order.pointsDiscount ?? order.pointsDiscountAmount ?? 0);
-
-  const shippingCost = isFilteredMultiSeller ? Math.round(rawShipping * ratio) : rawShipping;
-  const discountAmount = isFilteredMultiSeller ? Math.round(rawDiscount * ratio) : rawDiscount;
-  const pointsDiscount = isFilteredMultiSeller ? Math.round(rawPointsDiscount * ratio) : rawPointsDiscount;
-
   // Include Delivery GST into total taxable value & total tax collected for full order grand total breakdown
   if (shippingCost > 0) {
     const shippingGstRate = 18;
-    const shippingTaxable = shippingCost / (1 + shippingGstRate / 100);
-    const shippingTax = shippingCost - shippingTaxable;
+    const shippingTaxable = Math.round((shippingCost / (1 + shippingGstRate / 100)) * 100) / 100;
+    const shippingTax = Math.round((shippingCost - shippingTaxable) * 100) / 100;
     totalTaxableValue += shippingTaxable;
     totalTaxAmount += shippingTax;
   }
@@ -769,10 +796,17 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   const sellerStateStr = sellerStateInfo.name || "Uttar Pradesh";
   const customerStateStr = customerStateInfo.name || "Uttar Pradesh";
 
-  const taxableValue = Math.round(totalTaxableValue * 100) / 100;
-  const totalTax = Math.round(totalTaxAmount * 100) / 100;
+  const calculatedGrandTotal = isFilteredMultiSeller
+    ? Math.max(0, Math.round((subtotal + shippingCost - discountAmount - pointsDiscount) * 100) / 100)
+    : Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
+
+  let taxableValue = Math.round(totalTaxableValue * 100) / 100;
+  let totalTax = Math.round(totalTaxAmount * 100) / 100;
+  if (Math.abs((taxableValue + totalTax) - calculatedGrandTotal) > 0 && Math.abs((taxableValue + totalTax) - calculatedGrandTotal) <= 0.05) {
+    taxableValue = Math.round((calculatedGrandTotal - totalTax) * 100) / 100;
+  }
   const cgst = Math.round((totalTax / 2) * 100) / 100;
-  const sgst = cgst;
+  const sgst = Math.round((totalTax - cgst) * 100) / 100;
 
   // Tax Breakdown (Left Card)
   const leftCardY = y;
@@ -814,10 +848,6 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   }
 
   // Financial Summary (Right)
-  const calculatedGrandTotal = isFilteredMultiSeller
-    ? Math.max(0, Math.round((subtotal + shippingCost - discountAmount - pointsDiscount) * 100) / 100)
-    : Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
-
   let rightY = y;
   const labelWidth = 145;
   const valWidth = 65;
@@ -999,8 +1029,16 @@ export const generateCreditNotePDF = (order, filterSellerId = null) => {
   const orderOverallStatus = String(order.overallStatus || order.status || "").toLowerCase();
   const returnStatus = String(order.returnRequest?.status || "").toLowerCase();
 
-  const isReturn = reqType === "return" || orderOverallStatus.includes("return") || returnStatus.includes("return") || orderOverallStatus === "product_received" || orderOverallStatus === "product_return_received" || orderOverallStatus.includes("refund");
   const isExchange = reqType === "exchange" || orderOverallStatus.includes("exchange") || returnStatus.includes("exchange");
+
+  // UNIFIED INVOICING: An Exchange order must generate ONE statutory document across all portals:
+  // the EXCHANGE TAX INVOICE (which already details the returned item credit & fresh replacement debit).
+  // A separate Credit Note must NEVER be issued for an exchange!
+  if (isExchange) {
+    return generateExchangeInvoicePDF(order, filterSellerId);
+  }
+
+  const isReturn = reqType === "return" || orderOverallStatus.includes("return") || returnStatus.includes("return") || orderOverallStatus === "product_received" || orderOverallStatus === "product_return_received" || orderOverallStatus.includes("refund");
   const isCancelled = orderOverallStatus === "cancelled" || Boolean(order.cancelledAt);
 
   let creditNoteTypeHeading = "TAX CREDIT NOTE";
@@ -1008,9 +1046,6 @@ export const generateCreditNotePDF = (order, filterSellerId = null) => {
   if (isReturn) {
     creditNoteTypeHeading = "TAX CREDIT NOTE (SALES RETURN)";
     creditNoteSubhead = "Issued for Returned Goods & Reversal of Output Tax Liability";
-  } else if (isExchange) {
-    creditNoteTypeHeading = "TAX CREDIT NOTE (EXCHANGE ADJUSTMENT)";
-    creditNoteSubhead = "Issued for Product Exchange Valuation & Differential Adjustment";
   } else if (isCancelled) {
     creditNoteTypeHeading = "TAX CREDIT NOTE (ORDER CANCELLATION)";
     creditNoteSubhead = "Issued for Full Cancellation & Reversal of Taxable Supply";

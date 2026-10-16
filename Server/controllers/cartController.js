@@ -111,6 +111,10 @@ const getNormalizedCartItems = (cart) => {
         variantName: it.variantName || it.selectedVariant?.name || it.selectedSize || undefined,
         paymentMethodAllowed: it.paymentMethodAllowed || it.payment_method_allowed || "Both",
         paymentMethodsAllowed: Array.isArray(it.paymentMethodsAllowed) ? it.paymentMethodsAllowed : ["COD", "Online"],
+        isMeterBased: Boolean(it.isMeterBased || it.unit === 'meter'),
+        minMeter: it.minMeter !== undefined ? Number(it.minMeter) : undefined,
+        meterStep: it.meterStep !== undefined ? Number(it.meterStep) : undefined,
+        unit: it.unit || undefined,
         quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1
       };
     })
@@ -238,7 +242,16 @@ export const addToCart = async (req, res) => {
       (it) => extractCartItemId(it) === cartItemId
     );
 
-    const qtyToAdd = Number(quantity) > 0 ? Number(quantity) : 1;
+    const isMeter = Boolean(
+      itemProduct.isMeterBased ||
+      itemProduct.unit === 'meter' ||
+      String(itemProduct.category || '').toLowerCase().includes('unstitched') ||
+      String(itemProduct.name || '').toLowerCase().includes('unstitched')
+    );
+    const minMeter = isMeter ? (Number(itemProduct.minMeter) > 0 ? Number(itemProduct.minMeter) : 0.5) : 1;
+    const qtyToAdd = isMeter
+      ? Math.max(minMeter, Number(quantity) > 0 ? Number(quantity) : minMeter)
+      : (Number(quantity) > 0 ? Number(quantity) : 1);
 
     if (existingIndex > -1) {
       items[existingIndex].quantity += qtyToAdd;
@@ -249,6 +262,12 @@ export const addToCart = async (req, res) => {
       if (itemProduct.selectedColor) items[existingIndex].selectedColor = itemProduct.selectedColor;
       if (itemProduct.selectedVariant) items[existingIndex].selectedVariant = itemProduct.selectedVariant;
       if (itemProduct.variantName) items[existingIndex].variantName = itemProduct.variantName;
+      if (isMeter) {
+        items[existingIndex].isMeterBased = true;
+        items[existingIndex].minMeter = minMeter;
+        items[existingIndex].meterStep = Number(itemProduct.meterStep) || 0.5;
+        items[existingIndex].unit = 'meter';
+      }
     } else {
       items.push({
         ...itemProduct,
@@ -264,6 +283,10 @@ export const addToCart = async (req, res) => {
         selectedColor: itemProduct.selectedColor || undefined,
         selectedVariant: itemProduct.selectedVariant || undefined,
         variantName: itemProduct.variantName || itemProduct.selectedVariant?.name || itemProduct.selectedSize || undefined,
+        isMeterBased: isMeter,
+        minMeter: isMeter ? minMeter : undefined,
+        meterStep: isMeter ? (Number(itemProduct.meterStep) || 0.5) : undefined,
+        unit: isMeter ? 'meter' : (itemProduct.unit || 'piece'),
         quantity: qtyToAdd
       });
     }

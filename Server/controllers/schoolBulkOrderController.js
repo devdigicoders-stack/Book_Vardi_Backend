@@ -2206,6 +2206,19 @@ export const updateSellerSchoolOrder = async (req, res) => {
 
     await bulkOrder.save();
 
+    try {
+      broadcastRealtimeEvent({
+        type: "SCHOOL_ORDER_UPDATED",
+        orderId: bulkOrder.referenceId || bulkOrder._id,
+        id: String(bulkOrder._id),
+        referenceId: bulkOrder.referenceId,
+        status: bulkOrder.status,
+        deliveryStatus: bulkOrder.status,
+        remainingPaymentStatus: bulkOrder.remainingPaymentStatus,
+        bulkOrder
+      });
+    } catch (rtErr) {}
+
     // Fast2SMS DLT Status Update SMS (Shipped, Out for Delivery, Delivered)
     try {
       sendOrderStatusSms(bulkOrder, bulkOrder.status, {

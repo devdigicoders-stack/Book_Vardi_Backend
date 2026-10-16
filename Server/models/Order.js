@@ -69,6 +69,11 @@ const orderItemSchema = new mongoose.Schema({
   isReturnable: { type: Boolean, default: true },
   isRefundable: { type: Boolean, default: true },
   isExchangeable: { type: Boolean, default: true },
+  unit: { type: String, default: "piece" },
+  isMeterBased: { type: Boolean, default: false },
+  minMeter: { type: Number, default: 0.5 },
+  meterStep: { type: Number, default: 0.5 },
+  subCategory: { type: String, default: "" },
   returnWindowDays: { type: Number, default: 7 },
   returnPolicy: { type: String, default: "" },
   deliveryType: {
@@ -127,8 +132,15 @@ const orderItemSchema = new mongoose.Schema({
   deliveryChargeBorneBy: { type: String, default: "admin" },
   totalDeductions: { type: Number, default: 0 },
   netSettlementAmount: { type: Number, default: 0 },
-  settlementStatus: { type: String, enum: ["pending", "credited", "settled", "refunded"], default: "pending" },
-  settlementRule: { type: String, default: "ONLINE_SELF_DELIVERY" }
+  settlementStatus: { 
+    type: String, 
+    enum: ["pending", "pending_return_window", "in_return_window", "credited", "settled", "refunded", "on_hold"], 
+    default: "pending" 
+  },
+  settlementRule: { type: String, default: "ONLINE_SELF_DELIVERY" },
+  settlementDueDate: { type: Date, default: null },
+  settlementMaturedAt: { type: Date, default: null },
+  isSettlementMatured: { type: Boolean, default: false }
 });
 
 const timelineEventSchema = new mongoose.Schema({
@@ -319,6 +331,19 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    settlementDueDate: {
+      type: Date,
+      default: null
+    },
+    settlementMaturedAt: {
+      type: Date,
+      default: null
+    },
+    settlementStatus: {
+      type: String,
+      enum: ["pending", "pending_return_window", "in_return_window", "credited", "settled", "refunded", "on_hold"],
+      default: "pending"
+    },
     codCollectedAt: {
       type: Date,
       default: null
@@ -411,17 +436,30 @@ orderSchema.pre("save", function (next) {
   ).trim();
 
   const hasValidOtp = /^\d{4}$/.test(existingOtpCandidate);
+  const statusStr = String(this.overallStatus || this.status || "").toLowerCase().trim();
+  const isOrderTerminal = statusStr === "delivered" || statusStr === "exchanged" || statusStr === "product_received";
+  const isReturnOrExchange = Boolean(
+    this.returnRequest?.type ||
+    statusStr.includes("return") ||
+    statusStr.includes("exchange") ||
+    statusStr.includes("pickup")
+  );
 
   const isSelfDeliveryMode = this.deliveryMode === "self_delivery" ||
     Boolean(this.selfDeliveryDetails?.deliveryPersonName || this.selfDeliveryDetails?.deliveryPartnerToken) ||
-    hasValidOtp;
+    hasValidOtp ||
+    isReturnOrExchange;
 
   if (isSelfDeliveryMode) {
-    this.deliveryMode = "self_delivery";
+    if (!this.deliveryMode || this.deliveryMode === "pending_choice") {
+      this.deliveryMode = "self_delivery";
+    }
     let canonicalOtp = "";
 
-    // If selfDeliveryDetails.deliveryOtp was explicitly modified (e.g. resend OTP), prioritize it
-    if (this.isModified && this.isModified("selfDeliveryDetails.deliveryOtp") && this.selfDeliveryDetails?.deliveryOtp) {
+    // If order was already successfully verified and finished, keep OTP cleared
+    if (isOrderTerminal && !hasValidOtp) {
+      canonicalOtp = "";
+    } else if (this.isModified && this.isModified("selfDeliveryDetails.deliveryOtp") && this.selfDeliveryDetails?.deliveryOtp) {
       canonicalOtp = String(this.selfDeliveryDetails.deliveryOtp).trim();
     } else if (this.isModified && this.isModified("deliveryOtp") && this.deliveryOtp) {
       canonicalOtp = String(this.deliveryOtp).trim();
@@ -437,8 +475,8 @@ orderSchema.pre("save", function (next) {
       ).trim();
     }
 
-    // Generate secure 4-digit OTP for confirmed self-delivery
-    if (!canonicalOtp || !/^\d{4}$/.test(canonicalOtp)) {
+    // Generate secure 4-digit OTP for confirmed delivery/exchange if not finished
+    if (!isOrderTerminal && (!canonicalOtp || !/^\d{4}$/.test(canonicalOtp))) {
       canonicalOtp = Math.floor(1000 + Math.random() * 9000).toString();
     }
 
@@ -448,16 +486,29 @@ orderSchema.pre("save", function (next) {
     }
     this.selfDeliveryDetails.deliveryOtp = canonicalOtp;
 
+    // Ensure OTP timestamps remain active (24-hour validity window)
+    if (canonicalOtp && /^\d{4}$/.test(canonicalOtp)) {
+      if (!this.selfDeliveryDetails.otpLastSentAt) {
+        this.selfDeliveryDetails.otpLastSentAt = this.updatedAt || this.createdAt || new Date();
+      }
+      if (!this.selfDeliveryDetails.otpExpiresAt) {
+        this.selfDeliveryDetails.otpExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      }
+    }
+
     if (Array.isArray(this.items)) {
       this.items.forEach(it => {
         it.deliveryOtp = canonicalOtp;
-        if (it.selfDeliveryDetails) {
-          it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+        if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+        it.selfDeliveryDetails.deliveryOtp = canonicalOtp;
+        if (canonicalOtp && /^\d{4}$/.test(canonicalOtp)) {
+          if (!it.selfDeliveryDetails.otpLastSentAt) it.selfDeliveryDetails.otpLastSentAt = this.selfDeliveryDetails.otpLastSentAt;
+          if (!it.selfDeliveryDetails.otpExpiresAt) it.selfDeliveryDetails.otpExpiresAt = this.selfDeliveryDetails.otpExpiresAt;
         }
       });
     }
-  } else if (this.deliveryMode === "third_party") {
-    // 3rd-party courier uses carrier AWB, no store doorstep OTP
+  } else if (this.deliveryMode === "third_party" && !isReturnOrExchange) {
+    // 3rd-party forward courier uses carrier AWB, no store doorstep OTP
     this.deliveryOtp = "";
     if (this.selfDeliveryDetails) {
       this.selfDeliveryDetails.deliveryOtp = "";

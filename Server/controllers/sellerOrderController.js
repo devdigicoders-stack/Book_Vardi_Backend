@@ -757,14 +757,19 @@ export const updateSellerOrderItemStatus = async (req, res) => {
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails.deliveryOtp || order.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      const existingOtpCandidate = String(selfDeliveryDetails.deliveryOtp || order.deliveryOtp || item.selfDeliveryDetails?.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || "").trim();
+      const otpVal = /^\d{4}$/.test(existingOtpCandidate) ? existingOtpCandidate : Math.floor(1000 + Math.random() * 9000).toString();
+      const otpLastSentAt = selfDeliveryDetails.otpLastSentAt || order.selfDeliveryDetails?.otpLastSentAt || new Date();
+      const otpExpiresAt = selfDeliveryDetails.otpExpiresAt || order.selfDeliveryDetails?.otpExpiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000);
 
       item.selfDeliveryDetails = {
         ...item.selfDeliveryDetails,
         ...selfDeliveryDetails,
         deliveryPartnerToken: tokenVal,
         trackingUrl: trackingLink,
-        deliveryOtp: otpVal
+        deliveryOtp: otpVal,
+        otpLastSentAt,
+        otpExpiresAt
       };
       item.deliveryOtp = otpVal;
       order.deliveryOtp = otpVal;
@@ -915,7 +920,10 @@ export const updateSellerOrderStatus = async (req, res) => {
         `DLV-${Math.floor(100000 + Math.random() * 900000)}`
       ).trim();
       const trackingLink = `${clientAppUrl}/#delivery-partner?token=${encodeURIComponent(tokenVal)}`;
-      const otpVal = selfDeliveryDetails?.deliveryOtp || order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || Math.floor(1000 + Math.random() * 9000).toString();
+      const existingOtpCandidate = String(selfDeliveryDetails?.deliveryOtp || order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || "").trim();
+      const otpVal = /^\d{4}$/.test(existingOtpCandidate) ? existingOtpCandidate : Math.floor(1000 + Math.random() * 9000).toString();
+      const otpLastSentAt = selfDeliveryDetails?.otpLastSentAt || order.selfDeliveryDetails?.otpLastSentAt || new Date();
+      const otpExpiresAt = selfDeliveryDetails?.otpExpiresAt || order.selfDeliveryDetails?.otpExpiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000);
 
       const sanitizeDriverLocation = (rawLoc) => {
         if (!rawLoc || typeof rawLoc !== 'object') return { lat: null, lng: null, updatedAt: null };
@@ -938,7 +946,9 @@ export const updateSellerOrderStatus = async (req, res) => {
         deliveryPartnerToken: tokenVal,
         trackingUrl: trackingLink,
         deliveryOtp: otpVal,
-        driverLocation: inputDriverLoc
+        driverLocation: inputDriverLoc,
+        otpLastSentAt,
+        otpExpiresAt
       };
 
       order.deliveryOtp = otpVal;
@@ -1261,7 +1271,11 @@ export const downloadSellerCreditNote = async (req, res) => {
     const orderObj = order.toObject ? order.toObject() : order;
     const enrichedOrder = (await enrichOrdersWithSellerAndConsumer([orderObj]))[0];
 
-    const filename = `Seller_CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+    const isExchangeOrder = String(enrichedOrder.returnRequest?.type || enrichedOrder.returnRequest?.requestType || '').toLowerCase() === 'exchange' ||
+      String(enrichedOrder.overallStatus || enrichedOrder.status || '').toLowerCase().includes('exchange');
+    const filename = isExchangeOrder
+      ? `Seller_ExchangeInvoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`
+      : `Seller_CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 

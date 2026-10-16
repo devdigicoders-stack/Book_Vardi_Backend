@@ -4,7 +4,7 @@ import User from "../models/User.js";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import { generateSellerFinancialStatementPDF } from "../services/invoiceService.js";
-import { calculateSellerSettlement } from "../services/settlementService.js";
+import { calculateSellerSettlement, reconcileSellerSettlementBalances } from "../services/settlementService.js";
 
 // Helper: Safely find seller by MongoDB ObjectId or fallback to email / phone / storeName
 const findSellerByIdOrQuery = async (id, selectFields = "") => {
@@ -14,6 +14,18 @@ const findSellerByIdOrQuery = async (id, selectFields = "") => {
     query = query.select(selectFields);
   }
   return await query.findOne();
+};
+
+// Reconcile All Sellers Settlement Balances On-Demand (Return Window + 1 day maturity)
+export const reconcileAllSellers = async (req, res) => {
+  try {
+    const sellers = await Seller.find({}).select("_id storeName");
+    const results = await Promise.allSettled(sellers.map(s => reconcileSellerSettlementBalances(s._id)));
+    const successList = results.filter(r => r.status === "fulfilled" && r.value).map(r => r.value);
+    res.json({ success: true, count: successList.length, results: successList });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 // Get All Sellers (with optional status filter)
@@ -33,6 +45,12 @@ export const getAllSellers = async (req, res) => {
         { email: { $regex: search, $options: "i" } },
         { phone: { $regex: search, $options: "i" } }
       ];
+    }
+
+    // Dynamic reconciliation of matured vs pending return window settlements for sellers
+    const sellerIds = await Seller.find(filter).distinct("_id");
+    if (sellerIds.length > 0) {
+      await Promise.allSettled(sellerIds.map(id => reconcileSellerSettlementBalances(id)));
     }
 
     const sellersPromise = Seller.find(filter)

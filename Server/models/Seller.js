@@ -209,10 +209,13 @@ const sellerSchema = new mongoose.Schema(
       default: 0,
       min: 0
     },
+    pendingSettlementBalance: {
+      type: Number,
+      default: 0
+    },
     totalEarnings: {
       type: Number,
-      default: 0,
-      min: 0
+      default: 0
     },
     totalWithdrawn: {
       type: Number,

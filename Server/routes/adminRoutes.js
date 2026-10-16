@@ -30,6 +30,7 @@ import {
 } from "../controllers/adminController.js";
 import {
   getAllSellers,
+  reconcileAllSellers,
   getSellerById,
   approveSeller,
   rejectSeller,
@@ -122,6 +123,8 @@ router.post("/inventory/quick-restock", authenticateAdmin, quickRestockAdminInve
 // Admin Seller Verification & Management
 // ==========================================
 router.get("/sellers", authenticateAdmin, getAllSellers);
+router.get("/sellers/reconcile-all", authenticateAdmin, reconcileAllSellers);
+router.post("/sellers/reconcile-all", authenticateAdmin, reconcileAllSellers);
 router.get("/sellers/:id", authenticateAdmin, getSellerById);
 router.put("/sellers/:id/approve", authenticateAdmin, approveSeller);
 router.put("/sellers/:id/reject", authenticateAdmin, rejectSeller);

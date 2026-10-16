@@ -10,7 +10,7 @@ import Cart from "../models/Cart.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
-import { calculateSellerSettlement } from "../services/settlementService.js";
+import { calculateSellerSettlement, calculateSettlementMaturity } from "../services/settlementService.js";
 import { 
   sendFast2SmsOrderConfirmation, 
   sendFast2SmsOtp,
@@ -488,7 +488,7 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         ? User.find({ _id: { $in: Array.from(userIds) } }).lean()
         : [],
       productIds.size > 0 
-        ? Product.find({ _id: { $in: Array.from(productIds) } }).select("_id sellerId sellerStoreName storeName").lean()
+        ? Product.find({ _id: { $in: Array.from(productIds) } }).select("_id sellerId sellerStoreName storeName unit isMeterBased minMeter meterStep subCategory category name").lean()
         : []
     ]);
 
@@ -625,6 +625,50 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
           item.isRefundable = (pDoc.returnPolicy === 'non_returnable' || pDoc.isRefundable === false) ? false : (item.isRefundable ?? pDoc.isRefundable ?? true);
           item.returnWindowDays = item.returnWindowDays || pDoc.returnWindowDays || 7;
           item.returnPolicy = item.returnPolicy || pDoc.returnPolicy || ((item.isReturnable === false && item.isExchangeable === false) ? 'non_returnable' : '');
+          if (pDoc.unit) item.unit = item.unit || pDoc.unit;
+          if (pDoc.isMeterBased !== undefined) item.isMeterBased = item.isMeterBased ?? pDoc.isMeterBased;
+          if (pDoc.minMeter) item.minMeter = item.minMeter || pDoc.minMeter;
+          if (pDoc.meterStep) item.meterStep = item.meterStep || pDoc.meterStep;
+          if (pDoc.subCategory && !item.subCategory) item.subCategory = pDoc.subCategory;
+        }
+
+        const candMeterStr = [
+          item.category,
+          pDoc?.category,
+          item.subCategory,
+          pDoc?.subCategory,
+          item.name,
+          pDoc?.name,
+          item.unit,
+          pDoc?.unit
+        ].filter(Boolean).join(' ').toLowerCase();
+
+        const isMeter = Boolean(
+          item.isMeterBased ||
+          pDoc?.isMeterBased ||
+          item.unit === 'meter' ||
+          item.unit === 'm' ||
+          item.unit === 'mtr' ||
+          pDoc?.unit === 'meter' ||
+          pDoc?.unit === 'm' ||
+          pDoc?.unit === 'mtr' ||
+          candMeterStr.includes('unstitched') ||
+          candMeterStr.includes('unstiched') ||
+          candMeterStr.includes('cloth') ||
+          candMeterStr.includes('fabric') ||
+          candMeterStr.includes('shirting') ||
+          candMeterStr.includes('suiting') ||
+          candMeterStr.includes('kapda') ||
+          candMeterStr.includes('than') ||
+          candMeterStr.includes('dress material') ||
+          (Number(item.quantity) % 1 !== 0)
+        );
+
+        if (isMeter) {
+          item.isMeterBased = true;
+          item.unit = 'meter';
+          item.minMeter = Number(pDoc?.minMeter || item.minMeter || 0.5);
+          item.meterStep = Number(pDoc?.meterStep || item.meterStep || 0.5);
         }
 
         if (!matchedSeller && pDoc) {
@@ -813,10 +857,10 @@ export const getMyOrders = async (req, res) => {
         city: firstItem.sellerCity || ord.sellerCity || ""
       });
 
-      const sanitizeSelfDelivery = (sd) => {
+      const sanitizeSelfDelivery = (sd, parentOtp) => {
         if (!sd) return null;
         const copy = typeof sd.toObject === 'function' ? sd.toObject() : { ...sd };
-        delete copy.deliveryOtp;
+        copy.deliveryOtp = parentOtp || copy.deliveryOtp || "";
         return copy;
       };
 
@@ -887,8 +931,8 @@ export const getMyOrders = async (req, res) => {
         trackingNumber: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.deliveryPartnerToken || ord.trackingNumber || '') : (ord.trackingNumber || firstItem.thirdPartyDetails?.trackingNumber || ''),
         trackingUrl: resolvedDeliveryMode === 'self_delivery' ? (ord.selfDeliveryDetails?.trackingUrl || ord.trackingUrl || '') : (ord.trackingUrl || firstItem.thirdPartyDetails?.trackingUrl || ''),
         sellerDetails: resolvedSellerDetails,
-        selfDeliveryDetails: resolvedDeliveryMode === 'self_delivery' ? sanitizeSelfDelivery(ord.selfDeliveryDetails || firstItem.selfDeliveryDetails) : null,
-        deliveryOtp: "", // Security: Delivery OTP is strictly dispatched to customer's mobile via Fast2SMS SMS
+        selfDeliveryDetails: resolvedDeliveryMode === 'self_delivery' ? sanitizeSelfDelivery(ord.selfDeliveryDetails || firstItem.selfDeliveryDetails, ord.deliveryOtp) : null,
+        deliveryOtp: ord.deliveryOtp || ord.selfDeliveryDetails?.deliveryOtp || "",
         itemsCount: ord.items?.reduce((s, it) => s + (it.quantity || 1), 0) || ord.quantity || 1,
         items: formattedItems,
         subtotal: ord.subtotal || ord.totalAmount || ord.total || 0,
@@ -1163,6 +1207,62 @@ export const createOrder = async (req, res) => {
         item.returnWindowDays = item.returnWindowDays || prod.returnWindowDays || 7;
         item.returnPolicy = item.returnPolicy || prod.returnPolicy || "";
       }
+
+      // Check meter-based fabric/cloth product rules & enforce minimum purchase length
+      const candItemStr = [
+        item.category,
+        prod?.category,
+        item.subCategory,
+        prod?.subCategory,
+        item.name,
+        prod?.name,
+        item.unit,
+        prod?.unit
+      ].filter(Boolean).join(' ').toLowerCase();
+
+      const isMeterBased = Boolean(
+        item.isMeterBased ||
+        prod?.isMeterBased ||
+        item.unit === 'meter' ||
+        item.unit === 'm' ||
+        item.unit === 'mtr' ||
+        prod?.unit === 'meter' ||
+        prod?.unit === 'm' ||
+        prod?.unit === 'mtr' ||
+        candItemStr.includes('unstitched') ||
+        candItemStr.includes('unstiched') ||
+        candItemStr.includes('cloth') ||
+        candItemStr.includes('fabric') ||
+        candItemStr.includes('shirting') ||
+        candItemStr.includes('suiting') ||
+        candItemStr.includes('kapda') ||
+        candItemStr.includes('than') ||
+        candItemStr.includes('dress material') ||
+        (Number(item.quantity) % 1 !== 0)
+      );
+      const minMeter = isMeterBased ? (Number(prod?.minMeter || item.minMeter) > 0 ? Number(prod?.minMeter || item.minMeter) : 0.5) : 1;
+
+      if (isMeterBased) {
+        item.isMeterBased = true;
+        item.minMeter = minMeter;
+        item.meterStep = Number(prod?.meterStep || item.meterStep || 0.5);
+        item.unit = 'meter';
+        if (prod?.subCategory && !item.subCategory) item.subCategory = prod.subCategory;
+        if (Number(item.quantity) < minMeter) {
+          return res.status(400).json({
+            message: `Minimum order length for "${item.name}" is ${minMeter} meter(s). Please adjust your fabric quantity.`
+          });
+        }
+        item.quantity = Math.max(minMeter, Math.round(Number(item.quantity || minMeter) * 100) / 100);
+      } else {
+        item.quantity = Math.max(1, Math.round(Number(item.quantity) || 1));
+      }
+
+      // Recalculate item totals with final validated quantity
+      const finalItemGross = Math.round(item.price * item.quantity * 100) / 100;
+      const finalUnitDiscount = item.quantity > 0 ? (item.offerDiscount / item.quantity) : item.offerDiscount;
+      item.finalPrice = Math.max(0, Math.round((item.price - finalUnitDiscount) * 100) / 100);
+      item.total = Math.max(0, Math.round((finalItemGross - item.offerDiscount) * 100) / 100);
 
       let sellerPhone = item.sellerPhone || "";
       let sellerEmail = item.sellerEmail || "";
@@ -1765,10 +1865,10 @@ export const trackOrder = async (req, res) => {
         const rawSd = (order.deliveryMode === "self_delivery" || Boolean(order.selfDeliveryDetails?.deliveryPersonName)) ? (order.selfDeliveryDetails || order.items?.[0]?.selfDeliveryDetails || null) : null;
         if (!rawSd) return null;
         const copy = typeof rawSd.toObject === 'function' ? rawSd.toObject() : { ...rawSd };
-        delete copy.deliveryOtp;
+        copy.deliveryOtp = order.deliveryOtp || copy.deliveryOtp || "";
         return copy;
       })(),
-      deliveryOtp: "", // Security: Delivery OTP is strictly dispatched to customer's mobile via Fast2SMS SMS
+      deliveryOtp: order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || "",
       steps: standardSteps.map((step, idx) => ({
         ...step,
         isCompleted: isCancelled ? false : currentStepIndex >= idx,
@@ -1794,11 +1894,24 @@ export const trackOrder = async (req, res) => {
           return copy;
         };
 
+        const baseItemPrice = Number(item.price !== undefined && item.price !== null && !isNaN(Number(item.price)) ? item.price : (item.finalPrice || 0));
+        const finalItemPrice = Number(item.finalPrice !== undefined && item.finalPrice !== null && !isNaN(Number(item.finalPrice)) ? item.finalPrice : baseItemPrice);
+        const itemOfferDiscount = Number(item.offerDiscount || item.discount || 0);
+
         return {
           id: item._id,
+          _id: item._id,
           name: item.name,
           quantity: item.quantity,
-          price: item.finalPrice || item.price,
+          price: baseItemPrice,
+          originalPrice: baseItemPrice,
+          finalPrice: finalItemPrice,
+          offerDiscount: itemOfferDiscount,
+          discount: itemOfferDiscount,
+          total: Number(item.total) || Math.round((finalItemPrice * (Number(item.quantity) || 1)) * 100) / 100,
+          gstPercent: item.gstPercent !== undefined ? item.gstPercent : (item.gstRate ?? item.gst ?? 5),
+          gstRate: item.gstRate !== undefined ? item.gstRate : (item.gstPercent ?? item.gst ?? 5),
+          isGstInclusive: item.isGstInclusive !== false,
           size: item.size,
           age: item.age,
           color: item.color,
@@ -2004,22 +2117,55 @@ export const updateOrder = async (req, res) => {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchanged";
       } else if (newStatusKey === "exchange_dispatched") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchange_dispatched";
-      } else if (newStatusKey === "pickup_scheduled") {
-        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "pickup_scheduled";
-        const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
-        existingOrder.deliveryOtp = freshOtp;
+        const existingOtp = String(existingOrder.deliveryOtp || existingOrder.selfDeliveryDetails?.deliveryOtp || "").trim();
+        const activeOtp = /^\d{4}$/.test(existingOtp) ? existingOtp : Math.floor(1000 + Math.random() * 9000).toString();
+        const now = new Date();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+        existingOrder.deliveryOtp = activeOtp;
         if (!existingOrder.selfDeliveryDetails) existingOrder.selfDeliveryDetails = {};
-        existingOrder.selfDeliveryDetails.deliveryOtp = freshOtp;
+        existingOrder.selfDeliveryDetails.deliveryOtp = activeOtp;
+        existingOrder.selfDeliveryDetails.otpLastSentAt = now;
+        existingOrder.selfDeliveryDetails.otpExpiresAt = expiresAt;
         if (Array.isArray(existingOrder.items)) {
           existingOrder.items.forEach(it => {
-            it.deliveryOtp = freshOtp;
-            if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = freshOtp;
+            it.deliveryOtp = activeOtp;
+            if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+            it.selfDeliveryDetails.deliveryOtp = activeOtp;
+            it.selfDeliveryDetails.otpLastSentAt = now;
+            it.selfDeliveryDetails.otpExpiresAt = expiresAt;
           });
         }
         const custPhone = existingOrder.customer?.phone || existingOrder.shippingAddress?.phone || existingOrder.phone;
         const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
         if (cleanPhone && cleanPhone.length === 10) {
-          sendFast2SmsOtp(cleanPhone, freshOtp).catch(() => {});
+          sendFast2SmsOtp(cleanPhone, activeOtp).catch(() => {});
+        }
+      } else if (newStatusKey === "pickup_scheduled") {
+        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "pickup_scheduled";
+        const existingOtp = String(existingOrder.deliveryOtp || existingOrder.selfDeliveryDetails?.deliveryOtp || "").trim();
+        const activeOtp = /^\d{4}$/.test(existingOtp) ? existingOtp : Math.floor(1000 + Math.random() * 9000).toString();
+        const now = new Date();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+        existingOrder.deliveryOtp = activeOtp;
+        if (!existingOrder.selfDeliveryDetails) existingOrder.selfDeliveryDetails = {};
+        existingOrder.selfDeliveryDetails.deliveryOtp = activeOtp;
+        existingOrder.selfDeliveryDetails.otpLastSentAt = now;
+        existingOrder.selfDeliveryDetails.otpExpiresAt = expiresAt;
+        if (Array.isArray(existingOrder.items)) {
+          existingOrder.items.forEach(it => {
+            it.deliveryOtp = activeOtp;
+            if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+            it.selfDeliveryDetails.deliveryOtp = activeOtp;
+            it.selfDeliveryDetails.otpLastSentAt = now;
+            it.selfDeliveryDetails.otpExpiresAt = expiresAt;
+          });
+        }
+        const custPhone = existingOrder.customer?.phone || existingOrder.shippingAddress?.phone || existingOrder.phone;
+        const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+        if (cleanPhone && cleanPhone.length === 10) {
+          sendFast2SmsOtp(cleanPhone, activeOtp).catch(() => {});
         }
       } else if (newStatusKey === "return_approved" || newStatusKey === "approved") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "approved";
@@ -2085,17 +2231,33 @@ export const updateOrder = async (req, res) => {
               item.deliveryChargeBorneBy = stl.deliveryChargeBorneBy;
               item.totalDeductions = stl.totalDeductions;
               item.netSettlementAmount = stl.netSettlement;
-              item.settlementStatus = "credited";
               item.settlementRule = stl.ruleCode;
+
+              const maturity = calculateSettlementMaturity({ order: existingOrder, item, deliveredAt: new Date(), now: new Date() });
+              item.settlementDueDate = maturity.settlementDueDate;
+              item.returnWindowDays = maturity.returnWindowDays;
 
               const sellerNetSettlement = stl.netSettlement;
               const realEarnings = stl.isSellerCollectedCash
                 ? Math.round((itemTotal - stl.totalDeductions) * 100) / 100
                 : sellerNetSettlement;
 
-              seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              if (maturity.isMatured) {
+                item.settlementStatus = "credited";
+                item.isSettlementMatured = true;
+                item.settlementMaturedAt = new Date();
+                seller.walletBalance = Math.round(((seller.walletBalance || 0) + sellerNetSettlement) * 100) / 100;
+              } else {
+                item.settlementStatus = "pending_return_window";
+                item.isSettlementMatured = false;
+                seller.pendingSettlementBalance = Math.round(((seller.pendingSettlementBalance || 0) + sellerNetSettlement) * 100) / 100;
+              }
+
               seller.totalEarnings = Math.round(((seller.totalEarnings || 0) + realEarnings) * 100) / 100;
               await seller.save();
+
+              existingOrder.settlementDueDate = maturity.settlementDueDate;
+              existingOrder.settlementStatus = maturity.isMatured ? "credited" : "pending_return_window";
             }
           }
         }
@@ -2626,7 +2788,11 @@ export const downloadCreditNote = async (req, res) => {
 
     const filterSellerId = req.query.sellerId || req.headers["x-seller-id"] || null;
     const { generateCreditNotePDF } = await import("../services/invoiceService.js");
-    const filename = `CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
+    const isExchangeOrder = String(enrichedOrder.returnRequest?.type || enrichedOrder.returnRequest?.requestType || '').toLowerCase() === 'exchange' ||
+      String(enrichedOrder.overallStatus || enrichedOrder.status || '').toLowerCase().includes('exchange');
+    const filename = isExchangeOrder
+      ? `ExchangeInvoice_${enrichedOrder.orderId || enrichedOrder._id}.pdf`
+      : `CreditNote_${enrichedOrder.orderId || enrichedOrder._id}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -2929,14 +3095,36 @@ export const requestReturnExchange = async (req, res) => {
       return res.status(400).json({ message: "This product is marked as non-exchangeable." });
     }
 
+    const candTargetStr = [
+      targetItem?.category,
+      prod?.category,
+      targetItem?.subCategory,
+      prod?.subCategory,
+      targetItem?.name,
+      prod?.name,
+      targetItem?.unit,
+      prod?.unit
+    ].filter(Boolean).join(' ').toLowerCase();
+
     const isUnstitched = Boolean(
       targetItem?.isMeterBased ||
       prod?.isMeterBased ||
       targetItem?.unit === 'meter' ||
+      targetItem?.unit === 'm' ||
+      targetItem?.unit === 'mtr' ||
       prod?.unit === 'meter' ||
-      String(targetItem?.category || prod?.category || '').toLowerCase().includes('unstitched') ||
-      String(targetItem?.subCategory || prod?.subCategory || '').toLowerCase().includes('unstitched') ||
-      String(targetItem?.name || prod?.name || '').toLowerCase().includes('unstitched')
+      prod?.unit === 'm' ||
+      prod?.unit === 'mtr' ||
+      candTargetStr.includes('unstitched') ||
+      candTargetStr.includes('unstiched') ||
+      candTargetStr.includes('cloth') ||
+      candTargetStr.includes('fabric') ||
+      candTargetStr.includes('shirting') ||
+      candTargetStr.includes('suiting') ||
+      candTargetStr.includes('kapda') ||
+      candTargetStr.includes('than') ||
+      candTargetStr.includes('dress material') ||
+      (Number(targetItem?.quantity) % 1 !== 0)
     );
 
     // Use deliveredAt timestamp if recorded, otherwise fallback to updatedAt or current time if status is delivered
@@ -3178,21 +3366,30 @@ export const updateReturnExchangeStatus = async (req, res) => {
       title = type === "exchange" ? "Exchange Pickup Scheduled" : "Return Pickup Scheduled";
       description = description || `Pickup scheduled for ${pickupDate ? new Date(pickupDate).toLocaleDateString('en-IN') : 'upcoming business days'}.`;
 
-      const freshOtp = Math.floor(1000 + Math.random() * 9000).toString();
-      order.deliveryOtp = freshOtp;
+      const existingOtp = String(order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || "").trim();
+      const activeOtp = /^\d{4}$/.test(existingOtp) ? existingOtp : Math.floor(1000 + Math.random() * 9000).toString();
+      const now = new Date();
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24-hour live OTP validity
+
+      order.deliveryOtp = activeOtp;
       if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
-      order.selfDeliveryDetails.deliveryOtp = freshOtp;
+      order.selfDeliveryDetails.deliveryOtp = activeOtp;
+      order.selfDeliveryDetails.otpLastSentAt = now;
+      order.selfDeliveryDetails.otpExpiresAt = expiresAt;
       if (Array.isArray(order.items)) {
         order.items.forEach(it => {
-          it.deliveryOtp = freshOtp;
-          if (it.selfDeliveryDetails) it.selfDeliveryDetails.deliveryOtp = freshOtp;
+          it.deliveryOtp = activeOtp;
+          if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+          it.selfDeliveryDetails.deliveryOtp = activeOtp;
+          it.selfDeliveryDetails.otpLastSentAt = now;
+          it.selfDeliveryDetails.otpExpiresAt = expiresAt;
         });
       }
 
       const custPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone;
       const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
       if (cleanPhone && cleanPhone.length === 10) {
-        sendFast2SmsOtp(cleanPhone, freshOtp)
+        sendFast2SmsOtp(cleanPhone, activeOtp)
           .then((smsRes) => {
             if (smsRes?.success) {
               console.log(`📲 [FAST2SMS] ${type === 'exchange' ? 'Exchange' : 'Return'} Pickup OTP sent to +91 ${cleanPhone}`);
@@ -3249,6 +3446,39 @@ export const updateReturnExchangeStatus = async (req, res) => {
       if (exchangeAwb) {
         order.trackingNumber = exchangeAwb;
         order.courierName = exchangeCourier || order.courierName || "Shiprocket";
+      }
+
+      // Ensure active Exchange Delivery OTP is live with 24 hours window and dispatched via SMS
+      const existingOtp = String(order.deliveryOtp || order.selfDeliveryDetails?.deliveryOtp || "").trim();
+      const activeOtp = /^\d{4}$/.test(existingOtp) ? existingOtp : Math.floor(1000 + Math.random() * 9000).toString();
+      const now = new Date();
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24-hour live OTP validity
+
+      order.deliveryOtp = activeOtp;
+      if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
+      order.selfDeliveryDetails.deliveryOtp = activeOtp;
+      order.selfDeliveryDetails.otpLastSentAt = now;
+      order.selfDeliveryDetails.otpExpiresAt = expiresAt;
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.deliveryOtp = activeOtp;
+          if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
+          it.selfDeliveryDetails.deliveryOtp = activeOtp;
+          it.selfDeliveryDetails.otpLastSentAt = now;
+          it.selfDeliveryDetails.otpExpiresAt = expiresAt;
+        });
+      }
+
+      const custPhone = order.customer?.phone || order.shippingAddress?.phone || order.phone;
+      const cleanPhone = String(custPhone || "").replace(/\D/g, "").slice(-10);
+      if (cleanPhone && cleanPhone.length === 10) {
+        sendFast2SmsOtp(cleanPhone, activeOtp)
+          .then((smsRes) => {
+            if (smsRes?.success) {
+              console.log(`📲 [FAST2SMS] Exchange Delivery OTP sent to +91 ${cleanPhone}`);
+            }
+          })
+          .catch((smsErr) => console.warn("Exchange Delivery OTP SMS dispatch error:", smsErr.message));
       }
     } else if (rawStatus === "exchanged") {
       canonicalReturnStatus = "exchanged";

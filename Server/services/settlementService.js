@@ -1,3 +1,6 @@
+import Order from "../models/Order.js";
+import Seller from "../models/Seller.js";
+
 /**
  * BookVardi Seller Settlement Rules Engine
  * 
@@ -359,7 +362,281 @@ export function calculateSellerSettlement(grossSale, options = {}) {
   };
 }
 
+/**
+ * Determine effective return/exchange window days for an item or order.
+ * If explicitly non-returnable and non-exchangeable, return window is 0 days.
+ * Default is 7 days unless configured on item/product/order.
+ */
+export function getEffectiveReturnWindowDays(order = {}, item = {}) {
+  const isNonReturnable = (
+    item.isReturnable === false ||
+    order.isReturnable === false ||
+    String(item.returnPolicy || order.returnPolicy || '').toLowerCase().includes('non_returnable') ||
+    String(item.returnPolicy || order.returnPolicy || '').toLowerCase().includes('no_return')
+  );
+  const isNonExchangeable = (
+    item.isExchangeable === false ||
+    order.isExchangeable === false ||
+    String(item.returnPolicy || order.returnPolicy || '').toLowerCase().includes('non_exchangeable') ||
+    String(item.returnPolicy || order.returnPolicy || '').toLowerCase().includes('no_exchange')
+  );
+
+  if (isNonReturnable && isNonExchangeable) {
+    return 0;
+  }
+
+  const configuredDays = Number(
+    item.returnWindowDays ??
+    order.returnWindowDays ??
+    item.product?.returnWindowDays ??
+    7
+  );
+
+  return (!isNaN(configuredDays) && configuredDays >= 0) ? configuredDays : 7;
+}
+
+/**
+ * Calculate Settlement Maturity & Unlock Date
+ * Rule: Settlement happens strictly after (Return/Exchange Window + 1) days from delivery!
+ * e.g., 7 days return window -> 7 + 1 = 8 days after delivery.
+ */
+export function calculateSettlementMaturity({ order = {}, item = {}, deliveredAt = null, now = new Date() }) {
+  const currentNow = now instanceof Date ? now : new Date(now);
+  const overallStatus = String(order.overallStatus || order.status || item.status || '').toLowerCase().trim();
+  const isDelivered = overallStatus.includes('delivered');
+
+  if (!isDelivered) {
+    return {
+      isDelivered: false,
+      isMatured: false,
+      status: 'not_delivered',
+      label: 'Order in Transit / Not Delivered',
+      badgeClass: 'bg-gray-100 text-gray-600 border-gray-200',
+      returnWindowDays: 0,
+      holdingDays: 0,
+      settlementDueDate: null,
+      daysRemaining: null
+    };
+  }
+
+  // Active return or exchange check
+  const returnReqStatus = String(order.returnRequest?.status || item.returnRequest?.status || 'no_request').toLowerCase();
+  const hasActiveReturnRequest = Boolean(
+    order.returnRequest &&
+    !['no_request', 'rejected', 'return_rejected', 'exchange_rejected'].includes(returnReqStatus)
+  );
+
+  if (hasActiveReturnRequest) {
+    return {
+      isDelivered: true,
+      isMatured: false,
+      hasActiveReturnRequest: true,
+      status: 'on_hold',
+      label: 'On Hold (Return/Exchange in Progress)',
+      badgeClass: 'bg-rose-50 text-rose-800 border-rose-200',
+      returnWindowDays: 0,
+      holdingDays: 0,
+      settlementDueDate: null,
+      daysRemaining: null,
+      description: `Settlement frozen due to customer ${returnReqStatus.replace(/_/g, ' ')}`
+    };
+  }
+
+  // Resolve delivery date
+  let resolvedDeliveredAt = deliveredAt ||
+    order.deliveredAt ||
+    item.deliveredAt ||
+    (order.timeline && Array.isArray(order.timeline)
+      ? order.timeline.find(t => String(t.status || '').toLowerCase().includes('deliver'))?.timestamp
+      : null) ||
+    order.updatedAt ||
+    order.createdAt;
+
+  const deliveryDate = resolvedDeliveredAt ? new Date(resolvedDeliveredAt) : currentNow;
+
+  const returnWindowDays = getEffectiveReturnWindowDays(order, item);
+  const holdingDays = returnWindowDays + 1; // Return window + 1 buffer day
+  const settlementDueDate = new Date(deliveryDate.getTime() + holdingDays * 24 * 60 * 60 * 1000);
+
+  const isMatured = currentNow.getTime() >= settlementDueDate.getTime();
+  const msRemaining = Math.max(0, settlementDueDate.getTime() - currentNow.getTime());
+  const daysRemaining = Math.ceil(msRemaining / (24 * 60 * 60 * 1000));
+
+  if (isMatured) {
+    return {
+      isDelivered: true,
+      isMatured: true,
+      status: 'matured',
+      label: 'Matured & Payable',
+      badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      returnWindowDays,
+      holdingDays,
+      settlementDueDate,
+      daysRemaining: 0,
+      description: `Return period (${returnWindowDays}d + 1d) completed on ${settlementDueDate.toLocaleDateString('en-IN')}`
+    };
+  }
+
+  return {
+    isDelivered: true,
+    isMatured: false,
+    status: 'in_return_window',
+    label: `In Return Window (${daysRemaining}d left)`,
+    badgeClass: 'bg-amber-50 text-amber-900 border-amber-200',
+    returnWindowDays,
+    holdingDays,
+    settlementDueDate,
+    daysRemaining,
+    description: `Settlement unlocks on ${settlementDueDate.toLocaleDateString('en-IN')} (${returnWindowDays} days return + 1 day buffer)`
+  };
+}
+
+/**
+ * Reconcile Seller's Settlement Balances across all delivered orders
+ * - Calculates Matured Settlements (Delivered + Return Window + 1 day passed)
+ * - Calculates Pending Settlements (Orders still inside Return Window + 1 day)
+ * - Safely updates Seller document and item settlementStatus
+ */
+export async function reconcileSellerSettlementBalances(sellerId, options = {}) {
+  try {
+    if (!sellerId) return null;
+    const now = options.now instanceof Date ? options.now : new Date();
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return null;
+
+    const sellerIdStr = String(seller._id);
+    const sellerStore = String(seller.storeName || '').trim().toLowerCase();
+
+    // Query delivered orders
+    const orders = await Order.find({
+      $or: [
+        { overallStatus: { $regex: /delivered/i } },
+        { status: { $regex: /delivered/i } }
+      ]
+    });
+
+    let maturedTotal = 0;
+    let lockedTotal = 0;
+    let totalDeductionsAll = 0;
+    let grossDelivered = 0;
+
+    for (const order of orders) {
+      const items = Array.isArray(order.items) ? order.items : [];
+      let orderModified = false;
+
+      // Filter items belonging to this seller
+      const matchingItems = items.filter(it => {
+        const itSellerId = String(it.sellerId?._id || it.sellerId || '');
+        const itStore = String(it.storeName || it.sellerStoreName || '').trim().toLowerCase();
+        const orderSeller = String(order.sellerId?._id || order.sellerId || '');
+        const orderStore = String(order.storeName || order.sellerStoreName || '').trim().toLowerCase();
+        return (
+          itSellerId === sellerIdStr ||
+          (sellerStore && itStore === sellerStore) ||
+          orderSeller === sellerIdStr ||
+          (sellerStore && orderStore === sellerStore)
+        );
+      });
+
+      if (matchingItems.length === 0) continue;
+
+      for (const item of matchingItems) {
+        const itemGross = Number(item.total) || Math.round((Number(item.finalPrice || item.price || 0) * Number(item.quantity || 1)) * 100) / 100;
+        grossDelivered += itemGross;
+
+        // If item doesn't have netSettlementAmount computed, calculate it
+        if (item.netSettlementAmount === undefined || item.netSettlementAmount === null) {
+          const stl = calculateSellerSettlement(itemGross, {
+            commissionRate: item.commissionRate ?? order.commissionRate ?? seller.commissionRate ?? 10,
+            paymentMethod: order.paymentMethod,
+            deliveryMode: order.deliveryMode,
+            courierName: order.courierName,
+            isThirdParty: order.isThirdParty,
+            deliveryChargeBorneBy: order.deliveryChargeBorneBy,
+            orderTotal: order.totalAmount || order.total,
+            category: item.category,
+            name: item.name
+          });
+          item.commissionAmount = stl.commissionAmount;
+          item.gstOnCommissionAmount = stl.gstOnCommissionAmount;
+          item.tdsAmount = stl.tdsAmount;
+          item.gstTcsAmount = stl.gstTcsAmount;
+          item.totalDeliveryDeduction = stl.totalDeliveryDeduction;
+          item.totalDeductions = stl.totalDeductions;
+          item.netSettlementAmount = stl.netSettlement;
+          item.settlementRule = stl.ruleCode;
+          orderModified = true;
+        }
+
+        totalDeductionsAll += Number(item.totalDeductions || 0);
+        const itemNetSettlement = Number(item.netSettlementAmount || 0);
+
+        // Check maturity
+        const maturity = calculateSettlementMaturity({ order, item, now });
+        item.settlementDueDate = maturity.settlementDueDate;
+        item.returnWindowDays = maturity.returnWindowDays;
+
+        if (maturity.isMatured) {
+          if (item.settlementStatus !== 'credited' && item.settlementStatus !== 'settled') {
+            item.settlementStatus = 'credited';
+            item.isSettlementMatured = true;
+            item.settlementMaturedAt = item.settlementMaturedAt || now;
+            orderModified = true;
+          }
+          maturedTotal += itemNetSettlement;
+        } else if (maturity.status === 'in_return_window') {
+          if (item.settlementStatus !== 'pending_return_window') {
+            item.settlementStatus = 'pending_return_window';
+            item.isSettlementMatured = false;
+            orderModified = true;
+          }
+          lockedTotal += itemNetSettlement;
+        } else if (maturity.status === 'on_hold') {
+          if (item.settlementStatus !== 'on_hold') {
+            item.settlementStatus = 'on_hold';
+            item.isSettlementMatured = false;
+            orderModified = true;
+          }
+        }
+      }
+
+      if (orderModified) {
+        await order.save().catch(e => console.warn('Could not save order maturity updates:', e.message));
+      }
+    }
+
+    const totalWithdrawn = Number(seller.totalWithdrawn || 0);
+    const finalWalletBalance = Math.max(0, Math.round((maturedTotal - totalWithdrawn) * 100) / 100);
+    const finalPendingBalance = Math.max(0, Math.round(lockedTotal * 100) / 100);
+    const totalEarnings = Math.round((maturedTotal + lockedTotal) * 100) / 100;
+
+    seller.walletBalance = finalWalletBalance;
+    seller.pendingSettlementBalance = finalPendingBalance;
+    seller.totalEarnings = totalEarnings;
+    await seller.save().catch(e => console.warn('Could not save seller wallet balances:', e.message));
+
+    return {
+      sellerId: sellerIdStr,
+      storeName: seller.storeName,
+      walletBalance: finalWalletBalance,
+      pendingSettlementBalance: finalPendingBalance,
+      maturedTotal: Math.round(maturedTotal * 100) / 100,
+      lockedTotal: Math.round(lockedTotal * 100) / 100,
+      totalWithdrawn,
+      totalEarnings,
+      grossDelivered: Math.round(grossDelivered * 100) / 100
+    };
+  } catch (err) {
+    console.error('Error reconciling seller settlements:', err);
+    return null;
+  }
+}
+
 export default {
   SETTLEMENT_RULES,
-  calculateSellerSettlement
+  calculateSellerSettlement,
+  getEffectiveReturnWindowDays,
+  calculateSettlementMaturity,
+  reconcileSellerSettlementBalances
 };

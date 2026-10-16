@@ -36,6 +36,7 @@ router.post("/:id/return-exchange", optionalUserAuth, requestReturnExchange);
 router.patch("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
 router.put("/:id/return-exchange/status", optionalUserAuth, updateReturnExchangeStatus);
 router.put("/:id/status", optionalUserAuth, updateOrder);
+router.patch("/:id/status", optionalUserAuth, updateOrder);
 router.post("/:id/resend-rider-whatsapp", optionalUserAuth, resendAdminDeliveryBoyWhatsApp);
 router.post("/:id/resend-whatsapp", optionalUserAuth, resendAdminDeliveryBoyWhatsApp);
 router.put("/:id", authenticateToken, updateOrder);

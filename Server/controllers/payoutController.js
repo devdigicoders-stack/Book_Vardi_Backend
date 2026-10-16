@@ -2,24 +2,35 @@ import mongoose from "mongoose";
 import Payout from "../models/Payout.js";
 import Seller from "../models/Seller.js";
 import Order from "../models/Order.js";
+import { reconcileSellerSettlementBalances } from "../services/settlementService.js";
 
 // 1. Get Seller Wallet & Financial Overview
 export const getSellerWalletOverview = async (req, res) => {
   try {
     const sellerId = req.user?.id;
     const isValidId = sellerId && mongoose.Types.ObjectId.isValid(sellerId);
-    const seller = isValidId ? await Seller.findById(sellerId).select(
-      "walletBalance totalEarnings totalWithdrawn commissionPercentage commissionRate bankDetails"
-    ) : null;
-
-    if (!seller) {
+    if (!isValidId) {
       return res.json({
-        wallet: { walletBalance: 0, totalEarnings: 0, totalWithdrawn: 0, commissionPercentage: 5, commissionRate: 5, bankDetails: {} },
+        wallet: { walletBalance: 0, pendingSettlementBalance: 0, totalEarnings: 0, totalWithdrawn: 0, commissionPercentage: 5, commissionRate: 5, bankDetails: {} },
         recentPayouts: [],
         deliveredOrdersCount: 0
       });
     }
 
+    // Run dynamic reconciliation of matured vs pending return window settlements
+    await reconcileSellerSettlementBalances(sellerId);
+
+    const seller = await Seller.findById(sellerId).select(
+      "walletBalance pendingSettlementBalance totalEarnings totalWithdrawn commissionPercentage commissionRate bankDetails"
+    );
+
+    if (!seller) {
+      return res.json({
+        wallet: { walletBalance: 0, pendingSettlementBalance: 0, totalEarnings: 0, totalWithdrawn: 0, commissionPercentage: 5, commissionRate: 5, bankDetails: {} },
+        recentPayouts: [],
+        deliveredOrdersCount: 0
+      });
+    }
     // Recent Payout Requests
     const recentPayouts = await Payout.find({ sellerId }).sort({ createdAt: -1 }).limit(10);
 
@@ -27,11 +38,12 @@ export const getSellerWalletOverview = async (req, res) => {
     const deliveredOrders = await Order.find({
       "items.sellerId": sellerId,
       overallStatus: "delivered"
-    }).select("orderId items createdAt totalAmount");
+    }).select("orderId items createdAt totalAmount overallStatus");
 
     res.json({
       wallet: {
         walletBalance: seller.walletBalance || 0,
+        pendingSettlementBalance: seller.pendingSettlementBalance || 0,
         totalEarnings: seller.totalEarnings || 0,
         totalWithdrawn: seller.totalWithdrawn || 0,
         commissionPercentage: seller.commissionPercentage ?? seller.commissionRate ?? 5,
