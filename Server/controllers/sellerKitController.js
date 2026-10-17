@@ -61,6 +61,24 @@ const isValidObjectId = (id) => {
 
 const getExpandedSellerIds = async (req) => {
   try {
+    const sellerSet = new Set();
+    const idStrings = new Set();
+
+    // Fast-path: When req.seller is already resolved by authenticateSeller middleware
+    if (req.seller && req.seller._id && isValidObjectId(req.seller._id)) {
+      const strId = String(req.seller._id);
+      idStrings.add(strId);
+      sellerSet.add(new mongoose.Types.ObjectId(strId));
+      if (req.user?.id && isValidObjectId(req.user.id)) {
+        const uStr = String(req.user.id);
+        if (!idStrings.has(uStr)) {
+          idStrings.add(uStr);
+          sellerSet.add(new mongoose.Types.ObjectId(uStr));
+        }
+      }
+      return Array.from(sellerSet);
+    }
+
     const rawIds = [
       req.user?.id,
       req.seller?._id,
@@ -73,9 +91,6 @@ const getExpandedSellerIds = async (req) => {
       req.headers?.["x-seller-phone"],
       req.query?.sellerId
     ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
-
-    const sellerSet = new Set();
-    const idStrings = new Set();
 
     rawIds.forEach((id) => {
       if (isValidObjectId(id)) {
@@ -100,7 +115,7 @@ const getExpandedSellerIds = async (req) => {
     ];
 
     if (orConditions.length > 0) {
-      const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
+      const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email").lean();
       sellerDocs.forEach((doc) => {
         if (doc._id && isValidObjectId(doc._id)) {
           const strId = String(doc._id);
@@ -111,7 +126,7 @@ const getExpandedSellerIds = async (req) => {
         }
       });
 
-      const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
+      const userDocs = await User.find({ $or: orConditions }).select("_id phone email").lean();
       userDocs.forEach((doc) => {
         if (doc._id && isValidObjectId(doc._id)) {
           const strId = String(doc._id);
@@ -150,7 +165,8 @@ export const getSellerKits = async (req, res) => {
 
     const kits = await Kit.find(filter)
       .populate("items.productId", "name price images image category stock")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
     res.json(kits);
   } catch (error) {
     console.error("Get seller kits error:", error);
@@ -172,7 +188,7 @@ export const getSellerKitById = async (req, res) => {
       isDeleted: { $ne: true },
       status: { $nin: ["deleted"] },
       sellerId: { $in: validObjectIds }
-    }).populate("items.productId", "name price images image category stock");
+    }).populate("items.productId", "name price images image category stock").lean();
 
     if (!kit) {
       return res.status(404).json({ message: "Kit bundle not found or unauthorized" });

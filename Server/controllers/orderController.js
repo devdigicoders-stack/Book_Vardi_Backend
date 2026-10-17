@@ -22,6 +22,29 @@ import {
   sendFast2SmsRefundInitiated,
   sendOrderStatusSms
 } from "../services/smsService.js";
+import { saveBase64ToFile } from "./sellerAuthController.js";
+
+// Global in-memory cache for ultra-fast order retrieval
+let adminOrdersCache = null;
+let adminOrdersCacheTime = 0;
+const ORDER_CACHE_TTL_MS = 45 * 1000; // 45 seconds TTL
+
+// Metadata caches for fast order enrichment
+const sellerMetaCache = new Map();
+const productMetaCache = new Map();
+const META_CACHE_TTL_MS = 120 * 1000; // 2 minutes
+
+export const invalidateOrdersCache = () => {
+  adminOrdersCache = null;
+  adminOrdersCacheTime = 0;
+  if (global.__invalidateSellerOrdersCache) {
+    try {
+      global.__invalidateSellerOrdersCache();
+    } catch {}
+  }
+};
+global.__invalidateAdminOrdersCache = invalidateOrdersCache;
+
 
 // Helper to locate user document by ID, email, or phone
 const findUserByIdentifier = async (req) => {
@@ -457,11 +480,15 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
     const sellerIds = new Set();
     const userIds = new Set();
     const productIds = new Set();
-
+    const userMap = new Map();
     orderList.forEach(ord => {
       if (ord.userId) {
-        const uId = ord.userId._id ? ord.userId._id.toString() : ord.userId.toString();
-        if (mongoose.Types.ObjectId.isValid(uId)) userIds.add(uId);
+        if (typeof ord.userId === "object" && ord.userId._id && ord.userId.name) {
+          userMap.set(ord.userId._id.toString(), ord.userId);
+        } else {
+          const uId = ord.userId._id ? ord.userId._id.toString() : ord.userId.toString();
+          if (mongoose.Types.ObjectId.isValid(uId)) userIds.add(uId);
+        }
       }
       if (ord.sellerDetails?.sellerId) {
         const sId = ord.sellerDetails.sellerId.toString();
@@ -480,21 +507,46 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
       });
     });
 
+    const now = Date.now();
+    const sellerMap = new Map();
+    const productMap = new Map();
+
+    const neededSellerIds = [];
+    sellerIds.forEach(id => {
+      const cached = sellerMetaCache.get(id);
+      if (cached && (now - cached.timestamp < META_CACHE_TTL_MS)) {
+        sellerMap.set(id, cached.data);
+      } else {
+        neededSellerIds.push(id);
+      }
+    });
+
+    const neededProductIds = [];
+    productIds.forEach(id => {
+      const cached = productMetaCache.get(id);
+      if (cached && (now - cached.timestamp < META_CACHE_TTL_MS)) {
+        productMap.set(id, cached.data);
+      } else {
+        neededProductIds.push(id);
+      }
+    });
+
+    const unpopulatedUserIds = Array.from(userIds).filter(id => !userMap.has(id));
+
     const [sellers, users, prods] = await Promise.all([
-      sellerIds.size > 0 
-        ? Seller.find({ _id: { $in: Array.from(sellerIds) } }).lean()
+      neededSellerIds.length > 0 
+        ? Seller.find({ _id: { $in: neededSellerIds } }).lean()
         : [],
-      userIds.size > 0 
-        ? User.find({ _id: { $in: Array.from(userIds) } }).lean()
+      unpopulatedUserIds.length > 0 
+        ? User.find({ _id: { $in: unpopulatedUserIds } }).lean()
         : [],
-      productIds.size > 0 
-        ? Product.find({ _id: { $in: Array.from(productIds) } }).select("_id sellerId sellerStoreName storeName unit isMeterBased minMeter meterStep subCategory category name").lean()
+      neededProductIds.length > 0 
+        ? Product.find({ _id: { $in: neededProductIds } }).select("_id sellerId sellerStoreName storeName unit isMeterBased minMeter meterStep subCategory category name returnPolicy isReturnable isExchangeable isRefundable returnWindowDays").lean()
         : []
     ]);
 
-    const sellerMap = new Map();
     sellers.forEach(s => {
-      sellerMap.set(s._id.toString(), {
+      const formatted = {
         sellerId: s._id,
         storeName: s.storeName || s.name,
         sellerName: s.name || s.storeName,
@@ -506,16 +558,17 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
         state: s.state || "",
         pincode: s.pincode || "",
         gstNumber: s.gstNumber || ""
-      });
+      };
+      sellerMap.set(s._id.toString(), formatted);
+      sellerMetaCache.set(s._id.toString(), { data: formatted, timestamp: now });
     });
 
-    const userMap = new Map();
     users.forEach(u => userMap.set(u._id.toString(), u));
 
-    const productMap = new Map();
     const missingSellerIds = new Set();
     prods.forEach(p => {
       productMap.set(p._id.toString(), p);
+      productMetaCache.set(p._id.toString(), { data: p, timestamp: now });
       if (p.sellerId && !sellerMap.has(p.sellerId.toString())) {
         missingSellerIds.add(p.sellerId.toString());
       }
@@ -772,12 +825,18 @@ export const enrichOrdersWithSellerAndConsumer = async (orders) => {
   return isArray ? orderList : orderList[0];
 };
 
-// 1. Get all orders (Admin / General) - Paginated & Lean
+// 1. Get all orders (Admin / General) - Paginated & Lean with Ultra-Fast In-Memory Cache
 export const getOrders = async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 100));
     const skip = (page - 1) * limit;
+
+    const isDefaultFetch = page === 1 && limit >= 50;
+    const now = Date.now();
+    if (isDefaultFetch && adminOrdersCache && (now - adminOrdersCacheTime < ORDER_CACHE_TTL_MS)) {
+      return res.json(adminOrdersCache);
+    }
 
     const orders = await Order.find()
       .populate("userId", "name email phone addresses")
@@ -786,6 +845,12 @@ export const getOrders = async (req, res) => {
       .limit(limit)
       .lean();
     const enrichedOrders = await enrichOrdersWithSellerAndConsumer(orders);
+
+    if (isDefaultFetch) {
+      adminOrdersCache = enrichedOrders;
+      adminOrdersCacheTime = Date.now();
+    }
+
     res.json(enrichedOrders);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch orders", error: error.message });
@@ -1124,6 +1189,18 @@ export const createOrder = async (req, res) => {
       }
       if (typeof item.image !== "string") {
         item.image = String(item.image || "");
+      }
+      if (item.image && typeof item.image === "string" && item.image.startsWith("data:image/")) {
+        item.image = saveBase64ToFile(item.image, "products", "order_item");
+      }
+      if (Array.isArray(item.images)) {
+        item.images = item.images.map((img, idx) => {
+          const rawUrl = typeof img === "string" ? img : (img?.url || "");
+          if (rawUrl && typeof rawUrl === "string" && rawUrl.startsWith("data:image/")) {
+            return saveBase64ToFile(rawUrl, "products", `order_item_${idx}`);
+          }
+          return img;
+        });
       }
 
       // 2. Sanitize price, quantity, discount & total
@@ -1595,6 +1672,14 @@ export const createOrder = async (req, res) => {
       ? Number(calculatedTotal)
       : Math.max(0, Math.round((overallItemsSubtotal + totalShipping + computedTax - totalDiscount) * 100) / 100);
 
+    // Dynamic Delivery GST Rate (Section 8 Composite Supply: Delivery GST dynamically matches product GST)
+    const itemGstRates = orderItems.map(it => {
+      const cat = String(it.category || '').toLowerCase();
+      const isBook = cat.includes('book') || cat.includes('textbook') || String(it.name || '').toLowerCase().includes('book');
+      return Number(it.gstPercent ?? it.gstPercentage ?? it.gstRate ?? it.gst ?? (isBook ? 0 : 5));
+    }).filter(r => !isNaN(r));
+    const principalDeliveryGstRate = itemGstRates.length > 0 ? Math.max(...itemGstRates) : 5;
+
     const newOrder = new Order({
       orderId: orderIdVal,
       id: orderIdVal,
@@ -1615,6 +1700,8 @@ export const createOrder = async (req, res) => {
       taxAmount: Math.round(computedTax * 100) / 100,
       shippingCost: shippingCost !== undefined ? shippingCost : (shippingFee || totalShipping || 0),
       shippingFee: shippingFee !== undefined ? shippingFee : (shippingCost || totalShipping || 0),
+      shippingGstRate: principalDeliveryGstRate,
+      deliveryGstRate: principalDeliveryGstRate,
       discount: discount || discountAmount || totalDiscount || 0,
       discountAmount: discountAmount || discount || totalDiscount || 0,
       appliedCoupon: appliedCouponCode || "",

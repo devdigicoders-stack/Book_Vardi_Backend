@@ -7,6 +7,7 @@ import Order from "../models/Order.js";
 import PlatformSetting from "../models/PlatformSetting.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import { saveBase64ToFile } from "./sellerAuthController.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key";
 
@@ -434,18 +435,19 @@ export const getAdminProducts = async (req, res) => {
       query = query.skip((p - 1) * l).limit(l);
     }
 
-    const products = await query;
-    const totalCount = await Product.countDocuments(filter);
+    const [products, totalCount] = await Promise.all([
+      query.lean(),
+      Product.countDocuments(filter)
+    ]);
 
     const formatted = products.map((p) => {
       const seller = p.sellerId;
       const sellerName = seller?.storeName || seller?.businessName || seller?.name || "Direct Marketplace";
-      const pObj = p.toObject();
       const primaryImage = (Array.isArray(p.images) && p.images.length > 0) ? p.images[0] : (p.image || "");
       const imageList = (Array.isArray(p.images) && p.images.length > 0) ? p.images : (primaryImage ? [primaryImage] : []);
 
       return {
-        ...pObj,
+        ...p,
         id: p._id.toString(),
         _id: p._id.toString(),
         sellerName,
@@ -661,10 +663,31 @@ export const createAdminProduct = async (req, res) => {
       payload.approvalStatus = "Approved";
     }
 
+    // Convert base64 images to lightweight physical files
+    if (payload.image && typeof payload.image === "string") {
+      payload.image = saveBase64ToFile(payload.image, "products", "prod");
+    }
+    if (Array.isArray(payload.images)) {
+      payload.images = payload.images.map(img => typeof img === "string" ? saveBase64ToFile(img, "products", "prod") : img).filter(Boolean);
+    }
     if ((!payload.image || payload.image === "") && Array.isArray(payload.images) && payload.images.length > 0) {
       payload.image = payload.images[0];
     } else if (payload.image && (!payload.images || payload.images.length === 0)) {
       payload.images = [payload.image];
+    }
+
+    if (Array.isArray(payload.sizeVariants)) {
+      payload.sizeVariants = payload.sizeVariants.map(v => {
+        if (!v || typeof v !== "object") return v;
+        const vImg = v.image ? saveBase64ToFile(v.image, "products", "prod") : "";
+        let vImgs = Array.isArray(v.images) ? v.images.map(img => saveBase64ToFile(img, "products", "prod")).filter(Boolean) : [];
+        if (vImg && !vImgs.includes(vImg)) vImgs.unshift(vImg);
+        return {
+          ...v,
+          image: vImg || (vImgs[0] || ""),
+          images: vImgs
+        };
+      });
     }
 
     const product = new Product(payload);
@@ -768,8 +791,29 @@ export const updateAdminProduct = async (req, res) => {
       }
     }
 
+    // Convert base64 images to lightweight physical files
+    if (updates.image && typeof updates.image === "string") {
+      updates.image = saveBase64ToFile(updates.image, "products", "prod");
+    }
+    if (Array.isArray(updates.images)) {
+      updates.images = updates.images.map(img => typeof img === "string" ? saveBase64ToFile(img, "products", "prod") : img).filter(Boolean);
+    }
     if ((!updates.image || updates.image === "") && Array.isArray(updates.images) && updates.images.length > 0) {
       updates.image = updates.images[0];
+    }
+
+    if (Array.isArray(updates.sizeVariants)) {
+      updates.sizeVariants = updates.sizeVariants.map(v => {
+        if (!v || typeof v !== "object") return v;
+        const vImg = v.image ? saveBase64ToFile(v.image, "products", "prod") : "";
+        let vImgs = Array.isArray(v.images) ? v.images.map(img => saveBase64ToFile(img, "products", "prod")).filter(Boolean) : [];
+        if (vImg && !vImgs.includes(vImg)) vImgs.unshift(vImg);
+        return {
+          ...v,
+          image: vImg || (vImgs[0] || ""),
+          images: vImgs
+        };
+      });
     }
 
     Object.assign(product, updates);

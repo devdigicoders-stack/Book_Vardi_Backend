@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import Product from "../models/Product.js";
 import Category from "../models/Category.js";
+import Seller from "../models/Seller.js";
+import User from "../models/User.js";
 import { clearCache } from "../utils/cache.js";
 import { saveBase64ToFile } from "./sellerAuthController.js";
 
@@ -41,6 +43,30 @@ const parseBool = (val, defaultVal = true) => {
 
 // Helper function to resolve expanded seller IDs across Seller and User collections
 const getExpandedSellerIds = async (req) => {
+  const sellerSet = new Set();
+
+  // Fast-path: When req.seller is already authenticated & resolved by authenticateSeller middleware
+  if (req.seller && req.seller._id) {
+    sellerSet.add(req.seller._id);
+    sellerSet.add(String(req.seller._id));
+    if (req.seller.phone) {
+      sellerSet.add(req.seller.phone);
+      const cleanP = String(req.seller.phone).replace(/\D/g, "");
+      if (cleanP.length >= 8) {
+        const d10 = cleanP.slice(-10);
+        sellerSet.add(d10);
+        sellerSet.add(`+91${d10}`);
+        sellerSet.add(`+91 ${d10}`);
+      }
+    }
+    if (req.seller.email) sellerSet.add(req.seller.email);
+    if (req.user?.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
+      sellerSet.add(new mongoose.Types.ObjectId(req.user.id));
+      sellerSet.add(String(req.user.id));
+    }
+    return Array.from(sellerSet);
+  }
+
   const rawIds = [
     req.user?.id,
     req.seller?._id,
@@ -53,7 +79,6 @@ const getExpandedSellerIds = async (req) => {
     req.query?.sellerId
   ].filter(id => id && id !== "undefined" && id !== "null" && id !== "[object Object]");
 
-  const sellerSet = new Set();
   rawIds.forEach((id) => {
     sellerSet.add(String(id));
     if (mongoose.Types.ObjectId.isValid(id)) {
@@ -68,16 +93,13 @@ const getExpandedSellerIds = async (req) => {
     return [p, digits10, `+91${digits10}`, `+91 ${digits10}`];
   });
 
-  const Seller = (await import("../models/Seller.js")).default;
-  const User = (await import("../models/User.js")).default;
-
   const orConditions = [
     ...(validObjectIds.length > 0 ? [{ _id: { $in: validObjectIds } }] : []),
     ...(phoneVariants.length > 0 ? [{ phone: { $in: phoneVariants } }] : [])
   ];
 
   if (orConditions.length > 0) {
-    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email");
+    const sellerDocs = await Seller.find({ $or: orConditions }).select("_id phone email").lean();
     sellerDocs.forEach((doc) => {
       sellerSet.add(doc._id);
       sellerSet.add(String(doc._id));
@@ -94,7 +116,7 @@ const getExpandedSellerIds = async (req) => {
       if (doc.email) sellerSet.add(doc.email);
     });
 
-    const userDocs = await User.find({ $or: orConditions }).select("_id phone email");
+    const userDocs = await User.find({ $or: orConditions }).select("_id phone email").lean();
     userDocs.forEach((doc) => {
       sellerSet.add(doc._id);
       sellerSet.add(String(doc._id));
@@ -138,7 +160,7 @@ export const getSellerProductCategories = async (req, res) => {
     };
 
     const categories = await Product.distinct("category", filter);
-    const items = await Product.find(filter, "name price category status stock images").sort({ name: 1 });
+    const items = await Product.find(filter, "name price category status stock images").sort({ name: 1 }).lean();
 
     res.json({
       categories: categories.filter(Boolean),
@@ -197,7 +219,7 @@ export const getSellerProducts = async (req, res) => {
       filter = { $and: [{ $or: filter.$or }, { $or: searchOr }] };
     }
 
-    const products = await Product.find(filter).sort({ createdAt: -1 });
+    const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
     res.json(products);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch products", error: error.message });

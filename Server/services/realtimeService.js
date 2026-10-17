@@ -39,6 +39,17 @@ export const handleRealtimeStream = (req, res) => {
  */
 export const broadcastRealtimeEvent = (payload) => {
   if (!payload) return;
+
+  // Invalidate in-memory order caches immediately on any order event
+  if (payload.type && (payload.type.includes("ORDER") || payload.type.includes("RETURN") || payload.type.includes("EXCHANGE"))) {
+    if (global.__invalidateAdminOrdersCache) {
+      try { global.__invalidateAdminOrdersCache(); } catch {}
+    }
+    if (global.__invalidateSellerOrdersCache) {
+      try { global.__invalidateSellerOrdersCache(); } catch {}
+    }
+  }
+
   const data = {
     ...payload,
     timestamp: payload.timestamp || Date.now()

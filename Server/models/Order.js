@@ -126,7 +126,7 @@ const orderItemSchema = new mongoose.Schema({
   gstTcsRate: { type: Number, default: 0.5 },
   gstTcsAmount: { type: Number, default: 0 },
   deliveryChargeAmount: { type: Number, default: 0 },
-  gstOnDeliveryRate: { type: Number, default: 18 },
+  gstOnDeliveryRate: { type: Number, default: 5 },
   gstOnDeliveryAmount: { type: Number, default: 0 },
   totalDeliveryDeduction: { type: Number, default: 0 },
   deliveryChargeBorneBy: { type: String, default: "admin" },

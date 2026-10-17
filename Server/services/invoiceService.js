@@ -638,6 +638,11 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     if (explicitGst !== undefined && explicitGst !== null && String(explicitGst).trim() !== '' && !isNaN(Number(explicitGst))) {
       return Number(explicitGst);
     }
+    const cat = String(item?.category || item?.productId?.category || '').toLowerCase();
+    const name = String(item?.name || item?.productName || item?.productId?.name || '').toLowerCase();
+    if (cat.includes('book') || name.includes('book') || cat.includes('textbook') || name.includes('textbook')) {
+      return 0;
+    }
     return 5;
   };
 
@@ -780,11 +785,30 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   // 6. TOTALS CALCULATION & GST BREAKDOWN
   y += 8;
 
-  // Include Delivery GST into total taxable value & total tax collected for full order grand total breakdown
+  // Include Delivery GST into total taxable value & total tax collected for full order grand total breakdown (Composite Supply under Section 8 of CGST Act)
   if (shippingCost > 0) {
-    const shippingGstRate = 18;
-    const shippingTaxable = Math.round((shippingCost / (1 + shippingGstRate / 100)) * 100) / 100;
-    const shippingTax = Math.round((shippingCost - shippingTaxable) * 100) / 100;
+    // Delivery charge GST strictly matches the product's GST rate (e.g., 5% product -> 5% delivery, 0% product -> 0% delivery)
+    const defaultProductGstRate = (() => {
+      const itemRates = itemsToRender.map(it => getProductGstRate(it)).filter(r => !isNaN(r));
+      if (itemRates.length > 0) {
+        return Math.max(...itemRates);
+      }
+      if (order.shippingGstRate !== undefined && order.shippingGstRate !== null && !isNaN(Number(order.shippingGstRate))) {
+        return Number(order.shippingGstRate);
+      }
+      return 5;
+    })();
+
+    const shippingGstRate = defaultProductGstRate;
+    let shippingTaxable = 0;
+    let shippingTax = 0;
+    if (shippingGstRate > 0) {
+      shippingTaxable = Math.round((shippingCost / (1 + shippingGstRate / 100)) * 100) / 100;
+      shippingTax = Math.round((shippingCost - shippingTaxable) * 100) / 100;
+    } else {
+      shippingTaxable = shippingCost;
+      shippingTax = 0;
+    }
     totalTaxableValue += shippingTaxable;
     totalTaxAmount += shippingTax;
   }
@@ -995,6 +1019,11 @@ const getProductGstRate = (item) => {
   const explicitGst = item?.gstPercent ?? item?.gstPercentage ?? item?.gstRate ?? item?.gst ?? item?.taxRate ?? item?.productId?.gstPercent ?? item?.productId?.gstRate ?? item?.productId?.gst ?? item?.productId?.gstPercentage ?? item?.productId?.taxRate;
   if (explicitGst !== undefined && explicitGst !== null && String(explicitGst).trim() !== '' && !isNaN(Number(explicitGst))) {
     return Number(explicitGst);
+  }
+  const cat = String(item?.category || item?.productId?.category || '').toLowerCase();
+  const name = String(item?.name || item?.productName || item?.productId?.name || '').toLowerCase();
+  if (cat.includes('book') || name.includes('book') || cat.includes('textbook') || name.includes('textbook')) {
+    return 0;
   }
   return 5;
 };

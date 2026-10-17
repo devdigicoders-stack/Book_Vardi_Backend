@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import { clearCache } from "../utils/cache.js";
+import { saveBase64ToFile } from "./sellerAuthController.js";
 
 // Helper function to safely parse array inputs
 const parseArray = (input) => {
@@ -555,6 +556,19 @@ export const createProduct = async (req, res) => {
     if (payload.isExchangeable !== undefined) payload.isExchangeable = parseBool(payload.isExchangeable, true);
     if (payload.isRefundable !== undefined) payload.isRefundable = parseBool(payload.isRefundable, true);
 
+    // Convert top-level image and images from base64 if present
+    if (payload.image && typeof payload.image === "string" && payload.image.startsWith("data:")) {
+      payload.image = saveBase64ToFile(payload.image, "products", "product");
+    }
+    if (Array.isArray(payload.images) && payload.images.length > 0) {
+      payload.images = payload.images.map(img => {
+        if (typeof img === "string" && img.startsWith("data:")) {
+          return saveBase64ToFile(img, "products", "product");
+        }
+        return img;
+      });
+    }
+
     if (Array.isArray(payload.sizeVariants)) {
       payload.sizeVariants = payload.sizeVariants.filter(v => 
         v && 
@@ -682,6 +696,19 @@ export const updateProduct = async (req, res) => {
     if (updates.isReturnable !== undefined) updates.isReturnable = parseBool(updates.isReturnable, true);
     if (updates.isExchangeable !== undefined) updates.isExchangeable = parseBool(updates.isExchangeable, true);
     if (updates.isRefundable !== undefined) updates.isRefundable = parseBool(updates.isRefundable, true);
+
+    // Convert top-level image and images from base64 if present
+    if (updates.image && typeof updates.image === "string" && updates.image.startsWith("data:")) {
+      updates.image = saveBase64ToFile(updates.image, "products", "product");
+    }
+    if (Array.isArray(updates.images) && updates.images.length > 0) {
+      updates.images = updates.images.map(img => {
+        if (typeof img === "string" && img.startsWith("data:")) {
+          return saveBase64ToFile(img, "products", "product");
+        }
+        return img;
+      });
+    }
     if (updates.paymentMethodAllowed !== undefined) {
       const pMethod = updates.paymentMethodAllowed;
       updates.paymentMethodsAllowed = pMethod === "COD_Only"

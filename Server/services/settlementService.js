@@ -63,7 +63,6 @@ export const SETTLEMENT_RULES = {
     gstOnCommissionRate: 18,    // 18%
     tdsRate: 0.1,              // 0.1%
     gstTcsRate: 0.5,           // 0.5%
-    gstOnDeliveryRate: 18,     // 18% GST on delivery
     freeDeliveryThreshold: 400  // Orders > ₹400 have delivery charges absorbed by Admin
   },
   COD_SELF_DELIVERY: {
@@ -86,7 +85,6 @@ export const SETTLEMENT_RULES = {
     gstOnCommissionRate: 18,    // 18%
     tdsRate: 0.1,              // 0.1%
     gstTcsRate: 0.5,           // 0.5% (लागू कानून के अनुसार जब कूरियर पोर्टल को भुगतान करता है)
-    gstOnDeliveryRate: 18,     // 18% GST on delivery
     freeDeliveryThreshold: 400, // Orders > ₹400 have delivery charges absorbed by Admin
     isSellerCollectedCash: false // Courier remits collected cash to Portal
   }
@@ -286,7 +284,15 @@ export function calculateSellerSettlement(grossSale, options = {}) {
   const isDeliveryExemptedForSeller = isAbove400 && adminBearsDeliveryAbove400;
 
   let deliveryChargeAmount = 0;
-  let gstOnDeliveryRate = 18;
+  // Product GST rate is the default GST rate for delivery (Composite Supply under Section 8 of CGST Act)
+  // Delivery charge GST strictly matches the product's GST rate (e.g., 5% product -> 5% delivery, 0% product -> 0% delivery)
+  let gstOnDeliveryRate = (productGstRate !== undefined && productGstRate !== null && !isNaN(Number(productGstRate)))
+    ? Number(productGstRate)
+    : ((options.gstOnDeliveryRate !== undefined && !isNaN(Number(options.gstOnDeliveryRate)))
+      ? Number(options.gstOnDeliveryRate)
+      : ((options.shippingGstRate !== undefined && !isNaN(Number(options.shippingGstRate)))
+        ? Number(options.shippingGstRate)
+        : 5));
   let gstOnDeliveryAmount = 0;
   let totalDeliveryDeduction = 0;
 

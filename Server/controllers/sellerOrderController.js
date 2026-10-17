@@ -3,11 +3,21 @@ import Order, { generateProductOrderId } from "../models/Order.js";
 import Product from "../models/Product.js";
 import Seller from "../models/Seller.js";
 import User from "../models/User.js";
-import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus, STAGE_RANK } from "./orderController.js";
+import { enrichOrdersWithSellerAndConsumer, findOrderById, calculateOverallOrderStatus, STAGE_RANK, invalidateOrdersCache } from "./orderController.js";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
 import { calculateSellerSettlement } from "../services/settlementService.js";
 import { sendOrderStatusSms } from "../services/smsService.js";
+
+// Global in-memory cache for ultra-fast seller orders
+const sellerOrdersCache = new Map(); // sellerKey -> { data, timestamp }
+const sellerScopeCache = new Map(); // sellerKey -> { scope, timestamp }
+const SELLER_CACHE_TTL = 45 * 1000;
+
+export const invalidateSellerOrdersCache = () => {
+  sellerOrdersCache.clear();
+};
+global.__invalidateSellerOrdersCache = invalidateSellerOrdersCache;
 
 // Canonical Order Status Normalizer
 export const normalizeOrderStatus = (raw, contextOrder = null) => {
@@ -64,6 +74,13 @@ const resolveSellerId = (req) => {
 const getExpandedSellerScope = async (req) => {
   try {
     const primaryId = resolveSellerId(req);
+    const now = Date.now();
+    if (primaryId && sellerScopeCache.has(primaryId)) {
+      const cached = sellerScopeCache.get(primaryId);
+      if (now - cached.timestamp < 60 * 1000) {
+        return cached.scope;
+      }
+    }
     const rawIds = [
       primaryId,
       req.user?.id,
@@ -225,7 +242,11 @@ const getExpandedSellerScope = async (req) => {
 
     const filter = orderOrConditions.length > 0 ? { $or: orderOrConditions } : { _id: null };
 
-    return { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter, storeName: primaryScopeStoreName };
+    const scopeResult = { expandedSellerIds, strExpandedSellerIds, allProductKeys, productNameRegexes, filter, storeName: primaryScopeStoreName };
+    if (primaryId) {
+      sellerScopeCache.set(primaryId, { scope: scopeResult, timestamp: now });
+    }
+    return scopeResult;
   } catch (err) {
     console.error("Error in getExpandedSellerScope:", err);
     return { expandedSellerIds: [], strExpandedSellerIds: [], allProductKeys: [], productNameRegexes: [], filter: { _id: null }, storeName: "" };
@@ -541,13 +562,26 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   };
 };
 
-// 1. Get All Orders for the Logged-in Seller
+// 1. Get All Orders for the Logged-in Seller with Fast In-Memory Cache
 export const getSellerOrders = async (req, res) => {
   try {
+    const sellerId = resolveSellerId(req);
+    const now = Date.now();
+    if (sellerId && sellerOrdersCache.has(sellerId)) {
+      const entry = sellerOrdersCache.get(sellerId);
+      if (now - entry.timestamp < SELLER_CACHE_TTL) {
+        return res.json(entry.data);
+      }
+    }
+
     const scope = await getExpandedSellerScope(req);
     const orders = await Order.find(scope.filter).sort({ createdAt: -1 }).lean();
-    const formattedOrders = orders.map((o) => formatSellerSingleOrder(o, scope));
-    res.json(formattedOrders.filter(Boolean));
+    const formattedOrders = orders.map((o) => formatSellerSingleOrder(o, scope)).filter(Boolean);
+
+    if (sellerId) {
+      sellerOrdersCache.set(sellerId, { data: formattedOrders, timestamp: now });
+    }
+    res.json(formattedOrders);
   } catch (error) {
     console.error("Error fetching seller orders:", error);
     res.status(200).json([]);
@@ -811,6 +845,8 @@ export const updateSellerOrderItemStatus = async (req, res) => {
     order.markModified('items');
     await order.save();
 
+    invalidateSellerOrdersCache();
+    invalidateOrdersCache();
     try {
       broadcastRealtimeEvent({
         type: "ORDER_UPDATED",
@@ -1121,6 +1157,8 @@ export const updateSellerOrderStatus = async (req, res) => {
     const scope = await getExpandedSellerScope(req);
     const formattedResult = formatSellerSingleOrder(updatedOrder, scope) || updatedOrder;
 
+    invalidateSellerOrdersCache();
+    invalidateOrdersCache();
     try {
       broadcastRealtimeEvent({
         type: "ORDER_UPDATED",

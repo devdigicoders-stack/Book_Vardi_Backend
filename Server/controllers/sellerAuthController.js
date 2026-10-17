@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { upsertFcmToken } from "../utils/fcmHelper.js";
 
+import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { sendFast2SmsOtp } from "../services/smsService.js";
