@@ -34,10 +34,10 @@ export const getSellerWalletOverview = async (req, res) => {
     // Recent Payout Requests
     const recentPayouts = await Payout.find({ sellerId }).sort({ createdAt: -1 }).limit(10);
 
-    // Delivered Orders Earnings Breakdown
+    // Delivered & Exchanged Orders Earnings Breakdown
     const deliveredOrders = await Order.find({
       "items.sellerId": sellerId,
-      overallStatus: "delivered"
+      overallStatus: { $in: ["delivered", "Delivered", "exchanged", "Exchanged"] }
     }).select("orderId items createdAt totalAmount overallStatus");
 
     res.json({

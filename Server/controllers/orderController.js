@@ -10,7 +10,7 @@ import Cart from "../models/Cart.js";
 import mongoose from "mongoose";
 import { sendDeliveryPartnerWhatsAppDispatch } from "../services/whatsappService.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
-import { calculateSellerSettlement, calculateSettlementMaturity } from "../services/settlementService.js";
+import { calculateSellerSettlement, calculateSettlementMaturity, reconcileSellerSettlementBalances } from "../services/settlementService.js";
 import { 
   sendFast2SmsOrderConfirmation, 
   sendFast2SmsOtp,
@@ -2200,8 +2200,36 @@ export const updateOrder = async (req, res) => {
         existingOrder.paymentStatus = "refunded";
         existingOrder.refundStatus = "Refund Completed";
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "refund_completed";
+        const displayId = existingOrder.orderId || existingOrder.id || String(existingOrder._id).slice(-8).toUpperCase();
+        existingOrder.creditNoteNumber = existingOrder.creditNoteNumber || `CN-${displayId}`;
+        existingOrder.creditNoteIssuedAt = existingOrder.creditNoteIssuedAt || new Date();
+        existingOrder.settlementStatus = "refunded";
+        existingOrder.isSettlementMatured = false;
+        if (Array.isArray(existingOrder.items)) {
+          existingOrder.items.forEach(it => {
+            it.settlementStatus = "refunded";
+            it.isSettlementMatured = false;
+          });
+        }
       } else if (newStatusKey === "exchanged") {
-        if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchanged";
+        const exchangedNow = new Date();
+        existingOrder.exchangedAt = existingOrder.exchangedAt || exchangedNow;
+        if (existingOrder.returnRequest) {
+          existingOrder.returnRequest.status = "exchanged";
+          existingOrder.returnRequest.exchangedAt = existingOrder.returnRequest.exchangedAt || exchangedNow;
+        }
+        const exchangeSettlementDueDate = new Date(exchangedNow.getTime() + 1 * 24 * 60 * 60 * 1000);
+        existingOrder.settlementDueDate = exchangeSettlementDueDate;
+        existingOrder.settlementStatus = "pending_exchange_buffer";
+        existingOrder.isSettlementMatured = false;
+        if (Array.isArray(existingOrder.items)) {
+          existingOrder.items.forEach(it => {
+            it.exchangedAt = exchangedNow;
+            it.settlementDueDate = exchangeSettlementDueDate;
+            it.settlementStatus = "pending_exchange_buffer";
+            it.isSettlementMatured = false;
+          });
+        }
       } else if (newStatusKey === "exchange_dispatched") {
         if (existingOrder.returnRequest) existingOrder.returnRequest.status = "exchange_dispatched";
         const existingOtp = String(existingOrder.deliveryOtp || existingOrder.selfDeliveryDetails?.deliveryOtp || "").trim();
@@ -2450,6 +2478,16 @@ export const updateOrder = async (req, res) => {
     existingOrder.markModified("status");
     await existingOrder.save();
 
+    // Trigger instant settlement balance reconciliation for seller
+    try {
+      const primarySellerId = existingOrder.sellerId || (existingOrder.items && existingOrder.items[0]?.sellerId);
+      if (primarySellerId) {
+        reconcileSellerSettlementBalances(primarySellerId).catch(() => {});
+      }
+    } catch (reconcileErr) {
+      console.warn("Auto-reconcile on updateOrder warning:", reconcileErr.message);
+    }
+
     // Fast2SMS DLT Status Update SMS (Shipped, Out for Delivery, Delivered, Cancelled)
     try {
       if (newStatusKey && newStatusKey !== previousStatusKey) {
@@ -2550,14 +2588,25 @@ export const deleteOrder = async (req, res) => {
 export const downloadInvoice = async (req, res) => {
   try {
     const { id } = req.params;
-    const isMongoId = mongoose.Types.ObjectId.isValid(id);
-    let order = isMongoId
-      ? await Order.findById(id)
+    const cleanId = String(id || '').replace(/^#/, '').trim();
+    const isMongoId = mongoose.Types.ObjectId.isValid(cleanId) || mongoose.Types.ObjectId.isValid(id);
+    const targetMongoId = mongoose.Types.ObjectId.isValid(cleanId) ? cleanId : (mongoose.Types.ObjectId.isValid(id) ? id : null);
+    let order = targetMongoId
+      ? await Order.findById(targetMongoId)
           .populate("userId", "name email phone addresses")
           .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName")
       : null;
     if (!order) {
-      order = await Order.findOne({ $or: [{ orderId: id }, { id: id }] })
+      order = await Order.findOne({ 
+        $or: [
+          { orderId: cleanId }, 
+          { id: cleanId }, 
+          { orderId: `#${cleanId}` }, 
+          { id: `#${cleanId}` },
+          { orderId: new RegExp(`^#?${cleanId}$`, "i") },
+          { id: new RegExp(`^#?${cleanId}$`, "i") }
+        ] 
+      })
         .populate("userId", "name email phone addresses")
         .populate("items.productId", "name price images mrp sellerId sellerStoreName storeName");
     }
@@ -2737,7 +2786,7 @@ export const downloadInvoice = async (req, res) => {
         const reqUserIdStr = req.user.id ? req.user.id.toString() : "";
         const orderUserIdStr = order.userId ? (order.userId._id ? order.userId._id.toString() : order.userId.toString()) : "";
         const isOwner = Boolean(orderUserIdStr && reqUserIdStr && orderUserIdStr === reqUserIdStr);
-        const isAdmin = req.user.role === "admin";
+        const isAdmin = req.user.role === "admin" || req.user.role === "super_admin" || req.user.role === "subadmin";
         const isSeller =
           req.user.role === "seller" &&
           order.items.some(
@@ -3572,10 +3621,46 @@ export const updateReturnExchangeStatus = async (req, res) => {
       overallStatus = "exchanged";
       title = "Exchange Completed";
       description = description || `Exchange order completed and replacement delivered to customer.`;
+
+      // Auto-schedule settlement maturity strictly 1 day after exchange date
+      const exchangedNow = new Date();
+      order.exchangedAt = exchangedNow;
+      if (!order.returnRequest) order.returnRequest = {};
+      order.returnRequest.exchangedAt = exchangedNow;
+
+      const exchangeSettlementDueDate = new Date(exchangedNow.getTime() + 1 * 24 * 60 * 60 * 1000);
+      order.settlementDueDate = exchangeSettlementDueDate;
+      order.settlementStatus = "pending_exchange_buffer";
+      order.isSettlementMatured = false;
+
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.exchangedAt = exchangedNow;
+          it.settlementDueDate = exchangeSettlementDueDate;
+          it.settlementStatus = "pending_exchange_buffer";
+          it.isSettlementMatured = false;
+        });
+      }
     } else {
       canonicalReturnStatus = rawStatus;
       overallStatus = rawStatus;
       title = `Return/Exchange Status: ${normalizeOrderStatus(rawStatus, order)}`;
+    }
+
+    // Auto-recognize Credit Note for Refunded / Returned orders so manual credit note creation is never needed
+    if (rawStatus === "refund_completed" || rawStatus === "refund_processed" || rawStatus === "refunded") {
+      order.settlementStatus = "refunded";
+      order.isSettlementMatured = false;
+      const displayId = order.orderId || order.id || String(order._id).slice(-8).toUpperCase();
+      order.creditNoteNumber = order.creditNoteNumber || `CN-${displayId}`;
+      order.creditNoteIssuedAt = order.creditNoteIssuedAt || new Date();
+
+      if (Array.isArray(order.items)) {
+        order.items.forEach(it => {
+          it.settlementStatus = "refunded";
+          it.isSettlementMatured = false;
+        });
+      }
     }
 
     order.returnRequest.status = canonicalReturnStatus;
@@ -3606,6 +3691,16 @@ export const updateReturnExchangeStatus = async (req, res) => {
     });
 
     await order.save();
+
+    // Trigger instant settlement reconciliation for seller
+    try {
+      const primarySellerId = order.sellerId || (order.items && order.items[0]?.sellerId);
+      if (primarySellerId) {
+        reconcileSellerSettlementBalances(primarySellerId).catch(() => {});
+      }
+    } catch (reconcileErr) {
+      console.warn("Auto-reconcile on return/exchange status update warning:", reconcileErr.message);
+    }
 
     // Fast2SMS DLT: Refund Initiated (225926) for return/exchange refund
     try {

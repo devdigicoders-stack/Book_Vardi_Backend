@@ -403,14 +403,117 @@ export function getEffectiveReturnWindowDays(order = {}, item = {}) {
 
 /**
  * Calculate Settlement Maturity & Unlock Date
- * Rule: Settlement happens strictly after (Return/Exchange Window + 1) days from delivery!
- * e.g., 7 days return window -> 7 + 1 = 8 days after delivery.
+ * Rules:
+ * 1. Non-Return / Non-Exchange Orders:
+ *    Settlement happens strictly after (Return Window + 1) days from delivery!
+ *    e.g., 7 days return window -> 7 + 1 = 8 days after delivery.
+ * 2. Exchanged Orders:
+ *    Settlement happens strictly 1 day after the exchange date!
+ *    e.g., Exchanged on 16 Oct -> Settles on 17 Oct (1 day after exchange).
+ * 3. Return & Refund Orders:
+ *    Settlement reversed with auto-recognized statutory Credit Note under Sec 34.
  */
 export function calculateSettlementMaturity({ order = {}, item = {}, deliveredAt = null, now = new Date() }) {
   const currentNow = now instanceof Date ? now : new Date(now);
   const overallStatus = String(order.overallStatus || order.status || item.status || '').toLowerCase().trim();
-  const isDelivered = overallStatus.includes('delivered');
+  const returnReqStatus = String(order.returnRequest?.status || item.returnRequest?.status || 'no_request').toLowerCase().trim();
 
+  const isDelivered = overallStatus.includes('delivered');
+  const isExchanged = overallStatus === 'exchanged' || returnReqStatus === 'exchanged';
+  const isRefunded = ['refunded', 'refund_completed', 'refund_processed'].includes(overallStatus) || 
+                     ['refunded', 'refund_completed', 'refund_processed'].includes(returnReqStatus);
+
+  // 1. Return & Refund Completed: Settlement reversed, Credit note auto-handled
+  if (isRefunded) {
+    return {
+      isDelivered: true,
+      isMatured: false,
+      isRefunded: true,
+      status: 'refunded',
+      label: 'Refunded (Settlement Reversed)',
+      badgeClass: 'bg-rose-50 text-rose-800 border-rose-200',
+      returnWindowDays: 0,
+      holdingDays: 0,
+      settlementDueDate: null,
+      daysRemaining: null,
+      description: 'Order returned & refunded. Credit Note auto-recognized under Sec 34.'
+    };
+  }
+
+  // 2. Exchanged Orders: Settlement unlocks strictly 1 day after exchange date!
+  if (isExchanged) {
+    let resolvedExchangeDate = order.exchangedAt ||
+      item.exchangedAt ||
+      order.returnRequest?.exchangedAt ||
+      order.returnRequest?.updatedAt ||
+      (order.timeline && Array.isArray(order.timeline)
+        ? order.timeline.find(t => String(t.status || '').toLowerCase().includes('exchange'))?.timestamp
+        : null) ||
+      order.updatedAt ||
+      order.createdAt ||
+      currentNow;
+
+    const exchangeDate = resolvedExchangeDate ? new Date(resolvedExchangeDate) : currentNow;
+    // Exactly 1 day after exchange date
+    const settlementDueDate = new Date(exchangeDate.getTime() + 1 * 24 * 60 * 60 * 1000);
+    const isMatured = currentNow.getTime() >= settlementDueDate.getTime();
+    const msRemaining = Math.max(0, settlementDueDate.getTime() - currentNow.getTime());
+    const daysRemaining = Math.ceil(msRemaining / (24 * 60 * 60 * 1000));
+
+    if (isMatured) {
+      return {
+        isDelivered: true,
+        isMatured: true,
+        isExchanged: true,
+        status: 'matured',
+        label: 'Matured & Payable (Exchange Completed)',
+        badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+        returnWindowDays: 0,
+        holdingDays: 1,
+        settlementDueDate,
+        daysRemaining: 0,
+        description: `Exchange completed. Settlement unlocked 1 day after exchange on ${settlementDueDate.toLocaleDateString('en-IN')}`
+      };
+    }
+
+    return {
+      isDelivered: true,
+      isMatured: false,
+      isExchanged: true,
+      status: 'in_exchange_buffer',
+      label: `Exchange Completed (Settles in ${daysRemaining || 1}d)`,
+      badgeClass: 'bg-purple-50 text-purple-900 border-purple-200',
+      returnWindowDays: 0,
+      holdingDays: 1,
+      settlementDueDate,
+      daysRemaining: daysRemaining || 1,
+      description: `Exchange completed on ${exchangeDate.toLocaleDateString('en-IN')}. Settlement unlocks on ${settlementDueDate.toLocaleDateString('en-IN')} (1 day buffer)`
+    };
+  }
+
+  // 3. Active return or exchange in progress (pending resolution): Frozen on hold
+  const hasActiveReturnRequest = Boolean(
+    order.returnRequest &&
+    !['no_request', 'rejected', 'return_rejected', 'exchange_rejected', 'exchanged', 'refunded', 'refund_completed'].includes(returnReqStatus)
+  );
+
+  if (hasActiveReturnRequest) {
+    return {
+      isDelivered: true,
+      isMatured: false,
+      hasActiveReturnRequest: true,
+      status: 'on_hold',
+      label: 'On Hold (Return/Exchange in Progress)',
+      badgeClass: 'bg-amber-50 text-amber-900 border-amber-200',
+      returnWindowDays: 0,
+      holdingDays: 0,
+      settlementDueDate: null,
+      daysRemaining: null,
+      description: `Settlement frozen due to customer ${returnReqStatus.replace(/_/g, ' ')}`
+    };
+  }
+
+  // 4. Order In Transit / Not Delivered
   if (!isDelivered) {
     return {
       isDelivered: false,
@@ -425,30 +528,8 @@ export function calculateSettlementMaturity({ order = {}, item = {}, deliveredAt
     };
   }
 
-  // Active return or exchange check
-  const returnReqStatus = String(order.returnRequest?.status || item.returnRequest?.status || 'no_request').toLowerCase();
-  const hasActiveReturnRequest = Boolean(
-    order.returnRequest &&
-    !['no_request', 'rejected', 'return_rejected', 'exchange_rejected'].includes(returnReqStatus)
-  );
-
-  if (hasActiveReturnRequest) {
-    return {
-      isDelivered: true,
-      isMatured: false,
-      hasActiveReturnRequest: true,
-      status: 'on_hold',
-      label: 'On Hold (Return/Exchange in Progress)',
-      badgeClass: 'bg-rose-50 text-rose-800 border-rose-200',
-      returnWindowDays: 0,
-      holdingDays: 0,
-      settlementDueDate: null,
-      daysRemaining: null,
-      description: `Settlement frozen due to customer ${returnReqStatus.replace(/_/g, ' ')}`
-    };
-  }
-
-  // Resolve delivery date
+  // 5. Normal Non-Return / Non-Exchange Delivered Orders:
+  // Settlement happens strictly after (Return Window + 1) days from delivery!
   let resolvedDeliveredAt = deliveredAt ||
     order.deliveredAt ||
     item.deliveredAt ||
@@ -514,11 +595,15 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
     const sellerIdStr = String(seller._id);
     const sellerStore = String(seller.storeName || '').trim().toLowerCase();
 
-    // Query delivered orders
+    // Query delivered, exchanged, and return/exchange orders
     const orders = await Order.find({
       $or: [
         { overallStatus: { $regex: /delivered/i } },
-        { status: { $regex: /delivered/i } }
+        { status: { $regex: /delivered/i } },
+        { overallStatus: { $regex: /exchanged/i } },
+        { status: { $regex: /exchanged/i } },
+        { "returnRequest.status": { $regex: /exchanged/i } },
+        { "returnRequest.status": { $regex: /refund/i } }
       ]
     });
 
@@ -591,9 +676,10 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
             orderModified = true;
           }
           maturedTotal += itemNetSettlement;
-        } else if (maturity.status === 'in_return_window') {
-          if (item.settlementStatus !== 'pending_return_window') {
-            item.settlementStatus = 'pending_return_window';
+        } else if (maturity.status === 'in_return_window' || maturity.status === 'in_exchange_buffer') {
+          const targetStatus = maturity.status === 'in_exchange_buffer' ? 'pending_exchange_buffer' : 'pending_return_window';
+          if (item.settlementStatus !== targetStatus) {
+            item.settlementStatus = targetStatus;
             item.isSettlementMatured = false;
             orderModified = true;
           }
@@ -604,10 +690,27 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
             item.isSettlementMatured = false;
             orderModified = true;
           }
+        } else if (maturity.status === 'refunded') {
+          if (item.settlementStatus !== 'refunded') {
+            item.settlementStatus = 'refunded';
+            item.isSettlementMatured = false;
+            orderModified = true;
+          }
         }
       }
 
       if (orderModified) {
+        order.settlementDueDate = matchingItems[0]?.settlementDueDate || order.settlementDueDate;
+        order.isSettlementMatured = matchingItems.some(it => it.isSettlementMatured);
+        if (matchingItems.every(it => it.settlementStatus === 'refunded')) {
+          order.settlementStatus = 'refunded';
+          order.isSettlementMatured = false;
+          const displayId = order.orderId || order.id || String(order._id).slice(-8).toUpperCase();
+          order.creditNoteNumber = order.creditNoteNumber || `CN-${displayId}`;
+          order.creditNoteIssuedAt = order.creditNoteIssuedAt || now;
+        } else if (order.isSettlementMatured && order.settlementStatus !== 'settled') {
+          order.settlementStatus = 'settled';
+        }
         await order.save().catch(e => console.warn('Could not save order maturity updates:', e.message));
       }
     }

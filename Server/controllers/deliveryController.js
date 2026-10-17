@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import SchoolBulkOrder from "../models/SchoolBulkOrder.js";
 import { broadcastRealtimeEvent } from "../services/realtimeService.js";
-import { calculateSellerSettlement, calculateSettlementMaturity } from "../services/settlementService.js";
+import { calculateSellerSettlement, calculateSettlementMaturity, reconcileSellerSettlementBalances } from "../services/settlementService.js";
 import { sendFast2SmsOtp, sendFast2SmsOrderDelivered } from "../services/smsService.js";
 
 // Helper to locate order or bulk requisition by token or ID
@@ -694,7 +694,13 @@ export const verifyDeliveryOtp = async (req, res) => {
       order.returnRequest.updatedAt = now;
     } else if (isExchangeOrder && order.returnRequest) {
       order.returnRequest.status = "exchanged";
+      order.returnRequest.exchangedAt = now;
       order.returnRequest.updatedAt = now;
+      order.exchangedAt = now;
+      const exchangeSettlementDueDate = new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000);
+      order.settlementDueDate = exchangeSettlementDueDate;
+      order.settlementStatus = "pending_exchange_buffer";
+      order.isSettlementMatured = false;
     }
 
     if (!order.selfDeliveryDetails) order.selfDeliveryDetails = {};
@@ -707,6 +713,12 @@ export const verifyDeliveryOtp = async (req, res) => {
         if (!it.selfDeliveryDetails) it.selfDeliveryDetails = {};
         it.selfDeliveryDetails.deliveredAt = now;
         it.selfDeliveryDetails.status = isReturnOrder ? "Pickup Completed" : (isExchangeOrder ? "Exchange Completed" : "Delivered");
+        if (isExchangeOrder) {
+          it.exchangedAt = now;
+          it.settlementDueDate = order.settlementDueDate;
+          it.settlementStatus = "pending_exchange_buffer";
+          it.isSettlementMatured = false;
+        }
       });
     }
 
@@ -833,6 +845,16 @@ export const verifyDeliveryOtp = async (req, res) => {
     });
 
     await order.save();
+
+    // Trigger instant settlement balance reconciliation for seller
+    try {
+      const primarySellerId = order.sellerId || (order.items && order.items[0]?.sellerId);
+      if (primarySellerId) {
+        reconcileSellerSettlementBalances(primarySellerId).catch(() => {});
+      }
+    } catch (reconcileErr) {
+      console.warn("Auto-reconcile on delivery OTP verification warning:", reconcileErr.message);
+    }
 
     try {
       broadcastRealtimeEvent({

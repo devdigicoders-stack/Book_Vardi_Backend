@@ -134,7 +134,18 @@ const orderItemSchema = new mongoose.Schema({
   netSettlementAmount: { type: Number, default: 0 },
   settlementStatus: { 
     type: String, 
-    enum: ["pending", "pending_return_window", "in_return_window", "credited", "settled", "refunded", "on_hold"], 
+    enum: [
+      "pending", 
+      "pending_return_window", 
+      "in_return_window", 
+      "pending_exchange_buffer", 
+      "in_exchange_buffer", 
+      "credited", 
+      "settled", 
+      "matured",
+      "refunded", 
+      "on_hold"
+    ], 
     default: "pending" 
   },
   settlementRule: { type: String, default: "ONLINE_SELF_DELIVERY" },

@@ -67,34 +67,37 @@ async function runTest() {
   console.log("----------------------------------------------------------------------");
 
   await mongoose.connect(process.env.MONGODB_URI);
+  console.log("Connected to MongoDB successfully");
 
-  const sellers = await Seller.find({}).lean();
-  for (const s of sellers) {
-    if (s.walletBalance > 0 || s.pendingSettlementBalance > 0 || (s.storeName && !s.storeName.includes('Test'))) {
-      console.log(`\n🏪 Vendor: ${s.storeName || s.name}`);
-      console.log(`   • Matured / Payable Balance: ₹${s.walletBalance || 0} ${s.walletBalance > 0 ? '(Ready for Disbursal)' : '(None matured yet)'}`);
-      console.log(`   • In Return Window (Locked): ₹${s.pendingSettlementBalance || 0} ${s.pendingSettlementBalance > 0 ? '(Held until window + 1d expires)' : ''}`);
+  console.log("\n⚡ RECONCILING ALL SELLERS:");
+  const allSellers = await Seller.find({});
+  for (const s of allSellers) {
+    const rec = await reconcileSellerSettlementBalances(s._id);
+    if (rec && (rec.walletBalance > 0 || rec.pendingSettlementBalance > 0 || rec.totalEarnings > 0)) {
+      console.log(`   Vendor ${rec.storeName}: Wallet Balance (Matured): ₹${rec.walletBalance} | Locked in Buffer: ₹${rec.pendingSettlementBalance}`);
     }
   }
 
-  const deliveredOrders = await Order.find({
+  const specialOrders = await Order.find({
     $or: [
-      { overallStatus: { $regex: /delivered/i } },
-      { status: { $regex: /delivered/i } }
+      { overallStatus: { $in: ['exchanged', 'Exchanged', 'refund_completed', 'refunded', 'product_received'] } },
+      { "returnRequest.status": { $in: ['exchanged', 'refund_completed', 'refunded'] } }
     ]
   }).lean();
 
-  console.log(`\n📦 Active Delivered Orders (${deliveredOrders.length} orders in DB):`);
+  console.log(`\n🔄 Exchanged & Returned Orders in DB (${specialOrders.length} orders):`);
   const now = new Date();
-  deliveredOrders.forEach((o, i) => {
+  specialOrders.forEach((o, i) => {
     const item = o.items?.[0] || {};
-    const returnDays = getEffectiveReturnWindowDays(o, item);
     const maturity = calculateSettlementMaturity({ order: o, item, now });
-    console.log(`   ${i + 1}. Order #${o.orderId} (Store: ${o.storeName || item.storeName || 'Vendor'})`);
-    console.log(`      - Delivered: ${o.deliveredAt ? new Date(o.deliveredAt).toLocaleDateString('en-IN') : 'Recently'}`);
-    console.log(`      - Return Policy: ${returnDays} Days (+ 1 Day Buffer = ${maturity.holdingDays} Days)`);
-    console.log(`      - Unlocks On: ${maturity.settlementDueDate?.toLocaleDateString('en-IN')}`);
-    console.log(`      - Status: ${maturity.isMatured ? '✅ MATURED (Payable)' : `⏳ HELD (${maturity.daysRemaining} days left in window)`}`);
+    console.log(`   ${i + 1}. Order #${o.orderId || o.id} (Status: ${o.overallStatus || o.status})`);
+    console.log(`      - Type: ${o.returnRequest?.type || (maturity.isExchanged ? 'exchange' : 'return/refund')}`);
+    console.log(`      - Unlocks On: ${maturity.settlementDueDate ? maturity.settlementDueDate.toLocaleDateString('en-IN') : 'N/A'}`);
+    console.log(`      - Settlement Status: ${o.settlementStatus || maturity.status}`);
+    console.log(`      - Maturity: ${maturity.isMatured ? '✅ MATURED (Payable)' : (maturity.isRefunded ? '❌ REFUNDED (Reversed, Credit Note Auto-Generated)' : `⏳ IN BUFFER (${maturity.daysRemaining}d left)`)}`);
+    if (o.creditNoteNumber) {
+      console.log(`      - Statutory Credit Note: ${o.creditNoteNumber}`);
+    }
   });
 
   await mongoose.disconnect();

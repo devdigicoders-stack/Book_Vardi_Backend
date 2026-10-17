@@ -549,6 +549,10 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   // Divider Line
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, 195).lineTo(555, 195).stroke();
 
+  const cleanPaymentMethod = String(order.paymentMethod || "Online / COD")
+    .replace(/\s*\([^)]*razorpay[^)]*\)/gi, "")
+    .trim() || "Online / COD";
+
   // 3. PAYMENT & ORDER META DETAILS
   doc
     .fontSize(9)
@@ -557,7 +561,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .text(`Payment Mode: `, 40, 205, { continued: true })
     .font("Helvetica")
     .fillColor(accentColor)
-    .text(`${order.paymentMethod || "Online / COD"} (${(order.paymentStatus || "pending").toUpperCase()})`, { continued: true })
+    .text(`${cleanPaymentMethod} (${(order.paymentStatus || "pending").toUpperCase()})`, { continued: true })
     .fillColor(primaryColor)
     .font("Helvetica-Bold")
     .text(`    Order Status: `, { continued: true })
@@ -613,26 +617,25 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
       .text(`Logistics Status: ${isOut ? "Out for Delivery (Awaiting Partner Assignment)" : "Awaiting Dispatch"} | Tracking ID: Not Assigned`, 40, trackingLineY);
   }
 
-  // 4. ITEMS TABLE HEADER
+  // 4. ITEMS TABLE HEADER (Exact 7 Statutory Columns matching UI)
   const tableTop = (order.razorpayPaymentId ? 235 : 220) + trackingOffset + 6;
   
   // Table Header Background
   doc.rect(40, tableTop, 515, 20).fill("#0f172a");
 
   doc
-    .fontSize(8)
+    .fontSize(7.5)
     .font("Helvetica-Bold")
     .fillColor("#ffffff")
-    .text("#", 45, tableTop + 5, { width: 20, align: "center" })
-    .text("Item Description", 70, tableTop + 5, { width: 195, align: "left" })
-    .text("Variant & Tax", 270, tableTop + 5, { width: 80, align: "left" })
-    .text("Qty", 355, tableTop + 5, { width: 35, align: "center" })
-    .text("Unit Rate", 395, tableTop + 5, { width: 50, align: "right" })
-    .text("Total (Rs.)", 450, tableTop + 5, { width: 100, align: "right" });
+    .text("Item Details", 45, tableTop + 6, { width: 155, align: "left" })
+    .text("Sold By (Seller)", 202, tableTop + 6, { width: 85, align: "left" })
+    .text("Qty", 289, tableTop + 6, { width: 26, align: "center" })
+    .text("Unit Price", 317, tableTop + 6, { width: 45, align: "right" })
+    .text("Taxable Val", 364, tableTop + 6, { width: 50, align: "right" })
+    .text("Taxes", 416, tableTop + 6, { width: 75, align: "right" })
+    .text("Total", 493, tableTop + 6, { width: 57, align: "right" });
 
   // 5. ITEMS ROWS (itemsToRender already pre-filtered and validated above)
-
-  // Helper to determine Product-level GST Rate set by seller
   const getProductGstRate = (item) => {
     const explicitGst = item.gstPercent ?? item.gstPercentage ?? item.gstRate ?? item.gst ?? item.taxRate ?? item.productId?.gstPercent ?? item.productId?.gstRate ?? item.productId?.gst ?? item.productId?.gstPercentage ?? item.productId?.taxRate;
     if (explicitGst !== undefined && explicitGst !== null && String(explicitGst).trim() !== '' && !isNaN(Number(explicitGst))) {
@@ -676,6 +679,12 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
 
   let totalTaxableValue = 0;
   let totalTaxAmount = 0;
+
+  const sellerStateInfo = parseStateInfo(resolvedSeller, `${resolvedSeller?.state || ''} ${resolvedSeller?.city || ''} ${resolvedSeller?.address || ''}`);
+  const customerStateInfo = parseStateInfo(order.shippingAddress, `${resolvedConsumer?.street || ''} ${resolvedConsumer?.cityStatePin || ''} ${order.shippingAddress?.state || ''}`);
+  const isSameState = !sellerStateInfo.key || !customerStateInfo.key || sellerStateInfo.key === customerStateInfo.key;
+  const sellerStateStr = sellerStateInfo.name || "Uttar Pradesh";
+  const customerStateStr = customerStateInfo.name || "Uttar Pradesh";
 
   // Helper to resolve seller name per product item
   const getItemSellerName = (item) => {
@@ -744,82 +753,157 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     totalTaxableValue += itemTaxable;
     totalTaxAmount += itemTax;
 
+    const itemSgst = Math.round((itemTax / 2) * 100) / 100;
+    const itemCgst = Math.round((itemTax - itemSgst) * 100) / 100;
+
     const itemSeller = getItemSellerName(item);
-    const itemDescText = `${item.name || "Product Item"}\nSold by: ${itemSeller}`;
-    const variantDetails = [
+    const variantStr = [
       item.size ? `Size: ${item.size}` : "",
-      item.age ? `Age: ${item.age}` : "",
-      Number(item.offerDiscount || item.discount || 0) > 0 ? `Coupon: -Rs. ${Number(item.offerDiscount || item.discount).toFixed(2)}` : "",
-      `GST: ${gstRate}% (Rs. ${itemTax.toFixed(2)})`
-    ]
-      .filter(Boolean)
-      .join("\n");
+      item.category || item.productId?.category || ""
+    ].filter(Boolean).join(" • ");
 
     const displayQty = formatInvoiceQuantity(item);
-
     const rowBg = index % 2 === 1 ? "#f8fafc" : "#ffffff";
-    doc.rect(40, y - 2, 515, 34).fill(rowBg);
+    const rowHeight = 30;
+
+    doc.rect(40, y - 2, 515, rowHeight).fill(rowBg);
 
     doc
-      .fontSize(8)
-      .font("Helvetica")
-      .fillColor(primaryColor)
-      .text(`${index + 1}`, 45, y + 2, { width: 20, align: "center" })
-      .text(itemDescText, 70, y + 2, { width: 195, align: "left" })
-      .fillColor(mutedColor)
       .fontSize(7.5)
-      .text(variantDetails, 270, y + 2, { width: 80, align: "left" })
-      .fillColor(primaryColor)
-      .fontSize(8)
-      .text(displayQty, 355, y + 2, { width: 35, align: "center" })
-      .text(`Rs. ${itemUnitPrice.toFixed(2)}`, 395, y + 2, { width: 50, align: "right" })
       .font("Helvetica-Bold")
-      .text(`Rs. ${itemTotal.toFixed(2)}`, 450, y + 2, { width: 100, align: "right" });
+      .fillColor(primaryColor)
+      .text(item.name || "Product Item", 45, y + 2, { width: 155, lineBreak: false, ellipsis: true })
+      .font("Helvetica")
+      .fontSize(6.5)
+      .fillColor(mutedColor)
+      .text(variantStr || "Educational Supply", 45, y + 13, { width: 155, lineBreak: false, ellipsis: true })
+      .fontSize(7)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text(itemSeller, 202, y + 5, { width: 85, lineBreak: false, ellipsis: true })
+      .fontSize(7.5)
+      .text(displayQty, 289, y + 5, { width: 26, align: "center" })
+      .font("Helvetica")
+      .text(`Rs. ${itemUnitPrice.toFixed(2)}`, 317, y + 5, { width: 45, align: "right" })
+      .text(`Rs. ${itemTaxable.toFixed(2)}`, 364, y + 5, { width: 50, align: "right" });
 
-    y += 34;
+    if (gstRate > 0) {
+      if (isSameState) {
+        doc
+          .fontSize(6.5)
+          .fillColor(mutedColor)
+          .text(`SGST ${(gstRate / 2)}%: Rs. ${itemSgst.toFixed(2)}`, 416, y + 1, { width: 75, align: "right" })
+          .text(`CGST ${(gstRate / 2)}%: Rs. ${itemCgst.toFixed(2)}`, 416, y + 11, { width: 75, align: "right" });
+      } else {
+        doc
+          .fontSize(7)
+          .fillColor(mutedColor)
+          .text(`IGST ${gstRate}%: Rs. ${itemTax.toFixed(2)}`, 416, y + 5, { width: 75, align: "right" });
+      }
+    } else {
+      doc
+        .fontSize(6.5)
+        .fillColor(mutedColor)
+        .text("0% GST (Exempt)", 416, y + 5, { width: 75, align: "right" });
+    }
 
-    // Row separator
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text(`Rs. ${netItemPayable.toFixed(2)}`, 493, y + 5, { width: 57, align: "right" });
+
+    y += rowHeight;
     doc.strokeColor("#e2e8f0").lineWidth(0.5).moveTo(40, y - 2).lineTo(555, y - 2).stroke();
   });
 
-  // 6. TOTALS CALCULATION & GST BREAKDOWN
-  y += 8;
+  // Dedicated Delivery Charge Row in Items Table (if shippingCost > 0)
+  const defaultProductGstRate = (() => {
+    const itemRates = itemsToRender.map(it => getProductGstRate(it)).filter(r => !isNaN(r));
+    if (itemRates.length > 0) {
+      return Math.max(...itemRates);
+    }
+    if (order.shippingGstRate !== undefined && order.shippingGstRate !== null && !isNaN(Number(order.shippingGstRate))) {
+      return Number(order.shippingGstRate);
+    }
+    return 5;
+  })();
 
-  // Include Delivery GST into total taxable value & total tax collected for full order grand total breakdown (Composite Supply under Section 8 of CGST Act)
+  const shippingGstRate = defaultProductGstRate;
+  let shippingTaxable = 0;
+  let shippingTax = 0;
+  let shippingSgst = 0;
+  let shippingCgst = 0;
+  let shippingIgst = 0;
+
   if (shippingCost > 0) {
-    // Delivery charge GST strictly matches the product's GST rate (e.g., 5% product -> 5% delivery, 0% product -> 0% delivery)
-    const defaultProductGstRate = (() => {
-      const itemRates = itemsToRender.map(it => getProductGstRate(it)).filter(r => !isNaN(r));
-      if (itemRates.length > 0) {
-        return Math.max(...itemRates);
-      }
-      if (order.shippingGstRate !== undefined && order.shippingGstRate !== null && !isNaN(Number(order.shippingGstRate))) {
-        return Number(order.shippingGstRate);
-      }
-      return 5;
-    })();
-
-    const shippingGstRate = defaultProductGstRate;
-    let shippingTaxable = 0;
-    let shippingTax = 0;
     if (shippingGstRate > 0) {
       shippingTaxable = Math.round((shippingCost / (1 + shippingGstRate / 100)) * 100) / 100;
       shippingTax = Math.round((shippingCost - shippingTaxable) * 100) / 100;
+      shippingSgst = Math.round((shippingTax / 2) * 100) / 100;
+      shippingCgst = Math.round((shippingTax - shippingSgst) * 100) / 100;
+      shippingIgst = shippingTax;
     } else {
       shippingTaxable = shippingCost;
       shippingTax = 0;
     }
     totalTaxableValue += shippingTaxable;
     totalTaxAmount += shippingTax;
+
+    const rowBg = itemsToRender.length % 2 === 1 ? "#f8fafc" : "#ffffff";
+    const rowHeight = 30;
+    doc.rect(40, y - 2, 515, rowHeight).fill(rowBg);
+
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text("Delivery & Shipping Charges", 45, y + 2, { width: 155 })
+      .font("Helvetica")
+      .fontSize(6.5)
+      .fillColor(mutedColor)
+      .text("Logistics & Freight (SAC 9968)", 45, y + 13, { width: 155 })
+      .fontSize(7)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text(resolvedSeller.storeName, 202, y + 5, { width: 85, lineBreak: false, ellipsis: true })
+      .fontSize(7.5)
+      .text("NA", 289, y + 5, { width: 26, align: "center" })
+      .font("Helvetica")
+      .text(`Rs. ${shippingCost.toFixed(2)}`, 317, y + 5, { width: 45, align: "right" })
+      .text(`Rs. ${shippingTaxable.toFixed(2)}`, 364, y + 5, { width: 50, align: "right" });
+
+    if (shippingGstRate > 0 && shippingTax > 0) {
+      if (isSameState) {
+        doc
+          .fontSize(6.5)
+          .fillColor(mutedColor)
+          .text(`SGST ${(shippingGstRate / 2)}%: Rs. ${shippingSgst.toFixed(2)}`, 416, y + 1, { width: 75, align: "right" })
+          .text(`CGST ${(shippingGstRate / 2)}%: Rs. ${shippingCgst.toFixed(2)}`, 416, y + 11, { width: 75, align: "right" });
+      } else {
+        doc
+          .fontSize(7)
+          .fillColor(mutedColor)
+          .text(`IGST ${shippingGstRate}%: Rs. ${shippingIgst.toFixed(2)}`, 416, y + 5, { width: 75, align: "right" });
+      }
+    } else {
+      doc
+        .fontSize(6.5)
+        .fillColor(mutedColor)
+        .text("0% GST (Exempt)", 416, y + 5, { width: 75, align: "right" });
+    }
+
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor(primaryColor)
+      .text(`Rs. ${shippingCost.toFixed(2)}`, 493, y + 5, { width: 57, align: "right" });
+
+    y += rowHeight;
+    doc.strokeColor("#e2e8f0").lineWidth(0.5).moveTo(40, y - 2).lineTo(555, y - 2).stroke();
   }
 
-  const sellerStateInfo = parseStateInfo(resolvedSeller, `${resolvedSeller?.state || ''} ${resolvedSeller?.city || ''} ${resolvedSeller?.address || ''}`);
-  const customerStateInfo = parseStateInfo(order.shippingAddress, `${resolvedConsumer?.street || ''} ${resolvedConsumer?.cityStatePin || ''} ${order.shippingAddress?.state || ''}`);
-
-  const isSameState = !sellerStateInfo.key || !customerStateInfo.key || sellerStateInfo.key === customerStateInfo.key;
-  const sellerStateStr = sellerStateInfo.name || "Uttar Pradesh";
-  const customerStateStr = customerStateInfo.name || "Uttar Pradesh";
-
+  // 6. TOTALS CALCULATION
   const calculatedGrandTotal = isFilteredMultiSeller
     ? Math.max(0, Math.round((subtotal + shippingCost - discountAmount - pointsDiscount) * 100) / 100)
     : Number(order.total || order.totalAmount || (subtotal + shippingCost - discountAmount - pointsDiscount));
@@ -832,129 +916,230 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   const cgst = Math.round((totalTax / 2) * 100) / 100;
   const sgst = Math.round((totalTax - cgst) * 100) / 100;
 
-  // Tax Breakdown (Left Card)
-  const leftCardY = y;
-  const leftCardHeight = 74;
-  doc.roundedRect(40, leftCardY, 280, leftCardHeight, 4).fillAndStroke("#f8fafc", "#e2e8f0");
-  doc.rect(40, leftCardY, 280, 16).fill("#f1f5f9");
+  // Table Footer Bar (Total / Order Payable)
+  doc.rect(40, y - 2, 515, 26).fill("#f1f5f9");
+  doc.strokeColor("#cbd5e1").lineWidth(1).moveTo(40, y - 2).lineTo(555, y - 2).stroke();
+
   doc
-    .fontSize(7.5)
+    .fontSize(8)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text(isSameState ? "GST TAX BREAKDOWN (INTRA-STATE SUPPLY)" : "GST TAX BREAKDOWN (INTER-STATE SUPPLY)", 48, leftCardY + 4);
-
-  let gstY = leftCardY + 20;
-  doc.fontSize(7.5).font("Helvetica").fillColor(mutedColor);
+    .text("TOTAL / ORDER PAYABLE:", 45, y + 7, { width: 315, align: "right" })
+    .text(`Rs. ${taxableValue.toFixed(2)}`, 364, y + 7, { width: 50, align: "right" });
 
   if (totalTax > 0) {
     if (isSameState) {
       doc
-        .text(`Taxable Amount: Rs. ${taxableValue.toFixed(2)}`, 48, gstY)
-        .text(`CGST (Central 50%): Rs. ${cgst.toFixed(2)}`, 48, gstY + 11)
-        .text(`SGST (State 50%): Rs. ${sgst.toFixed(2)}`, 48, gstY + 22)
+        .fontSize(6.5)
+        .font("Helvetica")
+        .fillColor(mutedColor)
+        .text(`SGST: Rs. ${sgst.toFixed(2)}`, 416, y + 2, { width: 75, align: "right" })
+        .text(`CGST: Rs. ${cgst.toFixed(2)}`, 416, y + 10, { width: 75, align: "right" })
         .font("Helvetica-Bold")
         .fillColor(primaryColor)
-        .text(`Total GST Tax Collected: Rs. ${totalTax.toFixed(2)}`, 48, gstY + 33);
+        .text(`Tax: Rs. ${totalTax.toFixed(2)}`, 416, y + 18, { width: 75, align: "right" });
     } else {
       doc
-        .text(`Taxable Amount: Rs. ${taxableValue.toFixed(2)}`, 48, gstY)
-        .text(`IGST (Integrated 100%): Rs. ${totalTax.toFixed(2)}`, 48, gstY + 11)
-        .text(`Place of Supply: ${sellerStateStr} -> ${customerStateStr}`, 48, gstY + 22)
+        .fontSize(7.5)
         .font("Helvetica-Bold")
         .fillColor(primaryColor)
-        .text(`Total GST Tax Collected: Rs. ${totalTax.toFixed(2)}`, 48, gstY + 33);
+        .text(`IGST: Rs. ${totalTax.toFixed(2)}`, 416, y + 7, { width: 75, align: "right" });
     }
   } else {
-    doc
-      .text("Retail Consumer Invoice", 48, gstY)
-      .text("All item prices are inclusive of all applicable statutory taxes.", 48, gstY + 11)
-      .text("Zero additional statutory tax levied at checkout.", 48, gstY + 22);
+    doc.fontSize(7.5).font("Helvetica").fillColor(mutedColor).text("Rs. 0.00", 416, y + 7, { width: 75, align: "right" });
   }
 
-  // Financial Summary (Right)
-  let rightY = y;
-  const labelWidth = 145;
-  const valWidth = 65;
-  const rightLabelX = 335;
-  const rightValX = 485;
-
   doc
-    .fontSize(8)
-    .font("Helvetica")
-    .fillColor(mutedColor)
-    .text("Subtotal (GST Included):", rightLabelX, rightY, { width: labelWidth, align: "right" })
+    .fontSize(9.5)
+    .font("Helvetica-Bold")
     .fillColor(primaryColor)
+    .text(`Rs. ${calculatedGrandTotal.toFixed(2)}`, 493, y + 6, { width: 57, align: "right" });
+
+  y += 32;
+
+  // 7. STATUTORY METADATA & FINANCIAL SETTLEMENT CARDS (Side-by-Side, Zero Duplicate Pricing)
+  const isCod = String(order.paymentMethod || '').toLowerCase().includes('cod') || String(order.paymentMethod || '').toLowerCase().includes('cash');
+  const isRule3CodSelf = isCod && isSelf;
+  const isRule4CodCourier = isCod && isThirdParty;
+  const isRule2OnlineCourier = !isCod && isThirdParty;
+  const isRule1OnlineSelf = !isCod && isSelf;
+
+  const marketplaceCommissionRate = 10;
+  const marketplaceCommission = Math.round((calculatedGrandTotal * (marketplaceCommissionRate / 100)) * 100) / 100;
+  const gstOnCommission = Math.round((marketplaceCommission * 0.18) * 100) / 100;
+  const tdsAmount = Math.round((calculatedGrandTotal * 0.001) * 100) / 100;
+
+  const hasTaxableSupplies = totalTaxAmount > 0;
+  const gstTcsAmount = (isRule3CodSelf || !hasTaxableSupplies) ? 0 : Math.round(((taxableValue * 0.5) / 100) * 100) / 100;
+
+  let deliveryChargeAmount = 0;
+  let gstOnDeliveryAmount = 0;
+  let totalDeliveryDeduction = 0;
+  if (isThirdParty && calculatedGrandTotal <= 400) {
+    deliveryChargeAmount = Number(order.deliveryCharge ?? order.shippingAmount ?? order.shippingCost ?? 40);
+    gstOnDeliveryAmount = Math.round(((deliveryChargeAmount * shippingGstRate) / 100) * 100) / 100;
+    totalDeliveryDeduction = Math.round((deliveryChargeAmount + gstOnDeliveryAmount) * 100) / 100;
+  }
+
+  const statutoryDeductions = Math.round((marketplaceCommission + gstOnCommission + tdsAmount + gstTcsAmount) * 100) / 100;
+  const totalDeductions = Math.round((statutoryDeductions + totalDeliveryDeduction) * 100) / 100;
+  const sellerSettlement = isRule3CodSelf
+    ? -totalDeductions
+    : Math.max(0, Math.round((calculatedGrandTotal - totalDeductions) * 100) / 100);
+
+  const cardY = y + 4;
+  const cardHeight = 115;
+  const cardWidth = 252;
+
+  // Left Card: Marketplace Commission & Settlement
+  doc.roundedRect(40, cardY, cardWidth, cardHeight, 4).fillAndStroke("#fffbeb", "#fde68a");
+  doc.rect(40, cardY, cardWidth, 16).fill("#fef3c7");
+  doc
+    .fontSize(7.5)
     .font("Helvetica-Bold")
-    .text(`Rs. ${subtotal.toFixed(2)}`, rightValX, rightY, { width: valWidth, align: "right" });
+    .fillColor("#78350f")
+    .text("MARKETPLACE COMMISSION & SETTLEMENT", 48, cardY + 4);
 
-  if (discountAmount > 0) {
-    rightY += 12;
-    doc
-      .font("Helvetica")
-      .fillColor(mutedColor)
-      .text("Offer / Coupon:", rightLabelX, rightY, { width: labelWidth, align: "right" })
-      .fillColor("#047857")
-      .font("Helvetica-Bold")
-      .text(`-Rs. ${discountAmount.toFixed(2)}`, rightValX, rightY, { width: valWidth, align: "right" })
-      .fillColor(mutedColor);
-  }
+  let cY = cardY + 20;
+  doc.fontSize(7).font("Helvetica").fillColor("#374151");
 
-  if (pointsDiscount > 0) {
-    rightY += 12;
-    doc
-      .font("Helvetica")
-      .fillColor(mutedColor)
-      .text("Reward Points:", rightLabelX, rightY, { width: labelWidth, align: "right" })
-      .fillColor("#047857")
-      .font("Helvetica-Bold")
-      .text(`-Rs. ${pointsDiscount.toFixed(2)}`, rightValX, rightY, { width: valWidth, align: "right" })
-      .fillColor(mutedColor);
-  }
+  doc
+    .text("Order Grand Total:", 48, cY)
+    .font("Helvetica-Bold")
+    .text(`Rs. ${calculatedGrandTotal.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  cY += 11;
 
-  rightY += 12;
   doc
     .font("Helvetica")
-    .fillColor(mutedColor)
-    .text("Delivery Charges:", rightLabelX, rightY, { width: labelWidth, align: "right" })
-    .fillColor(primaryColor)
-    .font("Helvetica-Bold")
-    .text(shippingCost === 0 ? "FREE" : `Rs. ${shippingCost.toFixed(2)}`, rightValX, rightY, { width: valWidth, align: "right" });
+    .text(`Commission (${marketplaceCommissionRate}%):`, 48, cY)
+    .text(`-Rs. ${marketplaceCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  cY += 11;
 
-  // Grand Total Banner
-  const bannerY = Math.max(leftCardY + leftCardHeight + 8, rightY + 16);
-  doc.roundedRect(330, bannerY, 225, 26, 4).fillAndStroke("#e0f2fe", "#bae6fd");
   doc
-    .fontSize(10)
-    .font("Helvetica-Bold")
-    .fillColor(accentColor)
-    .text("Grand Total (Incl. Taxes):", 338, bannerY + 8, { width: 135, align: "left" })
-    .text(`Rs. ${calculatedGrandTotal.toFixed(2)}`, 475, bannerY + 8, { width: 73, align: "right" });
+    .text("GST on Commission (18%):", 48, cY)
+    .text(`-Rs. ${gstOnCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  cY += 11;
 
-  // 7. FOOTER & DECLARATION
-  const footerY = 730;
+  doc
+    .text("TDS 0.1% (Sec 194-O):", 48, cY)
+    .text(`-Rs. ${tdsAmount.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  cY += 11;
+
+  doc
+    .text("GST TCS (Sec 52):", 48, cY)
+    .text(gstTcsAmount > 0 ? `-Rs. ${gstTcsAmount.toFixed(2)}` : "Rs. 0.00 (Exempt)", 200, cY, { width: 85, align: "right" });
+  cY += 11;
+
+  if (isThirdParty) {
+    doc
+      .text("Delivery Charges (Policy):", 48, cY)
+      .text(totalDeliveryDeduction > 0 ? `-Rs. ${totalDeliveryDeduction.toFixed(2)}` : "FREE (>Rs. 400)", 200, cY, { width: 85, align: "right" });
+    cY += 11;
+  }
+
+  doc.strokeColor("#fde68a").lineWidth(0.5).moveTo(48, cY).lineTo(284, cY).stroke();
+  cY += 4;
+
+  if (isRule3CodSelf) {
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor("#b91c1c")
+      .text("Settlement (Owed to Portal):", 48, cY)
+      .text(`-Rs. ${Math.abs(sellerSettlement).toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  } else {
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor("#065f46")
+      .text("Net Payable to Seller:", 48, cY)
+      .text(`Rs. ${sellerSettlement.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+  }
+
+  // Right Card: Place of Supply & Statutory Tax Meta
+  const rightCardX = 303;
+  doc.roundedRect(rightCardX, cardY, cardWidth, cardHeight, 4).fillAndStroke("#f8fafc", "#e2e8f0");
+  doc.rect(rightCardX, cardY, cardWidth, 16).fill("#f1f5f9");
+  doc
+    .fontSize(7.5)
+    .font("Helvetica-Bold")
+    .fillColor(primaryColor)
+    .text("PLACE OF SUPPLY & STATUTORY TAX META", rightCardX + 8, cardY + 4);
+
+  let mY = cardY + 20;
+  doc.fontSize(7).font("Helvetica").fillColor("#374151");
+
+  doc
+    .text("Place of Supply:", rightCardX + 8, mY)
+    .font("Helvetica-Bold")
+    .text(isSameState ? `Intra-State (${customerStateStr})` : `Inter-State (${sellerStateStr} -> ${customerStateStr})`, rightCardX + 80, mY, { width: 160, align: "right", lineBreak: false, ellipsis: true });
+  mY += 11;
+
+  let cleanCardPayment = cleanPaymentMethod;
+  if (cleanCardPayment.toLowerCase() === 'upi / online payment' || cleanCardPayment.toLowerCase() === 'online payment') {
+    cleanCardPayment = 'UPI / Online';
+  }
+  const paymentCardText = `${cleanCardPayment} (${(order.paymentStatus || "Pending").toUpperCase()})`;
+
+  doc
+    .font("Helvetica")
+    .text("Payment Mode:", rightCardX + 8, mY)
+    .font("Helvetica-Bold")
+    .text(paymentCardText, rightCardX + 80, mY, { width: 160, align: "right", lineBreak: false, ellipsis: true });
+  mY += 11;
+
+  doc
+    .font("Helvetica")
+    .text("Reverse Charge (RCM):", rightCardX + 8, mY)
+    .font("Helvetica-Bold")
+    .text("No (Exempt B2C Supply)", rightCardX + 80, mY, { width: 160, align: "right", lineBreak: false, ellipsis: true });
+  mY += 11;
+
+  doc
+    .font("Helvetica")
+    .text("GST Supply Nature:", rightCardX + 8, mY)
+    .font("Helvetica-Bold")
+    .text(shippingGstRate > 0 ? `Composite Supply (${shippingGstRate}% GST)` : "Exempt Supply (0% GST)", rightCardX + 80, mY, { width: 160, align: "right", lineBreak: false, ellipsis: true });
+  mY += 14;
+
+  // Gross Amount in Words Box
+  doc.roundedRect(rightCardX + 6, mY, cardWidth - 12, 32, 3).fillAndStroke("#ffffff", "#e2e8f0");
+  doc
+    .fontSize(6)
+    .font("Helvetica-Bold")
+    .fillColor(mutedColor)
+    .text("GROSS ORDER AMOUNT IN WORDS", rightCardX + 10, mY + 3)
+    .fontSize(7.5)
+    .fillColor(primaryColor)
+    .text(numberToWordsINR(calculatedGrandTotal), rightCardX + 10, mY + 13, { width: cardWidth - 20, lineBreak: true });
+
+  // 8. FOOTER & DECLARATION
+  const footerY = 745;
   doc.strokeColor(borderColor).lineWidth(1).moveTo(40, footerY).lineTo(555, footerY).stroke();
 
   doc
-    .fontSize(8)
+    .fontSize(7.5)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text("Declaration & Terms:", 40, footerY + 10)
+    .text("Declaration & Statutory Terms:", 40, footerY + 8)
     .font("Helvetica")
+    .fontSize(6.5)
     .fillColor(mutedColor)
-    .text("1. This is a computer generated invoice and does not require physical signature.", 40, footerY + 22)
-    .text("2. All disputes are subject to local judicial jurisdiction.", 40, footerY + 32)
-    .text("3. Returns / exchanges are subject to the BookVardi standard 7-day school exchange policy.", 40, footerY + 42)
+    .text("1. This is a computer generated statutory tax invoice issued under Section 31 of CGST Act, 2017.", 40, footerY + 18)
+    .text("2. All item prices are inclusive of applicable taxes. Zero additional tax levied at delivery.", 40, footerY + 27)
+    .text("3. Standard BookVardi 7-Day return / exchange policy applies from delivery confirmation date.", 40, footerY + 36)
+    .fontSize(7.5)
     .font("Helvetica-Bold")
     .fillColor(accentColor)
-    .text("Authorized Signatory", 380, footerY + 10, { align: "right" })
+    .text("Authorized Signatory", 380, footerY + 8, { align: "right" })
     .fillColor(primaryColor)
-    .text(resolvedSeller.storeName, 380, footerY + 22, { align: "right" })
+    .text(resolvedSeller.storeName, 380, footerY + 18, { align: "right" })
     .font("Helvetica")
     .fillColor(mutedColor)
-    .text(`GSTIN: ${resolvedSeller.gstNumber || 'Exempt / N/A'}`, 380, footerY + 32, { align: "right" })
+    .text(`GSTIN: ${resolvedSeller.gstNumber || 'Exempt / N/A'}`, 380, footerY + 27, { align: "right" })
     .font("Helvetica-Bold")
     .fillColor(accentColor)
-    .text("Thank you for choosing BookVardi for your child's educational journey!", 40, footerY + 56, { align: "center" });
+    .text("Thank you for choosing BookVardi for your child's educational journey!", 40, footerY + 48, { align: "center" });
 
   doc.end();
   return doc;
