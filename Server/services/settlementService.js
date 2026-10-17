@@ -99,6 +99,20 @@ export const SETTLEMENT_RULES = {
 export function calculateSellerSettlement(grossSale, options = {}) {
   const gross = Math.max(0, Math.round(Number(grossSale || 0) * 100) / 100);
 
+  // Determine if order/item is cancelled or refunded
+  const isCancelled = Boolean(
+    options.isCancelled ||
+    options.isRefunded ||
+    options.settlementStatus === "refunded" ||
+    options.settlementStatus === "cancelled" ||
+    String(options.status || "").toLowerCase().includes("cancel") ||
+    String(options.status || "").toLowerCase().includes("refund") ||
+    String(options.overallStatus || "").toLowerCase().includes("cancel") ||
+    String(options.overallStatus || "").toLowerCase().includes("refund") ||
+    String(options.settlementStatus || "").toLowerCase().includes("refund") ||
+    String(options.settlementStatus || "").toLowerCase().includes("cancel")
+  );
+
   const rawPaymentMethod = String(options.paymentMethod || "UPI").toUpperCase();
   const isCod = rawPaymentMethod.includes("COD") ||
                 rawPaymentMethod.includes("CASH") ||
@@ -130,6 +144,63 @@ export function calculateSellerSettlement(grossSale, options = {}) {
     rule = SETTLEMENT_RULES.ONLINE_THIRD_PARTY_DELIVERY;
   } else {
     rule = SETTLEMENT_RULES.ONLINE_SELF_DELIVERY;
+  }
+
+  // Statutory GST & Reversal Rules:
+  // When an order is cancelled or refunded (Credit Note under Sec 34):
+  // 1. Seller pending settlement is reversed to ₹0.00
+  // 2. Section 194-O Income Tax TDS is reversed to ₹0.00
+  // 3. Section 52 GST TCS (CGST, SGST, IGST) is reversed to ₹0.00
+  // 4. Platform commission and GST on commission are waived/reversed to ₹0.00
+  // 5. Delivery charge deductions are reversed to ₹0.00
+  if (isCancelled) {
+    return {
+      ruleCode: rule.code,
+      ruleNumber: rule.ruleNumber,
+      ruleName: `${rule.name} (Cancelled / Refunded)`,
+      ruleNameHi: `${rule.nameHi} (रद्द / रिफंड - सेटलमेंट रिवर्सल)`,
+      isCod,
+      isOnline,
+      isSelfDelivery,
+      isThirdParty,
+      isSellerCollectedCash: false,
+      cashCollectedBy: isCod ? (rule.code === "COD_SELF_DELIVERY" ? "seller" : "portal") : "portal",
+      grossSale: gross,
+      productGstRate: 0,
+      isTaxFree: true,
+      baseAmount: 0,
+      taxableValue: 0,
+      commissionRate: 0,
+      commissionAmount: 0,
+      gstOnCommissionRate: 0,
+      gstOnCommissionAmount: 0,
+      tdsRate: 0,
+      tdsAmount: 0,
+      // Statutory Section 52 GST TCS Reversed
+      isIntraState: true,
+      gstTcsRate: 0,
+      gstTcsAmount: 0,
+      cgstTcsRate: 0,
+      cgstTcsAmount: 0,
+      sgstTcsRate: 0,
+      sgstTcsAmount: 0,
+      igstTcsRate: 0,
+      igstTcsAmount: 0,
+      // Delivery charges waived
+      isAbove400: gross > 400,
+      deliveryChargeBorneBy: "none",
+      deliveryChargeAmount: 0,
+      gstOnDeliveryRate: 0,
+      gstOnDeliveryAmount: 0,
+      totalDeliveryDeduction: 0,
+      // Aggregates & Final Payout
+      statutoryDeductions: 0,
+      totalDeductions: 0,
+      netSettlement: 0,
+      finalSellerSettlement: 0,
+      isCancelled: true,
+      isSettlementReversed: true
+    };
   }
 
   const isRule3CodSelf = rule.code === "COD_SELF_DELIVERY";
@@ -422,21 +493,25 @@ export function calculateSettlementMaturity({ order = {}, item = {}, deliveredAt
   const isExchanged = overallStatus === 'exchanged' || returnReqStatus === 'exchanged';
   const isRefunded = ['refunded', 'refund_completed', 'refund_processed'].includes(overallStatus) || 
                      ['refunded', 'refund_completed', 'refund_processed'].includes(returnReqStatus);
+  const isCancelled = overallStatus.includes('cancel') || returnReqStatus.includes('cancel') || Boolean(order.cancelledAt);
 
-  // 1. Return & Refund Completed: Settlement reversed, Credit note auto-handled
-  if (isRefunded) {
+  // 1. Return & Refund Completed or Order Cancelled: Settlement reversed, Credit note auto-handled
+  if (isRefunded || isCancelled) {
     return {
-      isDelivered: true,
+      isDelivered: false,
       isMatured: false,
-      isRefunded: true,
-      status: 'refunded',
-      label: 'Refunded (Settlement Reversed)',
+      isRefunded,
+      isCancelled,
+      status: isRefunded ? 'refunded' : 'cancelled',
+      label: isRefunded ? 'Refunded (Settlement Reversed)' : 'Cancelled (Settlement Reversed)',
       badgeClass: 'bg-rose-50 text-rose-800 border-rose-200',
       returnWindowDays: 0,
       holdingDays: 0,
       settlementDueDate: null,
       daysRemaining: null,
-      description: 'Order returned & refunded. Credit Note auto-recognized under Sec 34.'
+      description: isRefunded
+        ? 'Order returned & refunded. Credit Note auto-recognized under Sec 34. Settlement, Commission, TDS and TCS reversed to ₹0.00.'
+        : 'Order cancelled. Settlement, Commission, TDS and TCS reversed to ₹0.00.'
     };
   }
 
@@ -595,13 +670,18 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
     const sellerIdStr = String(seller._id);
     const sellerStore = String(seller.storeName || '').trim().toLowerCase();
 
-    // Query delivered, exchanged, and return/exchange orders
+    // Query delivered, exchanged, returned, refunded, and cancelled orders
     const orders = await Order.find({
       $or: [
         { overallStatus: { $regex: /delivered/i } },
         { status: { $regex: /delivered/i } },
         { overallStatus: { $regex: /exchanged/i } },
         { status: { $regex: /exchanged/i } },
+        { overallStatus: { $regex: /refund/i } },
+        { status: { $regex: /refund/i } },
+        { overallStatus: { $regex: /cancel/i } },
+        { status: { $regex: /cancel/i } },
+        { settlementStatus: { $regex: /refund|cancel/i } },
         { "returnRequest.status": { $regex: /exchanged/i } },
         { "returnRequest.status": { $regex: /refund/i } }
       ]
@@ -634,9 +714,50 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
 
       for (const item of matchingItems) {
         const itemGross = Number(item.total) || Math.round((Number(item.finalPrice || item.price || 0) * Number(item.quantity || 1)) * 100) / 100;
+
+        // Check maturity & cancellation/refund status
+        const maturity = calculateSettlementMaturity({ order, item, now });
+        item.settlementDueDate = maturity.settlementDueDate;
+        item.returnWindowDays = maturity.returnWindowDays;
+
+        const isItemCancelledOrRefunded = maturity.isRefunded || maturity.isCancelled || 
+          String(order.overallStatus || order.status || '').toLowerCase().includes('refund') ||
+          String(order.overallStatus || order.status || '').toLowerCase().includes('cancel') ||
+          String(item.status || '').toLowerCase().includes('refund') ||
+          String(item.status || '').toLowerCase().includes('cancel') ||
+          item.settlementStatus === 'refunded' || item.settlementStatus === 'cancelled' ||
+          order.settlementStatus === 'refunded' || order.settlementStatus === 'cancelled';
+
+        if (isItemCancelledOrRefunded) {
+          // Zero out all financial metrics (Pending Settlement = 0, TDS = 0, TCS = 0, Commission = 0)
+          item.commissionRate = 0;
+          item.commissionAmount = 0;
+          item.gstOnCommissionRate = 0;
+          item.gstOnCommissionAmount = 0;
+          item.tdsRate = 0;
+          item.tdsAmount = 0;
+          item.gstTcsRate = 0;
+          item.gstTcsAmount = 0;
+          item.cgstTcsRate = 0;
+          item.cgstTcsAmount = 0;
+          item.sgstTcsRate = 0;
+          item.sgstTcsAmount = 0;
+          item.igstTcsRate = 0;
+          item.igstTcsAmount = 0;
+          item.deliveryChargeAmount = 0;
+          item.gstOnDeliveryAmount = 0;
+          item.totalDeliveryDeduction = 0;
+          item.totalDeductions = 0;
+          item.netSettlementAmount = 0;
+          item.settlementStatus = 'refunded';
+          item.isSettlementMatured = false;
+          orderModified = true;
+          continue; // Do NOT add anything to grossDelivered, totalDeductionsAll, maturedTotal, or lockedTotal
+        }
+
         grossDelivered += itemGross;
 
-        // If item doesn't have netSettlementAmount computed, calculate it
+        // If active item doesn't have netSettlementAmount computed, calculate it
         if (item.netSettlementAmount === undefined || item.netSettlementAmount === null) {
           const stl = calculateSellerSettlement(itemGross, {
             commissionRate: item.commissionRate ?? order.commissionRate ?? seller.commissionRate ?? 10,
@@ -663,11 +784,6 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
         totalDeductionsAll += Number(item.totalDeductions || 0);
         const itemNetSettlement = Number(item.netSettlementAmount || 0);
 
-        // Check maturity
-        const maturity = calculateSettlementMaturity({ order, item, now });
-        item.settlementDueDate = maturity.settlementDueDate;
-        item.returnWindowDays = maturity.returnWindowDays;
-
         if (maturity.isMatured) {
           if (item.settlementStatus !== 'credited' && item.settlementStatus !== 'settled') {
             item.settlementStatus = 'credited';
@@ -690,21 +806,27 @@ export async function reconcileSellerSettlementBalances(sellerId, options = {}) 
             item.isSettlementMatured = false;
             orderModified = true;
           }
-        } else if (maturity.status === 'refunded') {
-          if (item.settlementStatus !== 'refunded') {
-            item.settlementStatus = 'refunded';
-            item.isSettlementMatured = false;
-            orderModified = true;
-          }
         }
       }
 
       if (orderModified) {
         order.settlementDueDate = matchingItems[0]?.settlementDueDate || order.settlementDueDate;
         order.isSettlementMatured = matchingItems.some(it => it.isSettlementMatured);
-        if (matchingItems.every(it => it.settlementStatus === 'refunded')) {
+        if (matchingItems.every(it => it.settlementStatus === 'refunded' || it.settlementStatus === 'cancelled')) {
           order.settlementStatus = 'refunded';
           order.isSettlementMatured = false;
+          order.tdsAmount = 0;
+          order.gstTcsAmount = 0;
+          order.cgstTcsAmount = 0;
+          order.sgstTcsAmount = 0;
+          order.igstTcsAmount = 0;
+          order.commissionAmount = 0;
+          order.gstOnCommissionAmount = 0;
+          order.totalDeliveryDeduction = 0;
+          order.totalDeductions = 0;
+          order.sellerPayout = 0;
+          order.sellerSettlement = 0;
+          order.netSettlementAmount = 0;
           const displayId = order.orderId || order.id || String(order._id).slice(-8).toUpperCase();
           order.creditNoteNumber = order.creditNoteNumber || `CN-${displayId}`;
           order.creditNoteIssuedAt = order.creditNoteIssuedAt || now;

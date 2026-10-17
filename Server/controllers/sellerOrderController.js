@@ -401,6 +401,14 @@ export const formatSellerSingleOrder = (o, scope = null) => {
   const ordTotalVal = Number(resolvedOrderTotal || o.totalAmount || o.total || 0);
   const sellerStateVal = scope?.state || scope?.storeDetails?.state || o.sellerDetails?.state || orderItems[0]?.sellerDetails?.state || "Uttar Pradesh";
   const customerStateVal = shippingAddressObj?.state || o.shippingAddress?.state || customerObj?.state || "Uttar Pradesh";
+  const isCancelledOrder = rawStatus.includes("cancel") || 
+                           rawStatus.includes("refund") || 
+                           String(o.refundStatus || "").toLowerCase().includes("completed") || 
+                           String(o.refundStatus || "").toLowerCase().includes("refunded") || 
+                           Boolean(o.cancelledAt) || 
+                           o.settlementStatus === "refunded" || 
+                           o.settlementStatus === "cancelled";
+
   const orderSettlement = calculateSellerSettlement(resolvedOrderTotal, {
     commissionRate: Number(o.commissionRate ?? 10),
     paymentMethod: o.paymentMethod || "UPI",
@@ -410,7 +418,9 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     sellerState: sellerStateVal,
     customerState: customerStateVal,
     deliveryCharge: o.shippingAmount || o.deliveryCharge || 40,
-    deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+    deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller')),
+    isCancelled: isCancelledOrder,
+    isRefunded: isCancelledOrder
   });
 
   return {
@@ -490,6 +500,11 @@ export const formatSellerSingleOrder = (o, scope = null) => {
     items: orderItems.map((item) => {
       const itemGross = Number(item.total || Math.max(0, (Number(item.price || 0) * Number(item.quantity || 1)) - Number(item.offerDiscount || item.discount || 0)));
       const itGstRate = Number(item.gstRate ?? item.gstPercent ?? item.gstPercentage ?? item.gst ?? (item.category?.toLowerCase()?.includes('book') ? 0 : 5));
+      const isItemCancelled = isCancelledOrder || 
+                              String(item.status || "").toLowerCase().includes("cancel") || 
+                              String(item.status || "").toLowerCase().includes("refund") || 
+                              item.settlementStatus === "refunded" || 
+                              item.settlementStatus === "cancelled";
       const itemStl = calculateSellerSettlement(itemGross, {
         commissionRate: Number(item.commissionRate ?? o.commissionRate ?? 10),
         paymentMethod: o.paymentMethod || "UPI",
@@ -502,7 +517,9 @@ export const formatSellerSingleOrder = (o, scope = null) => {
         category: item.category || "",
         name: item.name || "",
         deliveryCharge: o.shippingAmount || o.deliveryCharge || 40,
-        deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller'))
+        deliveryChargeBorneBy: o.deliveryChargeBorneBy || (ordTotalVal > 400 ? 'admin' : (Number(o.shippingAmount || 0) > 0 ? 'customer' : 'seller')),
+        isCancelled: isItemCancelled,
+        isRefunded: isItemCancelled
       });
       return {
         id: item._id || item.id,

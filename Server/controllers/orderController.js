@@ -2172,8 +2172,37 @@ export const updateOrder = async (req, res) => {
         existingOrder.overallStatus = canonicalStatus;
         existingOrder.status = canonicalStatus;
         if ((newStatusKey === 'cancelled' || newStatusKey === 'canceled') && Array.isArray(existingOrder.items)) {
+          existingOrder.settlementStatus = 'refunded';
+          existingOrder.isSettlementMatured = false;
+          existingOrder.tdsAmount = 0;
+          existingOrder.gstTcsAmount = 0;
+          existingOrder.cgstTcsAmount = 0;
+          existingOrder.sgstTcsAmount = 0;
+          existingOrder.igstTcsAmount = 0;
+          existingOrder.commissionAmount = 0;
+          existingOrder.gstOnCommissionAmount = 0;
+          existingOrder.totalDeliveryDeduction = 0;
+          existingOrder.totalDeductions = 0;
+          existingOrder.sellerPayout = 0;
+          existingOrder.sellerSettlement = 0;
+          existingOrder.netSettlementAmount = 0;
+          const displayId = existingOrder.orderId || existingOrder.id || String(existingOrder._id).slice(-8).toUpperCase();
+          existingOrder.creditNoteNumber = existingOrder.creditNoteNumber || `CN-${displayId}`;
+          existingOrder.creditNoteIssuedAt = existingOrder.creditNoteIssuedAt || new Date();
           existingOrder.items.forEach(item => {
             item.status = 'Cancelled';
+            item.settlementStatus = 'refunded';
+            item.isSettlementMatured = false;
+            item.tdsAmount = 0;
+            item.gstTcsAmount = 0;
+            item.cgstTcsAmount = 0;
+            item.sgstTcsAmount = 0;
+            item.igstTcsAmount = 0;
+            item.commissionAmount = 0;
+            item.gstOnCommissionAmount = 0;
+            item.totalDeliveryDeduction = 0;
+            item.totalDeductions = 0;
+            item.netSettlementAmount = 0;
           });
         }
       }
@@ -2205,10 +2234,32 @@ export const updateOrder = async (req, res) => {
         existingOrder.creditNoteIssuedAt = existingOrder.creditNoteIssuedAt || new Date();
         existingOrder.settlementStatus = "refunded";
         existingOrder.isSettlementMatured = false;
+        existingOrder.tdsAmount = 0;
+        existingOrder.gstTcsAmount = 0;
+        existingOrder.cgstTcsAmount = 0;
+        existingOrder.sgstTcsAmount = 0;
+        existingOrder.igstTcsAmount = 0;
+        existingOrder.commissionAmount = 0;
+        existingOrder.gstOnCommissionAmount = 0;
+        existingOrder.totalDeliveryDeduction = 0;
+        existingOrder.totalDeductions = 0;
+        existingOrder.sellerPayout = 0;
+        existingOrder.sellerSettlement = 0;
+        existingOrder.netSettlementAmount = 0;
         if (Array.isArray(existingOrder.items)) {
           existingOrder.items.forEach(it => {
             it.settlementStatus = "refunded";
             it.isSettlementMatured = false;
+            it.tdsAmount = 0;
+            it.gstTcsAmount = 0;
+            it.cgstTcsAmount = 0;
+            it.sgstTcsAmount = 0;
+            it.igstTcsAmount = 0;
+            it.commissionAmount = 0;
+            it.gstOnCommissionAmount = 0;
+            it.totalDeliveryDeduction = 0;
+            it.totalDeductions = 0;
+            it.netSettlementAmount = 0;
           });
         }
       } else if (newStatusKey === "exchanged") {
@@ -3651,6 +3702,18 @@ export const updateReturnExchangeStatus = async (req, res) => {
     if (rawStatus === "refund_completed" || rawStatus === "refund_processed" || rawStatus === "refunded") {
       order.settlementStatus = "refunded";
       order.isSettlementMatured = false;
+      order.tdsAmount = 0;
+      order.gstTcsAmount = 0;
+      order.cgstTcsAmount = 0;
+      order.sgstTcsAmount = 0;
+      order.igstTcsAmount = 0;
+      order.commissionAmount = 0;
+      order.gstOnCommissionAmount = 0;
+      order.totalDeliveryDeduction = 0;
+      order.totalDeductions = 0;
+      order.sellerPayout = 0;
+      order.sellerSettlement = 0;
+      order.netSettlementAmount = 0;
       const displayId = order.orderId || order.id || String(order._id).slice(-8).toUpperCase();
       order.creditNoteNumber = order.creditNoteNumber || `CN-${displayId}`;
       order.creditNoteIssuedAt = order.creditNoteIssuedAt || new Date();
@@ -3659,6 +3722,16 @@ export const updateReturnExchangeStatus = async (req, res) => {
         order.items.forEach(it => {
           it.settlementStatus = "refunded";
           it.isSettlementMatured = false;
+          it.tdsAmount = 0;
+          it.gstTcsAmount = 0;
+          it.cgstTcsAmount = 0;
+          it.sgstTcsAmount = 0;
+          it.igstTcsAmount = 0;
+          it.commissionAmount = 0;
+          it.gstOnCommissionAmount = 0;
+          it.totalDeliveryDeduction = 0;
+          it.totalDeductions = 0;
+          it.netSettlementAmount = 0;
         });
       }
     }

@@ -958,6 +958,10 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   y += 32;
 
   // 7. STATUTORY METADATA & FINANCIAL SETTLEMENT CARDS (Side-by-Side, Zero Duplicate Pricing)
+  const isOrderCancelled = String(order.overallStatus || order.status || '').toLowerCase().includes('cancel') || Boolean(order.cancelledAt);
+  const isOrderRefunded = String(order.overallStatus || order.status || '').toLowerCase().includes('refund') || String(order.returnRequest?.status || '').toLowerCase().includes('refund') || order.settlementStatus === 'refunded';
+  const isSettlementReversed = isOrderCancelled || isOrderRefunded;
+
   const isCod = String(order.paymentMethod || '').toLowerCase().includes('cod') || String(order.paymentMethod || '').toLowerCase().includes('cash');
   const isRule3CodSelf = isCod && isSelf;
   const isRule4CodCourier = isCod && isThirdParty;
@@ -965,27 +969,29 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   const isRule1OnlineSelf = !isCod && isSelf;
 
   const marketplaceCommissionRate = 10;
-  const marketplaceCommission = Math.round((calculatedGrandTotal * (marketplaceCommissionRate / 100)) * 100) / 100;
-  const gstOnCommission = Math.round((marketplaceCommission * 0.18) * 100) / 100;
-  const tdsAmount = Math.round((calculatedGrandTotal * 0.001) * 100) / 100;
+  const marketplaceCommission = isSettlementReversed ? 0 : Math.round((calculatedGrandTotal * (marketplaceCommissionRate / 100)) * 100) / 100;
+  const gstOnCommission = isSettlementReversed ? 0 : Math.round((marketplaceCommission * 0.18) * 100) / 100;
+  const tdsAmount = isSettlementReversed ? 0 : Math.round((calculatedGrandTotal * 0.001) * 100) / 100;
 
   const hasTaxableSupplies = totalTaxAmount > 0;
-  const gstTcsAmount = (isRule3CodSelf || !hasTaxableSupplies) ? 0 : Math.round(((taxableValue * 0.5) / 100) * 100) / 100;
+  const gstTcsAmount = (isSettlementReversed || isRule3CodSelf || !hasTaxableSupplies) ? 0 : Math.round(((taxableValue * 0.5) / 100) * 100) / 100;
 
   let deliveryChargeAmount = 0;
   let gstOnDeliveryAmount = 0;
   let totalDeliveryDeduction = 0;
-  if (isThirdParty && calculatedGrandTotal <= 400) {
+  if (!isSettlementReversed && isThirdParty && calculatedGrandTotal <= 400) {
     deliveryChargeAmount = Number(order.deliveryCharge ?? order.shippingAmount ?? order.shippingCost ?? 40);
     gstOnDeliveryAmount = Math.round(((deliveryChargeAmount * shippingGstRate) / 100) * 100) / 100;
     totalDeliveryDeduction = Math.round((deliveryChargeAmount + gstOnDeliveryAmount) * 100) / 100;
   }
 
-  const statutoryDeductions = Math.round((marketplaceCommission + gstOnCommission + tdsAmount + gstTcsAmount) * 100) / 100;
-  const totalDeductions = Math.round((statutoryDeductions + totalDeliveryDeduction) * 100) / 100;
-  const sellerSettlement = isRule3CodSelf
-    ? -totalDeductions
-    : Math.max(0, Math.round((calculatedGrandTotal - totalDeductions) * 100) / 100);
+  const statutoryDeductions = isSettlementReversed ? 0 : Math.round((marketplaceCommission + gstOnCommission + tdsAmount + gstTcsAmount) * 100) / 100;
+  const totalDeductions = isSettlementReversed ? 0 : Math.round((statutoryDeductions + totalDeliveryDeduction) * 100) / 100;
+  const sellerSettlement = isSettlementReversed
+    ? 0
+    : (isRule3CodSelf
+      ? -totalDeductions
+      : Math.max(0, Math.round((calculatedGrandTotal - totalDeductions) * 100) / 100));
 
   const cardY = y + 4;
   const cardHeight = 115;
@@ -998,7 +1004,7 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
     .fontSize(7.5)
     .font("Helvetica-Bold")
     .fillColor("#78350f")
-    .text("MARKETPLACE COMMISSION & SETTLEMENT", 48, cardY + 4);
+    .text(isSettlementReversed ? "SETTLEMENT & TAX REVERSAL (SEC 34)" : "MARKETPLACE COMMISSION & SETTLEMENT", 48, cardY + 4);
 
   let cY = cardY + 20;
   doc.fontSize(7).font("Helvetica").fillColor("#374151");
@@ -1006,41 +1012,48 @@ export const generateTaxInvoicePDF = (order, filterSellerId = null) => {
   doc
     .text("Order Grand Total:", 48, cY)
     .font("Helvetica-Bold")
-    .text(`Rs. ${calculatedGrandTotal.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+    .text(`Rs. ${calculatedGrandTotal.toFixed(2)}${isSettlementReversed ? " (Reversed)" : ""}`, 200, cY, { width: 85, align: "right" });
   cY += 11;
 
   doc
     .font("Helvetica")
     .text(`Commission (${marketplaceCommissionRate}%):`, 48, cY)
-    .text(`-Rs. ${marketplaceCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+    .text(isSettlementReversed ? "Rs. 0.00 (Waived)" : `-Rs. ${marketplaceCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
   cY += 11;
 
   doc
     .text("GST on Commission (18%):", 48, cY)
-    .text(`-Rs. ${gstOnCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+    .text(isSettlementReversed ? "Rs. 0.00 (Waived)" : `-Rs. ${gstOnCommission.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
   cY += 11;
 
   doc
     .text("TDS 0.1% (Sec 194-O):", 48, cY)
-    .text(`-Rs. ${tdsAmount.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
+    .text(isSettlementReversed ? "Rs. 0.00 (Reversed)" : `-Rs. ${tdsAmount.toFixed(2)}`, 200, cY, { width: 85, align: "right" });
   cY += 11;
 
   doc
     .text("GST TCS (Sec 52):", 48, cY)
-    .text(gstTcsAmount > 0 ? `-Rs. ${gstTcsAmount.toFixed(2)}` : "Rs. 0.00 (Exempt)", 200, cY, { width: 85, align: "right" });
+    .text(isSettlementReversed ? "Rs. 0.00 (Reversed)" : (gstTcsAmount > 0 ? `-Rs. ${gstTcsAmount.toFixed(2)}` : "Rs. 0.00 (Exempt)"), 200, cY, { width: 85, align: "right" });
   cY += 11;
 
   if (isThirdParty) {
     doc
       .text("Delivery Charges (Policy):", 48, cY)
-      .text(totalDeliveryDeduction > 0 ? `-Rs. ${totalDeliveryDeduction.toFixed(2)}` : "FREE (>Rs. 400)", 200, cY, { width: 85, align: "right" });
+      .text(isSettlementReversed ? "Rs. 0.00 (Waived)" : (totalDeliveryDeduction > 0 ? `-Rs. ${totalDeliveryDeduction.toFixed(2)}` : "FREE (>Rs. 400)"), 200, cY, { width: 85, align: "right" });
     cY += 11;
   }
 
   doc.strokeColor("#fde68a").lineWidth(0.5).moveTo(48, cY).lineTo(284, cY).stroke();
   cY += 4;
 
-  if (isRule3CodSelf) {
+  if (isSettlementReversed) {
+    doc
+      .fontSize(7.5)
+      .font("Helvetica-Bold")
+      .fillColor("#b91c1c")
+      .text("Pending Seller Settlement:", 48, cY)
+      .text("Rs. 0.00 (Reversed)", 200, cY, { width: 85, align: "right" });
+  } else if (isRule3CodSelf) {
     doc
       .fontSize(7.5)
       .font("Helvetica-Bold")
